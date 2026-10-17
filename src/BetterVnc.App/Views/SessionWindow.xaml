@@ -1,0 +1,63 @@
+<Window x:Class="BetterVnc.App.Views.SessionWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:controls="clr-namespace:BetterVnc.App.Controls"
+        Title="BetterVNC" Width="1280" Height="800" MinWidth="480" MinHeight="320"
+        WindowStartupLocation="CenterOwner" Style="{StaticResource {x:Type Window}}" Background="Black" AllowDrop="True">
+    <Grid x:Name="Root">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="*" />
+            <RowDefinition Height="Auto" />
+        </Grid.RowDefinitions>
+
+        <!-- Toolbar (becomes an auto-hiding overlay in fullscreen) -->
+        <Border x:Name="Toolbar" Grid.Row="0" Background="{StaticResource PanelBrush}" BorderBrush="{StaticResource BorderBrush}" BorderThickness="0,0,0,1" Panel.ZIndex="10">
+            <DockPanel Margin="6,3">
+                <Button DockPanel.Dock="Right" Style="{StaticResource ToolButton}" Content="Disconnect" Foreground="{StaticResource DangerBrush}" Click="OnDisconnectClick" VerticalAlignment="Top" />
+                <WrapPanel Orientation="Horizontal">
+                    <TextBlock x:Name="TitleText" VerticalAlignment="Center" Margin="6,0,12,0" FontWeight="SemiBold" />
+                    <Button x:Name="CadButton" Style="{StaticResource ToolButton}" Content="Ctrl+Alt+Del" ToolTip="Send Ctrl+Alt+Del to the remote" Click="OnCtrlAltDel" />
+                    <Button x:Name="ScreenshotButton" Style="{StaticResource ToolButton}" Content="Screenshot" ToolTip="Copy the remote screen to the clipboard (Shift+click saves to a PNG file)" Click="OnScreenshot" />
+                    <Button x:Name="SendFilesButton" Style="{StaticResource ToolButton}" Content="Files…" ToolTip="Send files to the remote: onto its clipboard through the guest agent, or into the drop folder over SFTP/SMB (or just drag files onto the window)" Click="OnSendFiles" />
+                    <Button x:Name="PasteButton" Style="{StaticResource ToolButton}" Content="Paste" ToolTip="Send the local clipboard to the remote: text via VNC, images and files via the guest agent or the file channel" Click="OnPasteToRemote" />
+                    <Separator Width="1" Height="18" Margin="6,0" />
+                    <ToggleButton x:Name="FitToggle" Content="Fit" ToolTip="Scale the remote screen to fit the window" Checked="OnFitChanged" Unchecked="OnFitChanged" />
+                    <ToggleButton x:Name="ClipboardToggle" Content="Clipboard" ToolTip="Synchronise text clipboard in both directions" />
+                    <ToggleButton x:Name="AudioToggle" Content="Audio" ToolTip="Play the VM's audio (QEMU VNC audio extension)" Checked="OnAudioToggled" Unchecked="OnAudioToggled" />
+                    <ToggleButton x:Name="GrabToggle" Content="Win keys" ToolTip="Send Windows key, Alt+Tab, Alt+F4 to the remote instead of the local desktop" />
+                    <ToggleButton x:Name="FullscreenToggle" Content="Fullscreen" ToolTip="Toggle fullscreen (F11, or Ctrl+Shift+F11 while the viewer has focus)" Checked="OnFullscreenToggled" Unchecked="OnFullscreenToggled" />
+                </WrapPanel>
+            </DockPanel>
+        </Border>
+
+        <!-- Viewer -->
+        <ScrollViewer x:Name="Scroller" Grid.Row="1" HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Auto" Background="Black" Focusable="False" PanningMode="None">
+            <controls:VncView x:Name="View" />
+        </ScrollViewer>
+
+        <!-- Overlay for connecting / disconnected states -->
+        <Border x:Name="Overlay" Grid.Row="1" Background="#CC14161A" Visibility="Collapsed" Panel.ZIndex="5">
+            <StackPanel VerticalAlignment="Center" HorizontalAlignment="Center" MaxWidth="520">
+                <TextBlock x:Name="OverlayTitle" Style="{StaticResource Heading}" HorizontalAlignment="Center" Text="Connecting…" />
+                <TextBlock x:Name="OverlayDetail" Style="{StaticResource Muted}" TextWrapping="Wrap" HorizontalAlignment="Center" TextAlignment="Center" Margin="0,8,0,16" />
+                <StackPanel Orientation="Horizontal" HorizontalAlignment="Center">
+                    <Button x:Name="ReconnectButton" Style="{StaticResource PrimaryButton}" Content="Reconnect" Visibility="Collapsed" Click="OnReconnect" Margin="0,0,8,0" />
+                    <Button x:Name="CloseButton" Content="Close" Visibility="Collapsed" Click="OnCloseClick" />
+                </StackPanel>
+            </StackPanel>
+        </Border>
+
+        <!-- Status bar -->
+        <Border x:Name="StatusBar" Grid.Row="2" Background="{StaticResource PanelBrush}" BorderBrush="{StaticResource BorderBrush}" BorderThickness="0,1,0,0">
+            <Grid Margin="10,3">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="*" />
+                    <ColumnDefinition Width="Auto" />
+                </Grid.ColumnDefinitions>
+                <TextBlock x:Name="StatusLeft" Style="{StaticResource Muted}" TextTrimming="CharacterEllipsis" Margin="0,0,12,0" />
+                <TextBlock x:Name="StatusRight" Grid.Column="1" Style="{StaticResource Muted}" />
+            </Grid>
+        </Border>
+    </Grid>
+</Window>

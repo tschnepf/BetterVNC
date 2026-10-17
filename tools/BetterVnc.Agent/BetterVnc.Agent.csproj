@@ -1,0 +1,67 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    The BetterVNC guest agent: runs inside the VM or on the Mac and gives the viewer a rich clipboard
+    (images, files, HTML) that RFB cannot carry.
+
+    Two target frameworks: net10.0-windows (Windows Forms clipboard, SendInput scrolling) for the Windows build,
+    plain net10.0 (xclip / wl-clipboard / pbcopy, pbpaste, osascript; CoreGraphics or xdotool scrolling) for Linux and macOS.
+
+    Publish (single file, self-contained):
+      dotnet publish tools/BetterVnc.Agent -c Release -f net10.0-windows -r win-x64   -o publish/agent-win-x64
+      dotnet publish tools/BetterVnc.Agent -c Release -f net10.0         -r linux-x64 -o publish/agent-linux-x64
+      dotnet publish tools/BetterVnc.Agent -c Release -f net10.0         -r osx-arm64 -o publish/agent-osx-arm64
+  -->
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFrameworks>net10.0;net10.0-windows</TargetFrameworks>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <LangVersion>latest</LangVersion>
+    <RootNamespace>BetterVnc.Agent</RootNamespace>
+    <AssemblyName>bettervnc-agent</AssemblyName>
+    <Version>0.2.0</Version>
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <SatelliteResourceLanguages>en</SatelliteResourceLanguages>
+    <RollForward>Major</RollForward>
+    <SelfContained>true</SelfContained>
+    <PublishSingleFile>true</PublishSingleFile>
+    <IncludeNativeLibrariesForSelfExtract>true</IncludeNativeLibrariesForSelfExtract>
+    <EnableCompressionInSingleFile>true</EnableCompressionInSingleFile>
+    <DebugType>embedded</DebugType>
+  </PropertyGroup>
+
+  <!-- Building (not publishing) should not need a runtime identifier. -->
+  <PropertyGroup Condition="'$(RuntimeIdentifier)' == ''">
+    <SelfContained>false</SelfContained>
+  </PropertyGroup>
+
+  <PropertyGroup>
+    <!-- Function pointers for the Objective-C runtime bridge of the macOS menu bar item. -->
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+  </PropertyGroup>
+
+  <PropertyGroup Condition="'$(TargetFramework)' == 'net10.0-windows'">
+    <UseWindowsForms>true</UseWindowsForms>
+  </PropertyGroup>
+
+  <ItemGroup Condition="'$(TargetFramework)' == 'net10.0-windows'">
+    <!-- Tray and dialog icon, shared with the viewer. -->
+    <EmbeddedResource Include="..\..\src\BetterVnc.App\Assets\BetterVNC.ico" Link="Assets\BetterVNC.ico" LogicalName="BetterVNC.ico" />
+  </ItemGroup>
+
+  <ItemGroup Condition="'$(TargetFramework)' != 'net10.0-windows'">
+    <Compile Remove="Clipboards\WindowsClipboard.cs" />
+    <Compile Remove="Input\WindowsInput.cs" />
+    <Compile Remove="Pairing\WindowsApprover.cs" />
+    <Compile Remove="Tray\TrayApp.cs" />
+    <Compile Remove="Tray\SettingsForm.cs" />
+    <Compile Remove="Tray\TrayIcon.cs" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\BetterVnc.Agent.Protocol\BetterVnc.Agent.Protocol.csproj" />
+  </ItemGroup>
+
+</Project>

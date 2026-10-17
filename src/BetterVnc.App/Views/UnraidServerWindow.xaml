@@ -1,0 +1,77 @@
+<Window x:Class="BetterVnc.App.Views.UnraidServerWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="Unraid server" Width="720" Height="620" MinWidth="560" MinHeight="420"
+        WindowStartupLocation="CenterOwner" ShowInTaskbar="False" Style="{StaticResource {x:Type Window}}">
+    <DockPanel>
+        <Border DockPanel.Dock="Bottom" Background="{StaticResource PanelBrush}" BorderBrush="{StaticResource BorderBrush}" BorderThickness="0,1,0,0" Padding="16,10">
+            <DockPanel>
+                <TextBlock x:Name="StatusText" Style="{StaticResource Muted}" VerticalAlignment="Center" />
+                <StackPanel Orientation="Horizontal" HorizontalAlignment="Right">
+                    <Button Content="Cancel" IsCancel="True" Margin="0,0,8,0" />
+                    <Button x:Name="SaveButton" Content="Save" Style="{StaticResource PrimaryButton}" Click="OnSave" MinWidth="90" />
+                </StackPanel>
+            </DockPanel>
+        </Border>
+        <Grid Margin="20,12,20,12">
+            <Grid.RowDefinitions>
+                <RowDefinition Height="Auto" />
+                <RowDefinition Height="Auto" />
+                <RowDefinition Height="*" />
+            </Grid.RowDefinitions>
+
+            <StackPanel Grid.Row="0">
+                <TextBlock Style="{StaticResource SectionLabel}" Text="SSH ACCESS" Margin="0,0,0,4" />
+                <Grid>
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="110" />
+                        <ColumnDefinition Width="*" />
+                        <ColumnDefinition Width="110" />
+                        <ColumnDefinition Width="*" />
+                    </Grid.ColumnDefinitions>
+                    <Grid.RowDefinitions>
+                        <RowDefinition /><RowDefinition /><RowDefinition />
+                    </Grid.RowDefinitions>
+                    <Label Grid.Row="0" Content="Name" />
+                    <TextBox Grid.Row="0" Grid.Column="1" x:Name="NameBox" Margin="0,3,12,3" />
+                    <Label Grid.Row="0" Grid.Column="2" Content="Host" />
+                    <TextBox Grid.Row="0" Grid.Column="3" x:Name="HostBox" Margin="0,3" />
+                    <Label Grid.Row="1" Content="User" />
+                    <TextBox Grid.Row="1" Grid.Column="1" x:Name="UserBox" Margin="0,3,12,3" />
+                    <Label Grid.Row="1" Grid.Column="2" Content="SSH port" />
+                    <TextBox Grid.Row="1" Grid.Column="3" x:Name="PortBox" Margin="0,3" Width="90" HorizontalAlignment="Left" />
+                    <Label Grid.Row="2" Content="Password" />
+                    <PasswordBox Grid.Row="2" Grid.Column="1" x:Name="PasswordBox" Margin="0,3,12,3" />
+                    <Label Grid.Row="2" Grid.Column="2" Content="Private key" />
+                    <TextBox Grid.Row="2" Grid.Column="3" x:Name="KeyBox" Margin="0,3" ToolTip="Optional OpenSSH private key path" />
+                </Grid>
+            </StackPanel>
+
+            <DockPanel Grid.Row="1" Margin="0,12,0,6">
+                <Button DockPanel.Dock="Right" x:Name="RefreshButton" Content="Load VMs" Click="OnRefresh" />
+                <TextBlock Style="{StaticResource SectionLabel}" Text="VIRTUAL MACHINES" VerticalAlignment="Center" Margin="0" />
+            </DockPanel>
+
+            <ListBox Grid.Row="2" x:Name="VmList" MouseDoubleClick="OnVmDoubleClick">
+                <ListBox.ItemTemplate>
+                    <DataTemplate>
+                        <DockPanel>
+                            <StackPanel DockPanel.Dock="Right" Orientation="Horizontal" VerticalAlignment="Center">
+                                <Button Content="Start" Margin="0,0,6,0" Click="OnStartVm" Visibility="{Binding StartVisibility}" />
+                                <Button Content="Connect" Style="{StaticResource PrimaryButton}" Click="OnConnectVm" Visibility="{Binding ConnectVisibility}" />
+                            </StackPanel>
+                            <StackPanel>
+                                <StackPanel Orientation="Horizontal">
+                                    <Ellipse Width="8" Height="8" Fill="{Binding StateBrush}" VerticalAlignment="Center" Margin="0,0,8,0" />
+                                    <TextBlock Text="{Binding Name}" FontWeight="SemiBold" />
+                                    <TextBlock Text="{Binding Detail}" Style="{StaticResource Muted}" Margin="10,0,0,0" VerticalAlignment="Center" />
+                                </StackPanel>
+                                <TextBlock Text="{Binding Warnings}" Style="{StaticResource Muted}" Foreground="{StaticResource WarningBrush}" TextWrapping="Wrap" Margin="16,2,0,0" Visibility="{Binding WarningVisibility}" />
+                            </StackPanel>
+                        </DockPanel>
+                    </DataTemplate>
+                </ListBox.ItemTemplate>
+            </ListBox>
+        </Grid>
+    </DockPanel>
+</Window>
