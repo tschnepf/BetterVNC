@@ -33,6 +33,23 @@ servers support and how each feature is implemented.
 | Secrets | Passwords stored with Windows DPAPI in `%AppData%\BetterVNC\profiles.json`. |
 | Shortcuts | `BetterVNC.exe host:port [--fullscreen]` or `vnc://host:port` opens a session directly. |
 
+## Download and install
+
+Every release on the [releases page](https://github.com/tschnepf/BetterVNC/releases) carries ready-made
+builds; nothing else needs to be installed.
+
+| App | File | Install |
+|---|---|---|
+| BetterVNC viewer (Windows x64) | `BetterVNC-<version>-win-x64.zip` | Unzip anywhere and run `BetterVNC.exe`. |
+| Guest agent, Windows VM | `bettervnc-agent-<version>-win-x64.zip` | Unzip in the VM, then run `bettervnc-agent install` in that folder: it copies itself into place, registers to start at sign-in and starts now (tray icon). |
+| Guest agent, Linux VM | `bettervnc-agent-<version>-linux-x64.tar.gz` | `tar xzf`, then `./bettervnc-agent install` as the desktop user. |
+| Guest agent, Mac | `bettervnc-agent-<version>-osx-arm64.tar.gz` (Apple silicon) or `-osx-x64` (Intel) | `tar xzf`, `xattr -d com.apple.quarantine bettervnc-agent-osx-arm64/bettervnc-agent`, then `./bettervnc-agent install`. |
+
+The builds are not code-signed, so Windows SmartScreen shows "Windows protected your PC" the first
+time (More info, Run anyway) and macOS needs the quarantine flag removed as shown. `SHA256SUMS.txt`
+on the release lists the checksums. Releases are produced by `.github/workflows/release.yml` whenever
+a `v*` tag is pushed, with the assembly versions taken from the tag.
+
 ## Building
 
 Requires the .NET 10 SDK on Windows.

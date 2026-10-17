@@ -1,0 +1,147 @@
+# Builds every BetterVNC app and attaches them to a GitHub release whenever a version tag (v1.2.3) is pushed.
+#
+#   git tag v0.0.1 && git push origin v0.0.1
+#
+# The viewer and the Windows agent are built on Windows (the tests need it), the Linux and macOS agents on their own
+# runners so the executables keep their permission bits inside the tarballs. Assembly versions come from the tag.
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+env:
+  DOTNET_NOLOGO: true
+  DOTNET_CLI_TELEMETRY_OPTOUT: true
+
+jobs:
+  windows:
+    name: Viewer and Windows agent
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+      - name: Version from tag
+        shell: pwsh
+        run: |
+          $v = $env:GITHUB_REF_NAME.TrimStart('v')
+          "VERSION=$v" >> $env:GITHUB_ENV
+      - name: Build and test
+        shell: pwsh
+        run: |
+          dotnet build BetterVNC.slnx -c Release -p:Version=$env:VERSION
+          dotnet test BetterVNC.slnx -c Release --no-build
+      - name: Publish viewer (win-x64, self-contained single file)
+        shell: pwsh
+        run: |
+          dotnet publish src/BetterVnc.App -c Release -r win-x64 --self-contained true `
+            -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true -p:DebugType=none `
+            -p:Version=$env:VERSION -o out/BetterVNC-win-x64
+      - name: Publish Windows agent
+        shell: pwsh
+        run: |
+          dotnet publish tools/BetterVnc.Agent -c Release -f net10.0-windows -r win-x64 -p:DebugType=none `
+            -p:Version=$env:VERSION -o out/bettervnc-agent-win-x64
+      - name: Package
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory dist | Out-Null
+          Compress-Archive -Path out/BetterVNC-win-x64/* -DestinationPath "dist/BetterVNC-$env:VERSION-win-x64.zip"
+          Compress-Archive -Path out/bettervnc-agent-win-x64/* -DestinationPath "dist/bettervnc-agent-$env:VERSION-win-x64.zip"
+          Get-ChildItem dist | Format-Table Name, Length
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows
+          path: dist/*
+
+  linux:
+    name: Linux agent
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+      - name: Version from tag
+        run: echo "VERSION=${GITHUB_REF_NAME#v}" >> "$GITHUB_ENV"
+      - name: Publish and package
+        run: |
+          dotnet publish tools/BetterVnc.Agent -c Release -f net10.0 -r linux-x64 -p:DebugType=none \
+            -p:Version="$VERSION" -o out/bettervnc-agent-linux-x64
+          chmod +x out/bettervnc-agent-linux-x64/bettervnc-agent
+          mkdir -p dist
+          tar -C out -czf "dist/bettervnc-agent-$VERSION-linux-x64.tar.gz" bettervnc-agent-linux-x64
+          ls -l dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux
+          path: dist/*
+
+  macos:
+    name: macOS agents
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+      - name: Version from tag
+        run: echo "VERSION=${GITHUB_REF_NAME#v}" >> "$GITHUB_ENV"
+      - name: Publish and package (Apple silicon and Intel)
+        run: |
+          mkdir -p dist
+          for rid in osx-arm64 osx-x64; do
+            dotnet publish tools/BetterVnc.Agent -c Release -f net10.0 -r "$rid" -p:DebugType=none \
+              -p:Version="$VERSION" -o "out/bettervnc-agent-$rid"
+            chmod +x "out/bettervnc-agent-$rid/bettervnc-agent"
+            tar -C out -czf "dist/bettervnc-agent-$VERSION-$rid.tar.gz" "bettervnc-agent-$rid"
+          done
+          ls -l dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos
+          path: dist/*
+
+  release:
+    name: Publish release
+    needs: [windows, linux, macos]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Checksums
+        run: |
+          cd dist
+          sha256sum * > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+      - name: Release notes
+        run: |
+          v="${GITHUB_REF_NAME#v}"
+          cat > notes.md <<EOF
+          ## Downloads
+
+          | App | File | Install |
+          |---|---|---|
+          | BetterVNC viewer (Windows x64) | \`BetterVNC-$v-win-x64.zip\` | Unzip anywhere and run \`BetterVNC.exe\`. Nothing else to install. |
+          | Guest agent, Windows VM | \`bettervnc-agent-$v-win-x64.zip\` | Unzip, then run \`bettervnc-agent install\` in that folder: it copies itself into place, starts at sign-in and starts now (tray icon). |
+          | Guest agent, Linux VM | \`bettervnc-agent-$v-linux-x64.tar.gz\` | \`tar xzf\`, then \`./bettervnc-agent install\` as the desktop user. |
+          | Guest agent, Mac (Apple silicon) | \`bettervnc-agent-$v-osx-arm64.tar.gz\` | \`tar xzf\`, \`xattr -d com.apple.quarantine bettervnc-agent-osx-arm64/bettervnc-agent\`, then \`./bettervnc-agent install\`. |
+          | Guest agent, Mac (Intel) | \`bettervnc-agent-$v-osx-x64.tar.gz\` | Same as above. |
+
+          The builds are not code-signed: Windows SmartScreen shows "Windows protected your PC" the first time (More info, Run anyway), and macOS needs the quarantine flag removed as shown. \`SHA256SUMS.txt\` lists the checksums.
+
+          See the README for connecting to Unraid VMs and Macs, pairing the agent, and the picture modes.
+          EOF
+      - uses: softprops/action-gh-release@v2
+        with:
+          name: BetterVNC ${{ github.ref_name }}
+          body_path: notes.md
+          generate_release_notes: true
+          files: dist/*
