@@ -1,0 +1,8 @@
+This installs the BetterVNC guest agent on this Mac.
+
+The agent gives the BetterVNC viewer on your Windows PC a second channel next to Screen Sharing: images and files on the clipboard in both directions, smooth trackpad-style scrolling, and a video stream of the screen for the viewer's "Stream" picture modes.
+
+It is set up for the account that is signed in right now: a menu bar item that starts at login, listening on TCP port 5970. Viewers are let in by pairing (a dialog on this screen asks you to Allow each one) or with a token from the agent's settings.
+
+To uninstall later, open Terminal and run:
+  sudo /usr/local/libexec/bettervnc-agent/uninstall.sh

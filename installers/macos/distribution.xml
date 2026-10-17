@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="utf-8"?>
+<installer-gui-script minSpecVersion="2">
+  <title>BetterVNC Guest Agent @VERSION@</title>
+  <welcome file="welcome.txt" mime-type="text/plain" />
+  <conclusion file="conclusion.txt" mime-type="text/plain" />
+  <options customize="never" require-scripts="true" hostArchitectures="arm64,x86_64" rootVolumeOnly="true" />
+  <domains enable_localSystem="true" />
+  <allowed-os-versions>
+    <os-version min="12.0" />
+  </allowed-os-versions>
+  <choices-outline>
+    <line choice="default">
+      <line choice="com.bettervnc.agent" />
+    </line>
+  </choices-outline>
+  <choice id="default" />
+  <choice id="com.bettervnc.agent" visible="false">
+    <pkg-ref id="com.bettervnc.agent" />
+  </choice>
+  <pkg-ref id="com.bettervnc.agent" version="@VERSION@" onConclusion="none">agent.pkg</pkg-ref>
+</installer-gui-script>

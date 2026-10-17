@@ -55,10 +55,19 @@ jobs:
         run: |
           dotnet publish tools/BetterVnc.Agent -c Release -f net10.0-windows -r win-x64 -p:DebugType=none `
             -p:Version=$env:VERSION -o out/bettervnc-agent-win-x64
-      - name: Package
+      - name: Installers (Inno Setup)
         shell: pwsh
         run: |
-          New-Item -ItemType Directory dist | Out-Null
+          $iscc = "C:\Program Files (x86)\Inno Setup 6\ISCC.exe"
+          if (-not (Test-Path $iscc)) { choco install innosetup --no-progress -y | Out-Null }
+          New-Item -ItemType Directory -Force dist | Out-Null
+          & $iscc /Q "/DVersion=$env:VERSION" "/DSource=$PWD\out\BetterVNC-win-x64" "/DOutDir=$PWD\dist" installers\windows\BetterVNC.iss
+          if ($LASTEXITCODE -ne 0) { throw "viewer installer failed" }
+          & $iscc /Q "/DVersion=$env:VERSION" "/DSource=$PWD\out\bettervnc-agent-win-x64" "/DOutDir=$PWD\dist" installers\windows\BetterVncAgent.iss
+          if ($LASTEXITCODE -ne 0) { throw "agent installer failed" }
+      - name: Portable archives
+        shell: pwsh
+        run: |
           Compress-Archive -Path out/BetterVNC-win-x64/* -DestinationPath "dist/BetterVNC-$env:VERSION-win-x64.zip"
           Compress-Archive -Path out/bettervnc-agent-win-x64/* -DestinationPath "dist/bettervnc-agent-$env:VERSION-win-x64.zip"
           Get-ChildItem dist | Format-Table Name, Length
@@ -82,7 +91,8 @@ jobs:
           # The project also lists net10.0-windows; restricting it keeps restore from needing Windows targeting packs here.
           dotnet publish tools/BetterVnc.Agent -c Release -f net10.0 -r linux-x64 -p:TargetFrameworks=net10.0 -p:DebugType=none \
             -p:Version="$VERSION" -o out/bettervnc-agent-linux-x64
-          chmod +x out/bettervnc-agent-linux-x64/bettervnc-agent
+          cp installers/unix/install.sh out/bettervnc-agent-linux-x64/
+          chmod +x out/bettervnc-agent-linux-x64/bettervnc-agent out/bettervnc-agent-linux-x64/install.sh
           mkdir -p dist
           tar -C out -czf "dist/bettervnc-agent-$VERSION-linux-x64.tar.gz" bettervnc-agent-linux-x64
           ls -l dist
@@ -107,10 +117,14 @@ jobs:
           for rid in osx-arm64 osx-x64; do
             dotnet publish tools/BetterVnc.Agent -c Release -f net10.0 -r "$rid" -p:TargetFrameworks=net10.0 -p:DebugType=none \
               -p:Version="$VERSION" -o "out/bettervnc-agent-$rid"
-            chmod +x "out/bettervnc-agent-$rid/bettervnc-agent"
+            cp installers/unix/install.sh "out/bettervnc-agent-$rid/"
+            chmod +x "out/bettervnc-agent-$rid/bettervnc-agent" "out/bettervnc-agent-$rid/install.sh"
             tar -C out -czf "dist/bettervnc-agent-$VERSION-$rid.tar.gz" "bettervnc-agent-$rid"
           done
-          ls -l dist
+      - name: Installer package (.pkg, both CPUs)
+        run: sh installers/macos/build-pkg.sh "$VERSION" out/bettervnc-agent-osx-arm64 out/bettervnc-agent-osx-x64 dist
+      - name: List
+        run: ls -l dist
       - uses: actions/upload-artifact@v4
         with:
           name: macos
@@ -134,17 +148,24 @@ jobs:
         run: |
           v="${GITHUB_REF_NAME#v}"
           cat > notes.md <<EOF
-          ## Downloads
+          ## Installers
+
+          | App | File | What it does |
+          |---|---|---|
+          | BetterVNC viewer (Windows x64) | \`BetterVNC-$v-setup.exe\` | Installs to Program Files (or just for you), Start menu entry, optional desktop shortcut and \`vnc://\` link handler, uninstaller in Settings. Run it again to upgrade. |
+          | Guest agent, Windows VM | \`bettervnc-agent-$v-setup.exe\` | Run inside the VM as the user who will use it: installs the agent, registers it to start at sign-in, adds the firewall rule and starts it (tray icon). Existing pairings are kept on upgrade; uninstall from Settings. |
+          | Guest agent, Mac | \`bettervnc-agent-$v-macos.pkg\` | One package for Apple silicon and Intel: installs under \`/usr/local\`, sets the agent up for the signed-in user (menu bar item, starts at login) and starts it. Remove with \`sudo /usr/local/libexec/bettervnc-agent/uninstall.sh\`. |
+
+          ## Portable builds
 
           | App | File | Install |
           |---|---|---|
-          | BetterVNC viewer (Windows x64) | \`BetterVNC-$v-win-x64.zip\` | Unzip anywhere and run \`BetterVNC.exe\`. Nothing else to install. |
-          | Guest agent, Windows VM | \`bettervnc-agent-$v-win-x64.zip\` | Unzip, then run \`bettervnc-agent install\` in that folder: it copies itself into place, starts at sign-in and starts now (tray icon). |
-          | Guest agent, Linux VM | \`bettervnc-agent-$v-linux-x64.tar.gz\` | \`tar xzf\`, then \`./bettervnc-agent install\` as the desktop user. |
-          | Guest agent, Mac (Apple silicon) | \`bettervnc-agent-$v-osx-arm64.tar.gz\` | \`tar xzf\`, \`xattr -d com.apple.quarantine bettervnc-agent-osx-arm64/bettervnc-agent\`, then \`./bettervnc-agent install\`. |
-          | Guest agent, Mac (Intel) | \`bettervnc-agent-$v-osx-x64.tar.gz\` | Same as above. |
+          | BetterVNC viewer (Windows x64) | \`BetterVNC-$v-win-x64.zip\` | Unzip anywhere and run \`BetterVNC.exe\`. |
+          | Guest agent, Windows VM | \`bettervnc-agent-$v-win-x64.zip\` | Unzip, then run \`bettervnc-agent install\` in that folder. |
+          | Guest agent, Linux VM | \`bettervnc-agent-$v-linux-x64.tar.gz\` | \`tar xzf\`, then \`sh install.sh\` in the unpacked folder as the desktop user. |
+          | Guest agent, Mac | \`bettervnc-agent-$v-osx-arm64.tar.gz\` (Apple silicon) or \`-osx-x64\` (Intel) | \`tar xzf\`, then \`sh install.sh\` in the unpacked folder. |
 
-          The builds are not code-signed: Windows SmartScreen shows "Windows protected your PC" the first time (More info, Run anyway), and macOS needs the quarantine flag removed as shown. \`SHA256SUMS.txt\` lists the checksums.
+          The builds are not code-signed. Windows SmartScreen shows "Windows protected your PC" the first time (More info, Run anyway); on macOS, right-click the .pkg and choose Open, or allow it under System Settings, Privacy & Security. \`SHA256SUMS.txt\` lists the checksums.
 
           See the README for connecting to Unraid VMs and Macs, pairing the agent, and the picture modes.
           EOF

@@ -35,20 +35,24 @@ servers support and how each feature is implemented.
 
 ## Download and install
 
-Every release on the [releases page](https://github.com/tschnepf/BetterVNC/releases) carries ready-made
-builds; nothing else needs to be installed.
+Every release on the [releases page](https://github.com/tschnepf/BetterVNC/releases) carries
+installers and portable builds; nothing else needs to be installed.
 
-| App | File | Install |
+| App | Installer | What it does |
 |---|---|---|
-| BetterVNC viewer (Windows x64) | `BetterVNC-<version>-win-x64.zip` | Unzip anywhere and run `BetterVNC.exe`. |
-| Guest agent, Windows VM | `bettervnc-agent-<version>-win-x64.zip` | Unzip in the VM, then run `bettervnc-agent install` in that folder: it copies itself into place, registers to start at sign-in and starts now (tray icon). |
-| Guest agent, Linux VM | `bettervnc-agent-<version>-linux-x64.tar.gz` | `tar xzf`, then `./bettervnc-agent install` as the desktop user. |
-| Guest agent, Mac | `bettervnc-agent-<version>-osx-arm64.tar.gz` (Apple silicon) or `-osx-x64` (Intel) | `tar xzf`, `xattr -d com.apple.quarantine bettervnc-agent-osx-arm64/bettervnc-agent`, then `./bettervnc-agent install`. |
+| BetterVNC viewer (Windows x64) | `BetterVNC-<version>-setup.exe` | Installs to Program Files (or just for you), Start menu entry, optional desktop shortcut and `vnc://` link handler, uninstaller in Settings. Run a newer one to upgrade. |
+| Guest agent, Windows VM | `bettervnc-agent-<version>-setup.exe` | Run inside the VM as the user who will use it: installs to `%LOCALAPPDATA%\Programs\BetterVNC Agent`, registers the start-at-sign-in task, adds the firewall rule (when elevated) and starts the tray icon. Upgrades keep the config and pairings; uninstall from Settings. |
+| Guest agent, Mac | `bettervnc-agent-<version>-macos.pkg` | One package for Apple silicon and Intel: installs under `/usr/local`, then sets the agent up for the signed-in user (menu bar item, LaunchAgent) and starts it. Remove with `sudo /usr/local/libexec/bettervnc-agent/uninstall.sh`. |
+
+Portable builds sit next to them: `BetterVNC-<version>-win-x64.zip` (unzip, run `BetterVNC.exe`),
+`bettervnc-agent-<version>-win-x64.zip` (unzip, run `bettervnc-agent install`) and
+`bettervnc-agent-<version>-{linux-x64,osx-arm64,osx-x64}.tar.gz` (unpack, run `sh install.sh`).
 
 The builds are not code-signed, so Windows SmartScreen shows "Windows protected your PC" the first
-time (More info, Run anyway) and macOS needs the quarantine flag removed as shown. `SHA256SUMS.txt`
-on the release lists the checksums. Releases are produced by `.github/workflows/release.yml` whenever
-a `v*` tag is pushed, with the assembly versions taken from the tag.
+time (More info, Run anyway) and macOS asks you to right-click the package and choose Open, or to
+allow it under Privacy & Security. `SHA256SUMS.txt` on the release lists the checksums. Releases are
+produced by `.github/workflows/release.yml` whenever a `v*` tag is pushed, with the assembly versions
+taken from the tag; the installer sources are in `installers/`.
 
 ## Building
 
@@ -269,7 +273,10 @@ macOS, `install.sh`. `-Rids osx-arm64,win-x64` limits the set.
 
 ### Installing
 
-Copy the archive to the remote machine, unpack it and run the installer once in a terminal there:
+The easiest way is the installer from the [releases page](#download-and-install): `bettervnc-agent-<version>-setup.exe`
+on a Windows guest, `bettervnc-agent-<version>-macos.pkg` on a Mac. Both end by running the same
+`install` command described here. With a portable archive, copy it to the remote machine, unpack it and
+run the installer once in a terminal there:
 
 | Remote | Command |
 |---|---|
