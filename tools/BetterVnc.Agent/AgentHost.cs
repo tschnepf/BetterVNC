@@ -31,6 +31,11 @@ public sealed class AgentHost : IAsyncDisposable
             try { Input = CreateInput(config); }
             catch (Exception ex) { Log("Scroll injection unavailable: " + ex.Message); }
         }
+        if (config.EnableVideo)
+        {
+            try { Video = CreateVideo(); }
+            catch (Exception ex) { Log("Screen streaming unavailable: " + ex.Message); }
+        }
         Approver = CreateApprover();
     }
 
@@ -41,6 +46,8 @@ public sealed class AgentHost : IAsyncDisposable
     public string Version { get; }
     public IGuestClipboard Clipboard { get; }
     public IGuestInput? Input { get; }
+    /// <summary>Screen capture and encoder for the viewer's stream modes; null when off or not available on this OS.</summary>
+    public IGuestVideoSource? Video { get; }
     public IPairingApprover Approver { get; }
     public bool IsListening => _server != null;
     public int Port => _server?.Port ?? Config.Port;
@@ -95,7 +102,7 @@ public sealed class AgentHost : IAsyncDisposable
             MaxPayloadBytes = Math.Max(1, Config.MaxPayloadMb) * 1024L * 1024L,
             StagingDirectory = Config.StagingDirectory ?? Path.Combine(Path.GetTempPath(), "bettervnc-agent"),
             AppName = $"BetterVNC agent {Version}",
-        }, Input);
+        }, Input, Video);
         server.Log += OnServerLog;
         // LastSeen is updated in memory only: writing the config on every connection could overwrite edits made with
         // the command line while the agent runs. Pairings and settings changes are what gets saved.
@@ -208,6 +215,24 @@ public sealed class AgentHost : IAsyncDisposable
         return null;
 #endif
     }
+
+    private IGuestVideoSource? CreateVideo()
+    {
+#if WINDOWS
+        return new Video.WindowsScreenSource { Log = Log };
+#else
+        return null; // macOS (ScreenCaptureKit) and Linux (PipeWire) sources are still to come
+#endif
+    }
+
+    public string VideoDescription => Video switch
+    {
+#if WINDOWS
+        Video.WindowsScreenSource w => w.Description,
+#endif
+        null => Config.EnableVideo ? "not available on this OS yet" : "off",
+        _ => Video.GetType().Name,
+    };
 
     public string InputDescription => Input switch
     {

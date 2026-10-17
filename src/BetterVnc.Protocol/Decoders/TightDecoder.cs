@@ -16,6 +16,9 @@ public sealed class TightDecoder
         _jpeg = jpegDecoder;
     }
 
+    /// <summary>Rectangles that arrived as JPEG, so the UI can tell whether a lossy request is being honoured.</summary>
+    public long JpegRectangles { get; private set; }
+
     public void Decode(RfbReader r, Framebuffer fb, RfbRect rect)
     {
         int ctl = r.ReadU8();
@@ -30,6 +33,7 @@ public sealed class TightDecoder
         }
         if (ctl == 0x09)
         {
+            JpegRectangles++;
             DecodeJpeg(r, fb, rect);
             return;
         }

@@ -23,7 +23,7 @@ servers support and how each feature is implemented.
 |---|---|
 | Unraid | Add an Unraid server once (SSH). Browse VMs, see their state, start them, and connect; the current VNC port and password are read from the VM definition every time, so autoport changes never break a saved connection. Warns when a VM lacks the clipboard agent channel or still has a keymap set. |
 | macOS | Native Apple Remote Desktop authentication (security type 30) with your macOS user name and password, plus classic VNC-password mode. Mac keyboard modes: Win = Cmd, Ctrl = Cmd, or swapped Alt/Win. |
-| Picture | Tight (lossless on LAN), ZRLE, Hextile, Zlib, RRE, CopyRect, Raw. Fit-to-window or 1:1 with DPI-correct scaling. Remote resolution changes follow automatically. |
+| Picture | Tight (lossless on LAN), ZRLE, Hextile, Zlib, RRE, CopyRect, Raw. Fit-to-window or 1:1 with DPI-correct scaling. Remote resolution changes follow automatically. A **Picture** box in the toolbar switches between lossless VNC, compressed VNC (Tight JPEG) and, with the guest agent, a [video stream of the screen](#picture-modes-and-screen-streaming) that costs a fraction of the bandwidth when things move. |
 | Pointer | Remote cursor shapes become real Windows cursors, so the pointer never lags. Horizontal and vertical scroll. |
 | Keyboard | Raw XT scancodes via the QEMU extended key event (every key works exactly like a plugged-in keyboard, any layout). Windows key, Alt+Tab, Alt+F4, Ctrl+Esc captured in fullscreen or on demand. Ctrl+Alt+Del button. Keys are released on focus loss. |
 | Clipboard | Text both ways: TigerVNC/QEMU extended clipboard (UTF-8) or legacy cut text. Screenshot button copies the remote screen as an image (Shift+click saves PNG). |
@@ -125,9 +125,47 @@ to VNC. With it connected the clipboard behaves like an RDP session:
 | Copy files in the remote | They are pulled to `%TEMP%\BetterVNC\<connection>\` and put on the Windows clipboard as a file list (up to 64 MB per copy; larger sets are only announced in the status bar). |
 | Copy text | Still travels over VNC. When the agent is connected the viewer also receives it through the agent, which keeps full Unicode on Macs (Apple's VNC server is Latin-1 only). |
 | Scroll | The wheel is sent as pixel deltas and injected natively (see [Smooth scrolling](#smooth-scrolling)). |
+| Picture | The agent can stream its screen as video so a moving picture costs a few Mbit/s instead of tens (see [Picture modes and screen streaming](#picture-modes-and-screen-streaming)). |
 
 The status bar shows `agent` among the session features once the connection is up, and the
 `Files…`, `Paste` and drag-and-drop paths prefer the agent over the SFTP/SMB drop folder.
+
+### Picture modes and screen streaming
+
+VNC sends the pixels that changed, losslessly by default. That is nearly free while you type and
+very expensive while a video plays or a page scrolls, because then every pixel changes and a
+1080p screen becomes 100 Mbit/s or more. The **Picture** box in the session toolbar lets you pick
+per session where the pixels come from; the connection settings hold the default, and a right-click
+on the box makes the current choice the default.
+
+| Picture mode | What it does | Available when |
+|---|---|---|
+| VNC lossless | Exact pixels over RFB (Tight on QEMU, ZRLE on macOS). | Always. |
+| VNC compressed, high / medium / low | Tight JPEG quality 9 / 6 / 3 on the live connection. Switching re-sends the whole screen at the new quality. | The server honours lossy requests. QEMU does so only when the VM's VNC server is started with `lossy=on` (libvirt does not expose it; use a `<qemu:commandline>` override). The status bar says `JPEG n` once JPEG rectangles arrive and `requested (none received yet)` while the server ignores the request. macOS Screen Sharing has no lossy encoding, so these entries are greyed out there. |
+| Stream, quality / balanced / low bandwidth | The guest agent captures the screen and sends it as video at about 20 / 8 / 2.5 Mbit/s. RFB stays connected underneath for input, cursor shapes and resizes, polled once a second. Whenever the screen is still for 0.7 s the viewer switches back to the lossless RFB picture and asks for a full update, so a quiet desktop is always pixel-exact; the next frame switches back to the stream. | The guest agent is connected, is a build that announces `video`, runs on Windows (macOS and Linux capture are not done yet) and has `enableVideo` on (default; also a checkbox in the tray settings). Greyed out otherwise, with the reason in the tooltip. A plain VNC connection without an agent shows only the VNC entries. |
+
+Choosing a stream mode before the agent is up is fine: the session starts on lossless VNC and the
+stream takes over the moment the agent connects, the same way the clipboard features light up. If
+the agent goes away the picture falls back to VNC and the stream resumes when it is back.
+
+The current agent encodes **motion JPEG** (every frame a complete JPEG, unchanged frames skipped),
+captured with GDI. The bitrate is held by pacing: each frame earns a pause proportional to its size,
+and the JPEG quality then trades frame rate against sharpness, dropping when frames are too big to
+run at the frame-rate cap and creeping back up when there is room. Because every frame is a whole
+picture, the frame rate is what gives: measured on a 2256×1504 desktop, "balanced" (8 Mbit/s) held
+its budget within a second at about 7 fps of continuous motion; a 1080p VM gets roughly twice that. It needs no codec on either side
+and already behaves far better than lossless VNC when the whole screen moves, but it is not as
+efficient as a real video codec: expect 8 Mbit/s to look soft on fast motion. The protocol
+negotiates the codec (`codecs` in the `welcome` and in `startVideo`), so an H.264 source using the
+guest's hardware encoder can be added without changing the viewer's side of the handshake. The
+stream travels over the agent's TCP connection, which is authenticated but not encrypted: keep it on
+the LAN or inside an SSH tunnel.
+
+To check a stream from the command line:
+
+```bash
+bettervnc-agent probe <guest-ip> <token or pair> video 8000 30 5 first-frame.jpg
+```
 
 ### How it works
 
@@ -137,7 +175,12 @@ a binary payload, each length-prefixed; messages are `hello`/`welcome` (handshak
 `setClipboard`/`ok` for the formats `text`, `html`, `png` and `files` (a file set is one payload with
 the relative names and sizes in the header), and `scroll` (viewer to agent, no reply: `dx`/`dy` in pixels,
 `phase` begin/continue/end, optional pointer position and the raw Windows wheel delta). The `welcome` lists
-the agent's optional `features` (`scroll`), so an old agent is simply never sent scroll events.
+the agent's optional `features` (`scroll`, `video`), so an old agent is simply never sent scroll events or
+asked for a stream. Streaming uses `startVideo` (viewer lists the `codecs` it decodes, wanted `bitrate` in kbit/s
+and `maxFps`) answered by `videoStarted` (negotiated codec, bitrate, fps, size, `encoder` hardware/software),
+`setVideo`/`ok` to re-tune or ask for a key frame, `stopVideo`/`ok`, `videoFrame` (agent to viewer, one encoded
+frame per payload with `sequence`, `timestamp`, `keyframe`, `width`, `height`) and `videoStopped` (agent to
+viewer when its capture ends).
 
 **Who may connect.** Two ways, both usable at the same time:
 
@@ -282,7 +325,8 @@ the window under the mouse, as it does locally.
 `bettervnc-agent probe <host[:port]> <token> info` checks the handshake and shows the formats on
 the remote clipboard (`pair` instead of the token pairs the probe the way the viewer does); `probe … watch` prints change notifications; `probe … get png out.png`,
 `probe … set png in.png`, `probe … set files <paths>` and `probe … get files <dir>` move data by hand;
-`probe … scroll <dx> <dy> [steps]` injects a scroll gesture (pixels, `dy > 0` is up).
+`probe … scroll <dx> <dy> [steps]` injects a scroll gesture (pixels, `dy > 0` is up);
+`probe … video [kbit/s] [fps] [seconds] [first-frame.jpg]` starts a screen stream and prints frames and bandwidth per second.
 The agent framing, authentication and request handling are covered by `tests/BetterVnc.Agent.Tests`
 (an executable like the protocol tests; `dotnet tests/BetterVnc.Agent.Tests/bin/Debug/net10.0/BetterVnc.Agent.Tests.dll`
 also runs it).

@@ -40,6 +40,13 @@ public partial class SessionWindow : Window
     private DateTime _lastBytesTime = DateTime.UtcNow;
     private readonly DispatcherTimer _toolbarHideTimer = new() { Interval = TimeSpan.FromSeconds(2) };
     private readonly bool _startFullscreen;
+    private VideoStreamPlayer? _player;
+    /// <summary>The picture mode chosen for this session (profile default until changed in the toolbar).</summary>
+    private PictureModes.Info _wantedPicture;
+    /// <summary>The Tight quality the RFB connection is currently asked for.</summary>
+    private PictureModes.Info _activeVnc = PictureModes.StreamFallback;
+    private bool _pictureUpdating;
+    private long _jpegRectsAtQualityChange;
 
     /// <summary>The profile this window was opened for.</summary>
     public ConnectionProfile Profile => _profile;
@@ -74,6 +81,14 @@ public partial class SessionWindow : Window
         View.RenderedFrame += OnRenderedFrame;
         SendFilesButton.IsEnabled = PasteButton.IsEnabled = true;
 
+        _wantedPicture = PictureModes.Get(profile.PictureMode);
+        _pictureUpdating = true;
+        foreach (var info in PictureModes.All)
+            PictureBox.Items.Add(new ComboBoxItem { Content = info.Label, Tag = info, ToolTip = info.Description });
+        PictureBox.SelectedIndex = Array.IndexOf(PictureModes.All, _wantedPicture);
+        _pictureUpdating = false;
+        RefreshPictureMenu();
+
         _statusTimer.Tick += (_, _) => UpdateStatus();
         _toolbarHideTimer.Tick += (_, _) => { if (_fullscreen && !Toolbar.IsMouseOver) Toolbar.Visibility = Visibility.Collapsed; _toolbarHideTimer.Stop(); };
 
@@ -106,6 +121,7 @@ public partial class SessionWindow : Window
         if (_clipboardListening && _hwndSource != null) RemoveClipboardFormatListener(_hwndSource.Handle);
         _hwndSource?.RemoveHook(WndProc);
         View.Detach();
+        _player?.Dispose();
         _agent?.Dispose();
         _client?.Dispose();
         _audio.Dispose();
@@ -133,20 +149,24 @@ public partial class SessionWindow : Window
         ShowOverlay("Connecting…", $"{_host}:{_port}", showButtons: false);
         View.Detach();
         View.ScrollInjector = null;
+        _player?.Dispose();
+        _player = null;
         _agent?.Dispose();
         _agent = null;
         _client?.Dispose();
         _audioRequested = false;
 
         var password = _sessionPassword ?? _passwordOverride ?? ProfileStore.Unprotect(_profile.ProtectedPassword);
+        // A stream mode starts out on lossless VNC; the stream takes over once the agent is up (see ApplyPictureAsync).
+        var initialVnc = _wantedPicture.IsStream ? PictureModes.StreamFallback : _wantedPicture;
         var options = new VncConnectionOptions
         {
             Host = _host,
             Port = _port,
             Username = _sessionUsername ?? _profile.Username,
             Password = password,
-            CompressionLevel = _profile.CompressionLevel,
-            JpegQuality = _profile.JpegQuality,
+            CompressionLevel = initialVnc.CompressionLevel,
+            JpegQuality = initialVnc.JpegQuality,
             EnableLocalCursor = _profile.LocalCursor,
             EnableQemuAudio = true,
             JpegDecoder = new WicJpegDecoder(),
@@ -191,6 +211,8 @@ public partial class SessionWindow : Window
         }
 
         _client = client;
+        _activeVnc = initialVnc;
+        _jpegRectsAtQualityChange = 0;
         IsConnected = true;
         SessionManager.NotifyStateChanged(this);
         if (client.Capabilities.IsApple && _profile.Kind != ConnectionKind.Mac)
@@ -212,24 +234,143 @@ public partial class SessionWindow : Window
         }
         _statusTimer.Start();
         UpdateHook();
-        UpdateStatus();
         StartAgent();
+        RefreshPictureMenu();
+        UpdateStatus();
+        if (_wantedPicture.IsStream && _agent == null)
+            StatusLeft.Text = "Stream mode needs the guest agent; showing VNC lossless because this connection has none configured";
     }
 
     // ------------------------------------------------------------------ guest agent
 
-    /// <summary>Connects to the BetterVNC guest agent (rich clipboard) once the VNC session is up, if the profile has one.</summary>
+    /// <summary>Connects to the BetterVNC guest agent (rich clipboard, scrolling, screen stream) once the VNC session is up, if the profile has one.</summary>
     private void StartAgent()
     {
-        if (!AgentClient.IsConfigured(_profile)) return;
+        if (!AgentClient.IsConfigured(_profile) || _client == null) return;
         var agent = new AgentClient(_profile, _host, Dispatcher);
-        agent.StateChanged += () => { if (_agent == agent) UpdateStatus(); };
+        agent.StateChanged += () => { if (_agent == agent) OnAgentStateChanged(agent); };
         agent.Message += m => { if (_agent == agent) StatusLeft.Text = m; };
         agent.RemoteTextReceived += t => { if (_agent == agent) OnRemoteClipboard(t); };
         _agent = agent;
         View.ScrollInjector = agent;
+        var player = new VideoStreamPlayer(agent, _client, View, Dispatcher);
+        player.Message += m => { if (_player == player) StatusLeft.Text = m; };
+        player.Ended += _ => { if (_player == player) { RefreshPictureMenu(); UpdateStatus(); } };
+        _player = player;
         StatusLeft.Text = $"Connecting to guest agent at {agent.Target}…";
         agent.Start();
+    }
+
+    private void OnAgentStateChanged(AgentClient agent)
+    {
+        RefreshPictureMenu();
+        UpdateStatus();
+        // The agent came up (or back) and the person wants a stream: start it now, the same way clipboard features light up.
+        if (_wantedPicture.IsStream && agent.CanStream && _player is { IsStreaming: false })
+            _ = ApplyPictureAsync();
+    }
+
+    // ------------------------------------------------------------------ picture mode
+
+    /// <summary>Enables each picture entry the current server and agent can deliver, with the reason on the disabled ones.</summary>
+    private void RefreshPictureMenu()
+    {
+        var client = _client;
+        var caps = client?.Capabilities;
+        foreach (ComboBoxItem item in PictureBox.Items)
+        {
+            var info = (PictureModes.Info)item.Tag;
+            string? why = null;
+            if (info.IsStream)
+            {
+                if (_agent == null || _player == null)
+                    why = "This connection has no guest agent. Enable the agent in the connection settings; the stream modes need it.";
+                else if (!_agent.CanStream)
+                    why = _agent.StreamUnavailableReason;
+            }
+            else if (info.IsLossy && caps is { IsApple: true })
+            {
+                why = "macOS Screen Sharing offers no lossy encoding (Raw, Hextile, Zlib, ZRLE only).";
+            }
+            item.IsEnabled = why == null;
+            item.ToolTip = why == null ? info.Description : $"{info.Description}\n\nNot available: {why}";
+        }
+        PictureDefaultItem.IsEnabled = _wantedPicture.Mode != _profile.PictureMode;
+    }
+
+    private void OnPictureSelected(object sender, SelectionChangedEventArgs e)
+    {
+        if (_pictureUpdating || PictureBox.SelectedItem is not ComboBoxItem { Tag: PictureModes.Info info }) return;
+        _wantedPicture = info;
+        _ = ApplyPictureAsync();
+        View.Focus();
+    }
+
+    private void OnPictureMakeDefault(object sender, RoutedEventArgs e)
+    {
+        _profile.PictureMode = _wantedPicture.Mode;
+        var vnc = _wantedPicture.IsStream ? PictureModes.StreamFallback : _wantedPicture;
+        _profile.JpegQuality = vnc.JpegQuality;
+        _profile.CompressionLevel = vnc.CompressionLevel;
+        try { App.Profiles.Save(); } catch { }
+        RefreshPictureMenu();
+        StatusLeft.Text = $"\"{_wantedPicture.Label}\" is now the default picture for {_profile.Name}";
+    }
+
+    /// <summary>
+    /// Makes the picture match <see cref="_wantedPicture"/>: a VNC mode changes the Tight encodings on the live connection; a
+    /// stream mode starts (or re-tunes) the agent stream, or falls back to lossless VNC while the agent cannot stream.
+    /// </summary>
+    private async Task ApplyPictureAsync()
+    {
+        var client = _client;
+        if (client == null) return;
+        var mode = _wantedPicture;
+        try
+        {
+            if (mode.IsStream)
+            {
+                if (_player != null && _agent?.CanStream == true)
+                {
+                    SetVncQuality(client, PictureModes.StreamFallback);
+                    await _player.StartAsync(mode);
+                }
+                else
+                {
+                    if (_player?.IsStreaming == true) await _player.StopAsync();
+                    SetVncQuality(client, PictureModes.StreamFallback);
+                    StatusLeft.Text = _agent == null
+                        ? "Stream mode needs the guest agent; showing VNC lossless because this connection has none configured"
+                        : $"Showing VNC lossless until the guest agent can stream: {_agent.StreamUnavailableReason}";
+                }
+            }
+            else
+            {
+                if (_player?.IsStreaming == true) await _player.StopAsync();
+                SetVncQuality(client, mode);
+                StatusLeft.Text = mode.IsLossy
+                    ? $"Picture: {mode.Label} (Tight JPEG {mode.JpegQuality}). If the status bar never shows JPEG, the server ignores lossy requests (QEMU needs lossy=on)."
+                    : $"Picture: {mode.Label}";
+            }
+        }
+        catch (Exception ex)
+        {
+            StatusLeft.Text = "Picture: " + ex.Message;
+        }
+        RefreshPictureMenu();
+        UpdateStatus();
+    }
+
+    private void SetVncQuality(VncClient client, PictureModes.Info quality)
+    {
+        if (client.Options.JpegQuality == quality.JpegQuality && client.Options.CompressionLevel == quality.CompressionLevel)
+        {
+            _activeVnc = quality;
+            return;
+        }
+        _activeVnc = quality;
+        _jpegRectsAtQualityChange = client.Statistics.TightJpegRects;
+        client.SetPictureQuality(quality.CompressionLevel, quality.JpegQuality);
     }
 
     /// <summary>Sizes the window so the remote screen shows 1:1 when it fits, otherwise fills most of the work area.</summary>
@@ -268,8 +409,11 @@ public partial class SessionWindow : Window
         _statusTimer.Stop();
         _audio.Stop();
         View.ScrollInjector = null;
+        _player?.Dispose();
+        _player = null;
         _agent?.Dispose();
         _agent = null;
+        RefreshPictureMenu();
         View.ReleaseAllKeys();
         UpdateHook();
         if (ex == null)
@@ -672,7 +816,28 @@ public partial class SessionWindow : Window
         if (_agent != null) features.Add(_agent.IsConnected ? "agent" : _agent.Status);
         AudioToggle.IsEnabled = caps.QemuAudio;
 
-        StatusRight.Text = $"{client.Framebuffer.Width}×{client.Framebuffer.Height}  ·  {View.Fps:0} fps  ·  {enc}  ·  {FormatRate(rate)}  ·  {string.Join(", ", features)}";
+        string picture;
+        string traffic;
+        if (_player is { IsStreaming: true } player)
+        {
+            var info = player.Info;
+            double streamRate = player.TakeRate();
+            picture = player.IdleFallbackActive
+                ? $"stream idle, {enc} lossless"
+                : $"stream {info?.Codec} {info?.Width}×{info?.Height}" + (player.FramesSkipped > 0 ? $" ({player.FramesSkipped} skipped)" : "");
+            traffic = $"{FormatRate(streamRate)} stream + {FormatRate(rate)} VNC";
+        }
+        else
+        {
+            var q = _activeVnc;
+            picture = !q.IsLossy ? $"{enc} lossless"
+                : s.TightJpegRects > _jpegRectsAtQualityChange ? $"{enc} JPEG {q.JpegQuality}"
+                : $"{enc}, JPEG {q.JpegQuality} requested (none received yet)";
+            traffic = FormatRate(rate);
+        }
+        if (_wantedPicture.IsStream && _player is not { IsStreaming: true }) picture += "  (waiting for agent stream)";
+
+        StatusRight.Text = $"{client.Framebuffer.Width}×{client.Framebuffer.Height}  ·  {View.Fps:0} fps  ·  {picture}  ·  {traffic}  ·  {string.Join(", ", features)}";
     }
 
     private static string FormatRate(double bytesPerSecond) => bytesPerSecond switch

@@ -224,6 +224,7 @@ that makes RDP pleasant is outside the protocol for both targets:
 | File copy/paste, drag-and-drop | No | No | **Guest agent**: files are copied to the other side and put on its clipboard. Fallback side channel per connection: **SFTP** (SSH.NET) or an **SMB** UNC path. Dropped files or Ctrl+V'd files are uploaded to a configured "drop folder" on the remote. Works for macOS (Remote Login), Linux guests (sshd) and Windows guests (OpenSSH feature or a share). |
 | Smooth / high-resolution scrolling | Wheel buttons only (QEMU maps 4/5 to a wheel notch) | Wheel buttons map to about one line each; Apple's own client uses private pixel-scroll messages | **Guest agent** `scroll` message: pixel deltas plus gesture phase, injected with CoreGraphics pixel scroll events (macOS), `SendInput` (Windows) or xdotool/ydotool (Linux). Fallback: VNC wheel clicks with a per-connection multiplier and velocity boost. |
 | Audio | QEMU audio extension | No | Implemented for QEMU; nothing possible for macOS. |
+| Bandwidth-efficient picture (video codec, motion handled) | Tight JPEG only, and only with `lossy=on` on the QEMU command line (libvirt does not expose it; default off, so the quality hint is ignored) | None: Raw, Hextile, Zlib, ZRLE only | **Guest agent** video channel (`startVideo` / `videoFrame`): the agent captures and encodes, the viewer decodes and paints while RFB keeps carrying input, cursor shapes and resizes at one update a second. Lossless RFB repaint whenever the screen is still. A **Picture** box in the toolbar switches modes live; entries the server or agent cannot deliver are greyed out with the reason. First codec is motion JPEG (GDI capture, Windows agent); H.264 with the guest's hardware encoder slots in through the same negotiation. |
 | Dynamic resolution (resize window resizes remote) | Not supported by QEMU | Not supported | Viewer-side scaling (fit / 1:1 / custom) with high-quality resampling. |
 | Multi-monitor | Single stitched framebuffer | Single stitched framebuffer | Fullscreen on any monitor; "fit" scaling. |
 | Smart-card, printer, USB redirection | No | No | Out of scope. |
@@ -237,7 +238,13 @@ executable per OS) fills the clipboard gap over its own TCP port (default 5970):
   `clipboardData`, `setClipboard` / `ok`, `ping` / `pong`, `error`, and `scroll`
   (viewer to agent, fire-and-forget: `dx`/`dy` pixels, `phase`, optional `x`/`y`
   and the raw Windows wheel delta; announced through `features: ["scroll"]` in
-  the `welcome`). Formats are
+  the `welcome`), and the video set announced through `features: ["video"]` plus
+  `codecs`: `startVideo` (viewer's decodable `codecs` in order of preference,
+  `bitrate` kbit/s, `maxFps`) / `videoStarted` (negotiated codec, bitrate, fps,
+  size, `encoder`), `setVideo` / `ok` (re-tune, key-frame request), `stopVideo` /
+  `ok`, `videoFrame` (agent to viewer, encoded frame as payload with `sequence`,
+  `timestamp`, `keyframe`, `width`, `height`; the agent drops frames a slow link
+  cannot take, never delays them) and `videoStopped` (capture ended). Formats are
   `text`, `html`, `png` and `files` (header lists relative names and sizes, the
   payload is the concatenated contents).
 * Authentication: pairing by default. The viewer sends `pair` with an ephemeral
@@ -282,6 +289,17 @@ Resolution control is the next capability planned for the same channel.
 * **Encoding preference:** Tight (compression level 1, JPEG off, so lossless on
   LAN), ZRLE, Hextile, Zlib, RRE, CopyRect, Raw, plus the pseudo-encodings
   listed above.
+* **Picture modes:** the Tight compression level and JPEG quality can change on
+  the live connection (a new `SetEncodings` followed by a non-incremental
+  update request), and the client counts JPEG rectangles so the UI can tell
+  whether a lossy request is honoured. The client can also pace its update
+  requests (`UpdateInterval`): while the agent's video stream carries the
+  picture, RFB is polled once a second so cursor shapes and resizes still
+  arrive without doubling the pixel traffic. The stream player decodes off the
+  UI thread with a latest-frame-wins queue, and after 0.7 s without a frame it
+  shows the RFB framebuffer again and asks for a full lossless update, so an
+  idle desktop is never a stale JPEG. A stream mode chosen before the agent is
+  up starts on lossless VNC and switches when the agent announces `video`.
 * **Keyboard:** window-procedure hook captures `WM_(SYS)KEYDOWN/UP` with scancode
   and extended bit; keysym derived via `ToUnicodeEx` (with Ctrl/Alt stripped
   so `Ctrl+C` yields keysym `c`). Optional low-level keyboard hook when

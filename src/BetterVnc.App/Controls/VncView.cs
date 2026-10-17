@@ -85,17 +85,77 @@ public sealed class VncView : Grid
         }
         else
         {
-            _image.Stretch = Stretch.None;
+            // Fill (not None): the element is sized to the framebuffer, so the RFB picture lands at exactly one framebuffer
+            // pixel per device pixel, and a streamed frame of another size (HiDPI capture) is scaled onto the same area.
+            _image.Stretch = Stretch.Fill;
             _image.HorizontalAlignment = HorizontalAlignment.Left;
             _image.VerticalAlignment = VerticalAlignment.Top;
             if (_bitmap != null)
             {
-                // Present at exactly 1 framebuffer pixel per device pixel regardless of DPI scaling.
                 var dpi = VisualTreeHelper.GetDpi(this);
                 _image.Width = _bitmap.PixelWidth / dpi.DpiScaleX;
                 _image.Height = _bitmap.PixelHeight / dpi.DpiScaleY;
             }
         }
+    }
+
+    // ------------------------------------------------------------------ external picture (agent video stream)
+
+    private WriteableBitmap? _externalBitmap;
+    private volatile bool _externalShown;
+
+    /// <summary>True while the displayed picture comes from <see cref="PresentExternalFrame"/> rather than the RFB framebuffer.</summary>
+    public bool IsExternalShown => _externalShown;
+
+    /// <summary>
+    /// Shows a decoded frame from somewhere other than RFB (the guest agent's video stream) in place of the framebuffer.
+    /// The RFB framebuffer keeps being decoded underneath so <see cref="ShowFramebuffer"/> can switch back instantly.
+    /// <paramref name="bgrx"/> holds width*height*4 bytes and must not be reused by the caller until the next frame.
+    /// Safe to call from any thread.
+    /// </summary>
+    public void PresentExternalFrame(byte[] bgrx, int width, int height)
+    {
+        if (width <= 0 || height <= 0 || bgrx.Length < width * height * 4) return;
+        Dispatcher.BeginInvoke(() =>
+        {
+            if (_client == null) return;
+            if (_externalBitmap == null || _externalBitmap.PixelWidth != width || _externalBitmap.PixelHeight != height)
+                _externalBitmap = new WriteableBitmap(width, height, 96, 96, PixelFormats.Bgr32, null);
+            _externalBitmap.WritePixels(new Int32Rect(0, 0, width, height), bgrx, width * 4, 0);
+            if (!_externalShown)
+            {
+                _externalShown = true;
+                _image.Source = _externalBitmap;
+            }
+            CountFrame();
+        }, DispatcherPriority.Render);
+    }
+
+    /// <summary>Returns to the RFB framebuffer picture (repainting all of it). Safe to call from any thread.</summary>
+    public void ShowFramebuffer()
+    {
+        Dispatcher.BeginInvoke(() =>
+        {
+            if (!_externalShown) return;
+            _externalShown = false;
+            _image.Source = _bitmap;
+            if (_client != null) lock (_dirtyLock) _dirty.Add(_client.Framebuffer.Bounds);
+            QueueRender();
+        }, DispatcherPriority.Render);
+    }
+
+    private void CountFrame()
+    {
+        _frames++;
+        var now = DateTime.UtcNow;
+        var elapsed = (now - _frameWindowStart).TotalSeconds;
+        if (elapsed >= 1)
+        {
+            Fps = _frames / elapsed;
+            _frames = 0;
+            _frameWindowStart = now;
+        }
+        RenderedFrame?.Invoke();
     }
 
     public void Attach(VncClient client)
@@ -201,16 +261,8 @@ public sealed class VncView : Grid
             bmp.Unlock();
         }
 
-        _frames++;
-        var now = DateTime.UtcNow;
-        var elapsed = (now - _frameWindowStart).TotalSeconds;
-        if (elapsed >= 1)
-        {
-            Fps = _frames / elapsed;
-            _frames = 0;
-            _frameWindowStart = now;
-        }
-        RenderedFrame?.Invoke();
+        // While a stream is on screen the framebuffer is kept current but not shown, so it is not a rendered frame.
+        if (!_externalShown) CountFrame();
     }
 
     private void OnCursorChanged(CursorShape shape)
@@ -441,11 +493,17 @@ public sealed class VncView : Grid
         }
     }
 
-    /// <summary>Copies the current framebuffer (or a region) to a bitmap for screenshots.</summary>
+    /// <summary>Copies the picture on screen (the streamed frame while one is shown, else the framebuffer) to a bitmap for screenshots.</summary>
     public BitmapSource? Snapshot()
     {
         var client = _client;
         if (client == null) return null;
+        if (_externalShown && _externalBitmap != null)
+        {
+            var copy = _externalBitmap.Clone();
+            copy.Freeze();
+            return copy;
+        }
         var fb = client.Framebuffer;
         byte[] pixels;
         lock (fb.SyncRoot) pixels = fb.CopyOut(fb.Bounds);

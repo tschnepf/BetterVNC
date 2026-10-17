@@ -95,7 +95,11 @@ public sealed class ConnectionProfile : ObservableBase
 
     /// <summary>VNC wheel clicks per physical wheel notch (1-20). macOS moves only about a line per click, so 6 or more feels normal there.</summary>
     public int ScrollClicksPerNotch { get; set; } = 1;
+    /// <summary>Preferred picture source and quality; a stream mode falls back to lossless VNC until the agent can stream.</summary>
+    public PictureMode PictureMode { get; set; } = PictureMode.VncLossless;
+    /// <summary>Tight compression level derived from <see cref="PictureMode"/>; kept so older builds still read the profile.</summary>
     public int CompressionLevel { get; set; } = 1;
+    /// <summary>Tight JPEG quality derived from <see cref="PictureMode"/> (-1 = lossless); kept so older builds still read the profile.</summary>
     public int JpegQuality { get; set; } = -1;
 
     // File transfer side channel
@@ -201,7 +205,10 @@ public sealed class UnraidServer : ObservableBase
 
 public sealed class ProfileDocument
 {
-    public int Version { get; set; } = 1;
+    /// <summary>1: JPEG quality / compression level per connection. 2: adds <see cref="ConnectionProfile.PictureMode"/>.</summary>
+    public const int CurrentVersion = 2;
+
+    public int Version { get; set; } = CurrentVersion;
     public List<ConnectionProfile> Connections { get; set; } = new();
     public List<UnraidServer> UnraidServers { get; set; } = new();
 }

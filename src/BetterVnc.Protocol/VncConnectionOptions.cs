@@ -25,10 +25,10 @@ public sealed class VncConnectionOptions
     public bool Shared { get; set; } = true;
     public TimeSpan ConnectTimeout { get; set; } = TimeSpan.FromSeconds(10);
 
-    /// <summary>Tight compression level 0-9 sent as a pseudo-encoding. 1 is a good LAN default.</summary>
+    /// <summary>Tight compression level 0-9 sent as a pseudo-encoding. 1 is a good LAN default. Change at run time with <see cref="VncClient.SetPictureQuality"/>.</summary>
     public int CompressionLevel { get; set; } = 1;
 
-    /// <summary>Tight JPEG quality 0-9, or -1 to request lossless only (recommended on LAN).</summary>
+    /// <summary>Tight JPEG quality 0-9, or -1 to request lossless only (recommended on LAN). Change at run time with <see cref="VncClient.SetPictureQuality"/>.</summary>
     public int JpegQuality { get; set; } = -1;
 
     public bool EnableExtendedClipboard { get; set; } = true;
@@ -76,6 +76,8 @@ public sealed class VncStatistics
     public long FramebufferUpdates;
     public long Rectangles;
     public long TightRects, ZrleRects, HextileRects, RawRects, CopyRects, ZlibRects, RreRects;
+    /// <summary>Tight rectangles that came as JPEG. Stays 0 when the server ignores the JPEG quality hint (QEMU without <c>lossy=on</c>).</summary>
+    public long TightJpegRects;
     public DateTime LastUpdateUtc;
     public double LastUpdateMilliseconds;
 }

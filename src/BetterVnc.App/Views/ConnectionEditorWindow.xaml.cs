@@ -35,7 +35,9 @@ public partial class ConnectionEditorWindow : Window
         CursorBox.IsChecked = profile.LocalCursor;
         ClipboardBox.IsChecked = profile.SyncClipboard;
         AudioBox.IsChecked = profile.EnableAudio;
-        QualityBox.SelectedIndex = profile.JpegQuality switch { < 0 => 0, >= 9 => 1, >= 6 => 2, _ => 3 };
+        foreach (var info in PictureModes.All)
+            QualityBox.Items.Add(new ComboBoxItem { Content = info.Label, Tag = info, ToolTip = info.Description });
+        QualityBox.SelectedIndex = Math.Max(0, Array.IndexOf(PictureModes.All, PictureModes.Get(profile.PictureMode)));
         ScrollSlider.Value = Math.Clamp(profile.ScrollClicksPerNotch, 1, 20);
         TransferBox.SelectedIndex = (int)profile.FileTransfer;
         SftpHostBox.Text = profile.SftpHost ?? "";
@@ -154,13 +156,11 @@ public partial class ConnectionEditorWindow : Window
         p.LocalCursor = CursorBox.IsChecked == true;
         p.SyncClipboard = ClipboardBox.IsChecked == true;
         p.EnableAudio = AudioBox.IsChecked == true;
-        (p.JpegQuality, p.CompressionLevel) = QualityBox.SelectedIndex switch
-        {
-            1 => (9, 1),
-            2 => (6, 2),
-            3 => (3, 6),
-            _ => (-1, 1),
-        };
+        var picture = (QualityBox.SelectedItem as ComboBoxItem)?.Tag as PictureModes.Info ?? PictureModes.All[0];
+        p.PictureMode = picture.Mode;
+        // The VNC side of the choice, also readable by older builds. A stream mode rides on lossless VNC.
+        var vnc = picture.IsStream ? PictureModes.StreamFallback : picture;
+        (p.JpegQuality, p.CompressionLevel) = (vnc.JpegQuality, vnc.CompressionLevel);
         p.ScrollClicksPerNotch = (int)Math.Round(ScrollSlider.Value);
         p.FileTransfer = (FileTransferMode)Math.Max(0, TransferBox.SelectedIndex);
         p.SftpHost = string.IsNullOrWhiteSpace(SftpHostBox.Text) ? null : SftpHostBox.Text.Trim();

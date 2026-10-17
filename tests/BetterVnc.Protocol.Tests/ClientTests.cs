@@ -514,4 +514,105 @@ public class ClientTests
             Assert.False(client.IsConnected);
         }
     }
+
+    private static bool IsJpegQualityEncoding(int e) => e >= -32 && e <= -23;
+
+    [Fact]
+    public async Task Set_picture_quality_resends_encodings_and_asks_for_a_full_update()
+    {
+        var (server, client) = await ConnectAsync();
+        using (server) using (client)
+        {
+            Assert.DoesNotContain(server.ClientEncodings, IsJpegQualityEncoding); // lossless by default
+            Assert.Contains(RfbEncoding.CompressLevel(1), server.ClientEncodings);
+
+            client.SetPictureQuality(2, 6);
+            server.WaitFor(ClientMessage.SetEncodings);
+            Assert.Contains(RfbEncoding.JpegQuality(6), server.ClientEncodings);
+            Assert.Contains(RfbEncoding.CompressLevel(2), server.ClientEncodings);
+            Assert.DoesNotContain(RfbEncoding.CompressLevel(1), server.ClientEncodings);
+            var req = server.WaitFor(ClientMessage.FramebufferUpdateRequest);
+            Assert.Equal(0, req.Payload[0]); // non-incremental: the whole picture again at the new quality
+            Assert.Equal(6, client.Options.JpegQuality);
+
+            client.SetPictureQuality(1, -1);
+            server.WaitFor(ClientMessage.SetEncodings);
+            Assert.DoesNotContain(server.ClientEncodings, IsJpegQualityEncoding);
+            Assert.Equal(-1, client.Options.JpegQuality);
+        }
+    }
+
+    [Fact]
+    public async Task Update_interval_holds_the_next_request_and_zero_releases_it()
+    {
+        var (server, client) = await ConnectAsync();
+        using (server) using (client)
+        {
+            client.UpdateInterval = TimeSpan.FromSeconds(10);
+            var upd = NextUpdate(client);
+            server.SendUpdate(new FakeRfbServer.Rect(0, 0, 1, 1, RfbEncoding.Raw, Bgrx(1, 1)));
+            await upd;
+            Assert.Throws<TimeoutException>(() => server.WaitFor(ClientMessage.FramebufferUpdateRequest, 300));
+
+            client.UpdateInterval = TimeSpan.Zero;
+            var req = server.WaitFor(ClientMessage.FramebufferUpdateRequest);
+            Assert.Equal(1, req.Payload[0]); // the held incremental request
+            Assert.Throws<TimeoutException>(() => server.WaitFor(ClientMessage.FramebufferUpdateRequest, 200)); // exactly one
+        }
+    }
+
+    [Fact]
+    public async Task Update_interval_elapses_by_itself()
+    {
+        var (server, client) = await ConnectAsync();
+        using (server) using (client)
+        {
+            client.UpdateInterval = TimeSpan.FromMilliseconds(150);
+            var upd = NextUpdate(client);
+            server.SendUpdate(new FakeRfbServer.Rect(0, 0, 1, 1, RfbEncoding.Raw, Bgrx(1, 1)));
+            await upd;
+            var sw = System.Diagnostics.Stopwatch.StartNew();
+            var req = server.WaitFor(ClientMessage.FramebufferUpdateRequest, 3000);
+            Assert.Equal(1, req.Payload[0]);
+            Assert.True(sw.ElapsedMilliseconds >= 100, $"request came after {sw.ElapsedMilliseconds} ms");
+        }
+    }
+
+    [Fact]
+    public async Task Refresh_picture_replaces_a_held_request_with_one_full_request()
+    {
+        var (server, client) = await ConnectAsync();
+        using (server) using (client)
+        {
+            client.UpdateInterval = TimeSpan.FromSeconds(10);
+            var upd = NextUpdate(client);
+            server.SendUpdate(new FakeRfbServer.Rect(0, 0, 1, 1, RfbEncoding.Raw, Bgrx(1, 1)));
+            await upd;
+
+            client.RefreshPicture();
+            var req = server.WaitFor(ClientMessage.FramebufferUpdateRequest);
+            Assert.Equal(0, req.Payload[0]);
+            client.UpdateInterval = TimeSpan.Zero; // nothing left waiting, so nothing more is sent
+            Assert.Throws<TimeoutException>(() => server.WaitFor(ClientMessage.FramebufferUpdateRequest, 200));
+        }
+    }
+
+    [Fact]
+    public async Task Tight_jpeg_rectangles_are_counted()
+    {
+        var (server, client) = await ConnectAsync();
+        using (server) using (client)
+        {
+            var upd = NextUpdate(client);
+            // Control byte 0x90 = JPEG sub-encoding, then a compact length and the (here meaningless) JPEG bytes. Without a
+            // decoder the client paints the marker colour, which is enough to prove the rectangle was recognised.
+            var jpeg = new byte[] { 0xFF, 0xD8, 1, 2, 3 };
+            var data = new byte[] { 0x90, (byte)jpeg.Length }.Concat(jpeg).ToArray();
+            server.SendUpdate(new FakeRfbServer.Rect(0, 0, 2, 2, RfbEncoding.Tight, data));
+            await upd;
+            Assert.Equal(1, client.Statistics.TightJpegRects);
+            Assert.Equal(1, client.Statistics.TightRects);
+            Assert.Equal(0xFF00FFu, Pixel(client, 1, 1));
+        }
+    }
 }

@@ -36,6 +36,40 @@ public static class AgentMessageType
     /// <see cref="AgentMessage.Dy"/> are pixels; only sent when the agent advertised <see cref="AgentFeature.Scroll"/>.
     /// </summary>
     public const string Scroll = "scroll";
+
+    // ---- video (only when the agent advertised AgentFeature.Video)
+    /// <summary>
+    /// Viewer to agent: start streaming the screen. Carries the <see cref="AgentMessage.Codecs"/> the viewer can decode in
+    /// order of preference, the wanted <see cref="AgentMessage.Bitrate"/> (kbit/s) and <see cref="AgentMessage.MaxFps"/>.
+    /// Answered with <see cref="VideoStarted"/> (negotiated values) or an error.
+    /// </summary>
+    public const string StartVideo = "startVideo";
+    /// <summary>Reply to <see cref="StartVideo"/>: the codec, bitrate, frame rate, size and encoder kind actually in use.</summary>
+    public const string VideoStarted = "videoStarted";
+    /// <summary>Viewer to agent: change <see cref="AgentMessage.Bitrate"/> and/or <see cref="AgentMessage.MaxFps"/> of the running stream, or ask for a key frame. Answered with <see cref="Ok"/>.</summary>
+    public const string SetVideo = "setVideo";
+    /// <summary>Viewer to agent: stop the stream. Answered with <see cref="Ok"/>.</summary>
+    public const string StopVideo = "stopVideo";
+    /// <summary>Agent to viewer, unsolicited while a stream runs: one encoded frame in the payload; see <see cref="AgentMessage.Keyframe"/>, <see cref="AgentMessage.Timestamp"/>.</summary>
+    public const string VideoFrame = "videoFrame";
+    /// <summary>Agent to viewer, unsolicited: the stream ended on the agent's side (capture failed, session locked); <see cref="AgentMessage.Message"/> says why.</summary>
+    public const string VideoStopped = "videoStopped";
+}
+
+/// <summary>Codec names used in <see cref="AgentMessage.Codecs"/> and <see cref="AgentMessage.Codec"/>.</summary>
+public static class AgentVideoCodec
+{
+    /// <summary>Motion JPEG: every frame is a complete JPEG image of the whole screen. Needs no codec library on either side.</summary>
+    public const string Jpeg = "jpeg";
+    /// <summary>H.264 Annex B elementary stream; the first frame and every frame flagged as key frame carry SPS/PPS.</summary>
+    public const string H264 = "h264";
+}
+
+/// <summary>Values of <see cref="AgentMessage.Encoder"/> in a <see cref="AgentMessageType.VideoStarted"/> reply.</summary>
+public static class AgentVideoEncoder
+{
+    public const string Hardware = "hardware";
+    public const string Software = "software";
 }
 
 /// <summary>Values of <see cref="AgentMessage.Code"/> on an <see cref="AgentMessageType.Error"/> during the handshake.</summary>
@@ -56,6 +90,8 @@ public static class AgentFeature
 {
     /// <summary>The agent accepts <see cref="AgentMessageType.Scroll"/> messages.</summary>
     public const string Scroll = "scroll";
+    /// <summary>The agent can stream its screen (<see cref="AgentMessageType.StartVideo"/>); the welcome lists the <see cref="AgentMessage.Codecs"/>.</summary>
+    public const string Video = "video";
 }
 
 /// <summary>Values of <see cref="AgentMessage.Phase"/> in a scroll message.</summary>
@@ -145,6 +181,29 @@ public sealed class AgentMessage
     /// <summary>The same movement in Windows wheel units (120 per notch, same signs as <see cref="Dx"/>/<see cref="Dy"/>), when known.</summary>
     public double? WheelDx { get; set; }
     public double? WheelDy { get; set; }
+
+    // ---- video
+    /// <summary>Welcome: codecs the agent can encode. startVideo: codecs the viewer can decode, most preferred first.</summary>
+    public string[]? Codecs { get; set; }
+    /// <summary>The codec in use (videoStarted, videoFrame); see <see cref="AgentVideoCodec"/>.</summary>
+    public string? Codec { get; set; }
+    /// <summary>Target bitrate in kbit/s (startVideo, setVideo, videoStarted).</summary>
+    public int? Bitrate { get; set; }
+    /// <summary>Frame rate cap (startVideo, setVideo, videoStarted).</summary>
+    public int? MaxFps { get; set; }
+    /// <summary>Encoder kind in use; see <see cref="AgentVideoEncoder"/>.</summary>
+    public string? Encoder { get; set; }
+    /// <summary>Frame size in pixels (videoStarted, and on frames whose size changed).</summary>
+    public int? Width { get; set; }
+    public int? Height { get; set; }
+    /// <summary>True on a frame that can be decoded on its own (always true for JPEG).</summary>
+    public bool? Keyframe { get; set; }
+    /// <summary>Capture time of a frame in microseconds since the stream started.</summary>
+    public long? Timestamp { get; set; }
+    /// <summary>Frame counter since the stream started; gaps mean the agent dropped frames it could not send in time.</summary>
+    public int? Sequence { get; set; }
+    /// <summary>setVideo: ask for a key frame on the next opportunity.</summary>
+    public bool? KeyframeRequest { get; set; }
 
     public static AgentMessage Of(string type, int? id = null) => new() { Type = type, Id = id };
 

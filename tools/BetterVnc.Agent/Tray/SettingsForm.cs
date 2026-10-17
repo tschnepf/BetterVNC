@@ -15,6 +15,7 @@ public sealed class SettingsForm : Form
     private readonly CheckBox _showToken = new() { Text = "Show", AutoSize = true };
     private readonly ListView _viewers = new() { View = View.Details, FullRowSelect = true, HideSelection = false, Height = 130, Width = 500 };
     private readonly CheckBox _autostart = new() { Text = "Start the agent when I sign in", AutoSize = true };
+    private readonly CheckBox _enableVideo = new() { Text = "Let viewers stream this screen as video (the viewer's \"Stream\" picture modes)", AutoSize = true };
     private readonly Label _status = new() { AutoSize = true, ForeColor = SystemColors.GrayText };
 
     public SettingsForm(AgentHost host)
@@ -82,6 +83,8 @@ public sealed class SettingsForm : Form
         Section("Startup");
         layout.Controls.Add(_autostart);
         layout.SetColumnSpan(_autostart, 2);
+        layout.Controls.Add(_enableVideo);
+        layout.SetColumnSpan(_enableVideo, 2);
 
         var buttons = new FlowLayoutPanel { FlowDirection = FlowDirection.RightToLeft, Dock = DockStyle.Bottom, Height = 46, Padding = new Padding(10, 8, 10, 8) };
         var cancel = new Button { Text = "Cancel", AutoSize = true, DialogResult = DialogResult.Cancel };
@@ -114,6 +117,7 @@ public sealed class SettingsForm : Form
         _port.Value = Math.Clamp(c.Port, 1, 65535);
         _listen.SelectedIndex = c.Listen == "127.0.0.1" ? 1 : 0;
         _allowPairing.Checked = c.AllowPairing;
+        _enableVideo.Checked = c.EnableVideo;
         _token.Text = c.Token ?? "";
         _autostart.Checked = Installer.IsAutostartEnabled();
         RefreshViewers();
@@ -151,6 +155,7 @@ public sealed class SettingsForm : Form
         c.Port = (int)_port.Value;
         c.Listen = _listen.SelectedIndex == 1 ? "127.0.0.1" : "0.0.0.0";
         c.AllowPairing = _allowPairing.Checked;
+        c.EnableVideo = _enableVideo.Checked;
         c.Token = string.IsNullOrWhiteSpace(_token.Text) ? null : _token.Text.Trim();
         if (!c.AllowPairing && c.Token == null && c.Viewers.Count == 0)
         {

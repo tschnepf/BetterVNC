@@ -48,6 +48,72 @@ public sealed class AgentClient : IDisposable, IScrollInjector
     /// <summary>True when the agent is connected and accepts high-resolution scroll messages.</summary>
     public bool CanScroll => _connection is { IsConnected: true, SupportsScroll: true };
     public string? RemoteOs => _connection?.RemoteOs;
+    public string? RemoteApp => _connection?.RemoteApp;
+
+    // ------------------------------------------------------------------ video
+
+    /// <summary>Codecs this viewer can decode, most preferred first. JPEG (motion JPEG) needs nothing beyond WIC.</summary>
+    public static readonly string[] DecodableCodecs = { AgentVideoCodec.Jpeg };
+
+    /// <summary>Codecs both sides agree on, in this viewer's order of preference; empty when streaming is impossible.</summary>
+    public string[] StreamCodecs
+    {
+        get
+        {
+            var remote = _connection?.RemoteCodecs;
+            return remote == null ? Array.Empty<string>() : DecodableCodecs.Where(c => remote.Contains(c, StringComparer.OrdinalIgnoreCase)).ToArray();
+        }
+    }
+
+    /// <summary>True when the agent is connected, streams video, and in a codec this viewer decodes.</summary>
+    public bool CanStream => _connection is { IsConnected: true, SupportsVideo: true } && StreamCodecs.Length > 0;
+
+    /// <summary>Why <see cref="CanStream"/> is false, for a tooltip; null when it is true.</summary>
+    public string? StreamUnavailableReason
+    {
+        get
+        {
+            var conn = _connection;
+            if (conn == null || !conn.IsConnected) return $"The guest agent is not connected ({Status}).";
+            if (!conn.SupportsVideo) return $"The guest agent ({conn.RemoteApp} on {conn.RemoteOs}) does not stream its screen. Update it, or turn screen streaming on in its settings.";
+            if (StreamCodecs.Length == 0) return $"The agent streams {string.Join(", ", conn.RemoteCodecs)} but this viewer decodes only {string.Join(", ", DecodableCodecs)}.";
+            return null;
+        }
+    }
+
+    /// <summary>Parameters of the running stream; null when none runs.</summary>
+    public AgentConnection.VideoStartInfo? StreamInfo { get; private set; }
+
+    /// <summary>An encoded frame arrived; raised on the agent's receive thread, so decode elsewhere and return quickly.</summary>
+    public event Action<AgentFrame>? StreamFrame;
+    /// <summary>The stream ended without this side asking (agent stopped it, or disconnected); on the dispatcher.</summary>
+    public event Action<string?>? StreamStopped;
+
+    public async Task<AgentConnection.VideoStartInfo> StartStreamAsync(int bitrateKbps, int maxFps)
+    {
+        var conn = _connection ?? throw new InvalidOperationException("The guest agent is not connected.");
+        var info = await conn.StartVideoAsync(StreamCodecs, bitrateKbps, maxFps, _cts.Token).ConfigureAwait(false);
+        StreamInfo = info;
+        return info;
+    }
+
+    public async Task SetStreamAsync(int? bitrateKbps, int? maxFps, bool keyframe = false)
+    {
+        var conn = _connection;
+        if (conn == null || StreamInfo == null) return;
+        await conn.SetVideoAsync(bitrateKbps, maxFps, keyframe, _cts.Token).ConfigureAwait(false);
+        if (bitrateKbps != null || maxFps != null)
+            StreamInfo = StreamInfo with { BitrateKbps = bitrateKbps ?? StreamInfo.BitrateKbps, MaxFps = maxFps ?? StreamInfo.MaxFps };
+    }
+
+    public async Task StopStreamAsync()
+    {
+        var conn = _connection;
+        StreamInfo = null;
+        if (conn == null || !conn.IsConnected) return;
+        try { await conn.StopVideoAsync(_cts.Token).ConfigureAwait(false); }
+        catch (Exception) when (!conn.IsConnected) { }
+    }
     public string Status { get; private set; } = "agent: connecting";
     public string Target => $"{_host}:{_profile.AgentPort}";
 
@@ -89,6 +155,13 @@ public sealed class AgentClient : IDisposable, IScrollInjector
             var closed = new TaskCompletionSource<Exception?>(TaskCreationOptions.RunContinuationsAsynchronously);
             conn.Disconnected += ex => closed.TrySetResult(ex);
             conn.ClipboardChanged += msg => _ = OnGuestClipboardChangedAsync(conn, msg);
+            conn.VideoFrameReceived += frame => { if (StreamInfo != null) StreamFrame?.Invoke(frame); };
+            conn.VideoStopped += reason =>
+            {
+                if (StreamInfo == null) return;
+                StreamInfo = null;
+                Post(() => StreamStopped?.Invoke(reason ?? "the agent stopped the stream"));
+            };
             try
             {
                 if (pairMode && pairKey == null)
@@ -115,6 +188,11 @@ public sealed class AgentClient : IDisposable, IScrollInjector
                 Post(() => Message?.Invoke($"Guest agent connected ({conn.RemoteApp} on {conn.RemoteOs})"));
                 var ex = await closed.Task.WaitAsync(ct).ConfigureAwait(false);
                 _connection = null;
+                if (StreamInfo != null)
+                {
+                    StreamInfo = null;
+                    Post(() => StreamStopped?.Invoke("the guest agent disconnected"));
+                }
                 SetStatus("agent: reconnecting");
                 Post(() => Message?.Invoke("Guest agent disconnected" + (ex != null ? $": {ex.Message}" : "")));
             }

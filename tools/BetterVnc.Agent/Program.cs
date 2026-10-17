@@ -119,10 +119,12 @@ public static class Program
               bettervnc-agent probe <host[:port]> <token or 'pair'> info | watch | get <text|html|png|files> [out]
                                                             | set text <string> | set png <file> | set files <path>...
                                                             | scroll <dx px> <dy px> [steps]   (dy > 0 scrolls up)
+                                                            | video [kbit/s] [fps] [seconds] [first-frame.jpg]
 
             Without a command the agent starts serving and creates bettervnc-agent.json next to the executable on first
             start. Viewers get in by pairing (you click Allow in a dialog on this screen) or with the token. The file also
-            holds port, listen, maxPayloadMb and the scroll settings (enableScroll, scrollScale, scrollInvert, scrollPhases).
+            holds port, listen, maxPayloadMb, enableVideo (screen streaming for the viewer's Stream picture modes) and the
+            scroll settings (enableScroll, scrollScale, scrollInvert, scrollPhases).
             """);
     }
 
@@ -142,6 +144,10 @@ public static class Program
         if (port is { } p) cfg.Port = p;
         if (listen != null) cfg.Listen = listen;
         if (!string.IsNullOrWhiteSpace(token)) cfg.Token = token;
+#if WINDOWS
+        // Before any window or screen capture: otherwise GDI hands a DPI-unaware process a scaled-down picture of the screen.
+        System.Windows.Forms.Application.SetHighDpiMode(System.Windows.Forms.HighDpiMode.PerMonitorV2);
+#endif
 
         AgentHost host;
         try { host = new AgentHost(configPath, cfg, verbose); }
@@ -159,6 +165,7 @@ public static class Program
         Console.WriteLine($"BetterVNC guest agent {Version} on {host.Clipboard.OsName}");
         Console.WriteLine($"Config: {configPath}  ({cfg.AuthSummary})");
         Console.WriteLine($"Scroll injection: {host.InputDescription}");
+        Console.WriteLine($"Screen streaming: {host.VideoDescription}");
 #if !WINDOWS
         if (host.Input is Input.MacInput mac && !mac.IsTrusted(prompt: false))
             Console.WriteLine("  Accessibility permission missing: System Settings > Privacy & Security > Accessibility > add bettervnc-agent. Scroll events are dropped until then.");
@@ -385,6 +392,50 @@ public static class Program
                     await conn.ScrollAsync(0, 0, null, null, AgentScrollPhase.End, null, null, cts.Token);
                     await conn.PingAsync(cts.Token); // make sure everything was processed before we hang up
                     Console.WriteLine($"Scrolled dx={dx}, dy={dy} px in {steps} steps on {conn.RemoteOs}.");
+                    return 0;
+                }
+                case "video":
+                {
+                    if (!conn.SupportsVideo)
+                    {
+                        Console.Error.WriteLine($"This agent does not stream its screen (features: {(conn.RemoteFeatures.Length == 0 ? "none" : string.Join(", ", conn.RemoteFeatures))}; old version, not Windows, or enableVideo is false).");
+                        return 1;
+                    }
+                    int bitrate = args.Count > 0 ? int.Parse(args[0]) : 8000;
+                    int fps = args.Count > 1 ? int.Parse(args[1]) : 30;
+                    int seconds = args.Count > 2 ? int.Parse(args[2]) : 5;
+                    string? saveTo = args.Count > 3 ? args[3] : null;
+                    long frames = 0, bytes = 0;
+                    int w = 0, h = 0;
+                    byte[]? first = null;
+                    conn.VideoFrameReceived += f =>
+                    {
+                        Interlocked.Increment(ref frames);
+                        Interlocked.Add(ref bytes, f.Payload.Length);
+                        w = f.Header.Width ?? w;
+                        h = f.Header.Height ?? h;
+                        first ??= f.Payload.ToArray();
+                    };
+                    conn.VideoStopped += r => Console.WriteLine("Stream stopped by the agent: " + (r ?? "no reason given"));
+                    var info = await conn.StartVideoAsync(new[] { AgentVideoCodec.Jpeg }, bitrate, fps, cts.Token);
+                    Console.WriteLine($"Streaming {info.Codec} {info.Width}x{info.Height}, {info.BitrateKbps} kbit/s, {info.MaxFps} fps max, {info.EncoderKind} encoder.");
+                    Console.WriteLine("Move something on the agent's screen: unchanged frames are not sent.");
+                    long lastFrames = 0, lastBytes = 0;
+                    for (int i = 0; i < seconds && !cts.IsCancellationRequested; i++)
+                    {
+                        try { await Task.Delay(1000, cts.Token); } catch (OperationCanceledException) { break; }
+                        long f = Interlocked.Read(ref frames), b = Interlocked.Read(ref bytes);
+                        Console.WriteLine($"  {i + 1,3} s  {f - lastFrames,4} frames  {(b - lastBytes) * 8 / 1000.0,8:0} kbit/s  {w}x{h}");
+                        lastFrames = f;
+                        lastBytes = b;
+                    }
+                    await conn.StopVideoAsync(CancellationToken.None);
+                    Console.WriteLine($"Total: {frames} frames, {bytes / 1024} KB.");
+                    if (saveTo != null && first != null)
+                    {
+                        await File.WriteAllBytesAsync(saveTo, first);
+                        Console.WriteLine($"First frame written to {saveTo}");
+                    }
                     return 0;
                 }
                 default:

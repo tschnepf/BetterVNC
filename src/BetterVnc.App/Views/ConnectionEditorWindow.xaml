@@ -88,14 +88,11 @@
                         <ColumnDefinition Width="120" />
                         <ColumnDefinition Width="*" />
                     </Grid.ColumnDefinitions>
-                    <Label Content="Picture quality" />
-                    <ComboBox Grid.Column="1" x:Name="QualityBox" Margin="0,3">
-                        <ComboBoxItem Content="Lossless (LAN, recommended)" />
-                        <ComboBoxItem Content="High (JPEG quality 9)" />
-                        <ComboBoxItem Content="Medium (JPEG quality 6)" />
-                        <ComboBoxItem Content="Low bandwidth (JPEG quality 3, max compression)" />
-                    </ComboBox>
+                    <Label Content="Picture" />
+                    <ComboBox Grid.Column="1" x:Name="QualityBox" Margin="0,3" />
                 </Grid>
+                <TextBlock Style="{StaticResource Muted}" TextWrapping="Wrap" Margin="120,0,0,6"
+                           Text="Lossless is best on a LAN. The compressed VNC modes need a server that honours lossy requests (QEMU with lossy=on; macOS has none). The stream modes take the picture from the guest agent's video channel and fall back to lossless VNC until the agent is up. The toolbar's Picture box changes this during a session." />
                 <Grid Margin="0,0,0,0">
                     <Grid.ColumnDefinitions>
                         <ColumnDefinition Width="120" />

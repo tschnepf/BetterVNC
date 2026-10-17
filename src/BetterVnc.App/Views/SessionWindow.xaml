@@ -23,6 +23,14 @@
                     <Button x:Name="PasteButton" Style="{StaticResource ToolButton}" Content="Paste" ToolTip="Send the local clipboard to the remote: text via VNC, images and files via the guest agent or the file channel" Click="OnPasteToRemote" />
                     <Separator Width="1" Height="18" Margin="6,0" />
                     <ToggleButton x:Name="FitToggle" Content="Fit" ToolTip="Scale the remote screen to fit the window" Checked="OnFitChanged" Unchecked="OnFitChanged" />
+                    <ComboBox x:Name="PictureBox" MinWidth="170" Margin="4,0" VerticalAlignment="Center" SelectionChanged="OnPictureSelected"
+                              ToolTip="Picture: where the pixels come from and how they are compressed. Greyed entries say why they are unavailable; right-click to make the choice the default for this connection.">
+                        <ComboBox.ContextMenu>
+                            <ContextMenu>
+                                <MenuItem x:Name="PictureDefaultItem" Header="Use as default for this connection" Click="OnPictureMakeDefault" />
+                            </ContextMenu>
+                        </ComboBox.ContextMenu>
+                    </ComboBox>
                     <ToggleButton x:Name="ClipboardToggle" Content="Clipboard" ToolTip="Synchronise text clipboard in both directions" />
                     <ToggleButton x:Name="AudioToggle" Content="Audio" ToolTip="Play the VM's audio (QEMU VNC audio extension)" Checked="OnAudioToggled" Unchecked="OnAudioToggled" />
                     <ToggleButton x:Name="GrabToggle" Content="Win keys" ToolTip="Send Windows key, Alt+Tab, Alt+F4 to the remote instead of the local desktop" />

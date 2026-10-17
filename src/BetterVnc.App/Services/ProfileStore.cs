@@ -33,6 +33,11 @@ public sealed class ProfileStore
         {
             var doc = JsonSerializer.Deserialize<ProfileDocument>(File.ReadAllText(FilePath), JsonOptions);
             if (doc == null) return;
+            if (doc.Version < 2)
+            {
+                // Version 1 stored only the Tight JPEG quality; the picture mode is the same choice with the stream modes added.
+                foreach (var c in doc.Connections) c.PictureMode = PictureModes.FromLegacy(c.JpegQuality);
+            }
             foreach (var c in doc.Connections) Connections.Add(c);
             foreach (var s in doc.UnraidServers) UnraidServers.Add(s);
         }

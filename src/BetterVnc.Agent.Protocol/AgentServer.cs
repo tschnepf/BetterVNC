@@ -37,6 +37,7 @@ public sealed class AgentServer : IAsyncDisposable
 
     private readonly IGuestClipboard _clipboard;
     private readonly IGuestInput? _input;
+    private readonly IGuestVideoSource? _video;
     private readonly AgentServerOptions _options;
     private readonly SemaphoreSlim _clipboardLock = new(1, 1);
     private readonly List<Session> _sessions = new();
@@ -47,10 +48,11 @@ public sealed class AgentServer : IAsyncDisposable
     private string? _lastChangeToken;
     private volatile bool _suppressNextChange;
 
-    public AgentServer(IGuestClipboard clipboard, AgentServerOptions options, IGuestInput? input = null)
+    public AgentServer(IGuestClipboard clipboard, AgentServerOptions options, IGuestInput? input = null, IGuestVideoSource? video = null)
     {
         _clipboard = clipboard;
         _input = input;
+        _video = video is { Codecs.Count: > 0 } ? video : null;
         _options = options;
         if (string.IsNullOrWhiteSpace(options.Token) && options.FindViewer == null && (options.PairingApprover == null || !options.AllowPairing))
             throw new ArgumentException("Nothing could ever authenticate: set a token, a viewer lookup, or allow pairing.", nameof(options));
@@ -64,7 +66,22 @@ public sealed class AgentServer : IAsyncDisposable
     public event Action<string?, string?, string>? ViewerConnected;
 
     /// <summary>Capabilities announced to viewers in the welcome message.</summary>
-    public string[] Features => _input != null ? new[] { AgentFeature.Scroll } : Array.Empty<string>();
+    public string[] Features
+    {
+        get
+        {
+            var list = new List<string>(2);
+            if (_input != null) list.Add(AgentFeature.Scroll);
+            if (_video != null) list.Add(AgentFeature.Video);
+            return list.ToArray();
+        }
+    }
+
+    /// <summary>Codecs announced in the welcome message; null when this agent cannot stream.</summary>
+    public string[]? VideoCodecs => _video?.Codecs.ToArray();
+
+    /// <summary>Number of viewers currently receiving a video stream.</summary>
+    public int StreamingSessions { get { lock (_sessions) return _sessions.Count(s => s.IsStreaming); } }
 
     /// <summary>Binds the listener and starts the accept and clipboard-watch loops.</summary>
     public void Start()
@@ -367,6 +384,7 @@ public sealed class AgentServer : IAsyncDisposable
                     App = opts.AppName,
                     Proof = AgentAuth.Prove(secret, hello.Header.Nonce!),
                     Features = _server.Features,
+                    Codecs = _server.VideoCodecs,
                 };
                 try { welcome.Formats = (await _server.DescribeClipboardAsync(ct).ConfigureAwait(false)).Formats; } catch { welcome.Formats = Array.Empty<string>(); }
                 await SendAsync(welcome, default, ct).ConfigureAwait(false);
@@ -394,9 +412,177 @@ public sealed class AgentServer : IAsyncDisposable
             }
             finally
             {
+                StopVideo(notifyViewer: false);
                 if (Authenticated) _server.Log?.Invoke($"{Peer}: disconnected");
                 Close();
             }
+        }
+
+        // ---- video
+
+        private readonly object _videoLock = new();
+        private IVideoSession? _videoSession;
+        private System.Threading.Channels.Channel<(AgentMessage Header, byte[] Data)>? _frames;
+        private Task? _framePump;
+        private int _frameSequence;
+        private long _framesDropped;
+
+        public bool IsStreaming { get { lock (_videoLock) return _videoSession != null; } }
+
+        private AgentFrame HandleStartVideo(AgentMessage req)
+        {
+            var source = _server._video;
+            if (source == null) return new AgentFrame(AgentMessage.ErrorReply(req.Id, "This agent cannot stream its screen."));
+
+            // The viewer lists what it can decode, most preferred first; the first one this source produces wins.
+            var wanted = req.Codecs is { Length: > 0 } ? req.Codecs : req.Codec != null ? new[] { req.Codec } : source.Codecs.ToArray();
+            var codec = wanted.FirstOrDefault(c => source.Codecs.Contains(c, StringComparer.OrdinalIgnoreCase));
+            if (codec == null)
+                return new AgentFrame(AgentMessage.ErrorReply(req.Id, $"No common video codec: the viewer decodes {string.Join(", ", wanted)}, this agent encodes {string.Join(", ", source.Codecs)}."));
+
+            var request = new VideoRequest
+            {
+                Codec = codec,
+                BitrateKbps = Math.Clamp(req.Bitrate ?? 8_000, 250, 200_000),
+                MaxFps = Math.Clamp(req.MaxFps ?? 60, 1, 120),
+            };
+
+            lock (_videoLock)
+            {
+                StopVideoLocked();
+                var frames = System.Threading.Channels.Channel.CreateBounded<(AgentMessage, byte[])>(new System.Threading.Channels.BoundedChannelOptions(3)
+                {
+                    FullMode = System.Threading.Channels.BoundedChannelFullMode.DropOldest, // a slow link sees fewer frames, never older ones
+                    SingleReader = true,
+                });
+                _frames = frames;
+                _frameSequence = 0;
+                _framesDropped = 0;
+                IVideoSession session;
+                try
+                {
+                    session = source.Start(request,
+                        frame => QueueFrame(frames, frame),
+                        reason => _ = OnVideoEndedAsync(frames, reason));
+                }
+                catch (Exception ex)
+                {
+                    _frames = null;
+                    _server.Log?.Invoke($"{Peer}: video start failed: {ex.Message}");
+                    return new AgentFrame(AgentMessage.ErrorReply(req.Id, "Cannot capture the screen: " + ex.Message));
+                }
+                _videoSession = session;
+                _framePump = Task.Run(() => PumpFramesAsync(frames));
+                _server.Log?.Invoke($"{Peer}: video started ({session.Codec}, {session.BitrateKbps} kbit/s, {session.MaxFps} fps max, {session.Width}x{session.Height}, {session.EncoderKind})");
+                return new AgentFrame(new AgentMessage
+                {
+                    Type = AgentMessageType.VideoStarted,
+                    Id = req.Id,
+                    Codec = session.Codec,
+                    Bitrate = session.BitrateKbps,
+                    MaxFps = session.MaxFps,
+                    Width = session.Width,
+                    Height = session.Height,
+                    Encoder = session.EncoderKind,
+                });
+            }
+        }
+
+        private void QueueFrame(System.Threading.Channels.Channel<(AgentMessage, byte[])> frames, VideoFrame frame)
+        {
+            var header = new AgentMessage
+            {
+                Type = AgentMessageType.VideoFrame,
+                Keyframe = frame.Keyframe,
+                Timestamp = frame.TimestampMicros,
+                Width = frame.Width,
+                Height = frame.Height,
+                Sequence = Interlocked.Increment(ref _frameSequence),
+            };
+            // The source may reuse its buffer as soon as we return, so the bytes are copied here, once.
+            if (!frames.Writer.TryWrite((header, frame.Data.ToArray()))) Interlocked.Increment(ref _framesDropped);
+        }
+
+        private async Task PumpFramesAsync(System.Threading.Channels.Channel<(AgentMessage Header, byte[] Data)> frames)
+        {
+            try
+            {
+                await foreach (var (header, data) in frames.Reader.ReadAllAsync().ConfigureAwait(false))
+                    await SendAsync(header, data, CancellationToken.None).ConfigureAwait(false);
+            }
+            catch (Exception ex) when (ex is IOException or ObjectDisposedException or InvalidOperationException or OperationCanceledException)
+            {
+                // The session is going away; RunAsync's finally stops the capture.
+            }
+            catch (Exception ex)
+            {
+                _server.Log?.Invoke($"{Peer}: video send failed: {ex.Message}");
+            }
+        }
+
+        private async Task OnVideoEndedAsync(System.Threading.Channels.Channel<(AgentMessage, byte[])> frames, string? reason)
+        {
+            lock (_videoLock)
+            {
+                if (_frames != frames) return; // a newer stream replaced this one
+                StopVideoLocked();
+            }
+            _server.Log?.Invoke($"{Peer}: video ended: {reason ?? "capture stopped"}");
+            try { await SendAsync(new AgentMessage { Type = AgentMessageType.VideoStopped, Message = reason }, default, CancellationToken.None).ConfigureAwait(false); }
+            catch { }
+        }
+
+        private AgentFrame HandleSetVideo(AgentMessage req)
+        {
+            lock (_videoLock)
+            {
+                var session = _videoSession;
+                if (session == null) return new AgentFrame(AgentMessage.ErrorReply(req.Id, "No video stream is running."));
+                try
+                {
+                    if (req.Bitrate != null || req.MaxFps != null)
+                        session.Set(req.Bitrate is { } b ? Math.Clamp(b, 250, 200_000) : null, req.MaxFps is { } f ? Math.Clamp(f, 1, 120) : null);
+                    if (req.KeyframeRequest == true) session.RequestKeyframe();
+                }
+                catch (Exception ex)
+                {
+                    return new AgentFrame(AgentMessage.ErrorReply(req.Id, ex.Message));
+                }
+                return new AgentFrame(new AgentMessage { Type = AgentMessageType.Ok, Id = req.Id, Bitrate = session.BitrateKbps, MaxFps = session.MaxFps });
+            }
+        }
+
+        private AgentFrame HandleStopVideo(AgentMessage req)
+        {
+            StopVideo(notifyViewer: false);
+            return new AgentFrame(AgentMessage.Of(AgentMessageType.Ok, req.Id));
+        }
+
+        private void StopVideo(bool notifyViewer)
+        {
+            bool wasRunning;
+            lock (_videoLock)
+            {
+                wasRunning = _videoSession != null;
+                StopVideoLocked();
+            }
+            if (wasRunning)
+            {
+                _server.Log?.Invoke($"{Peer}: video stopped" + (_framesDropped > 0 ? $" ({_framesDropped} frame(s) dropped on a slow link)" : ""));
+                if (notifyViewer)
+                    try { SendAsync(new AgentMessage { Type = AgentMessageType.VideoStopped }, default, CancellationToken.None).GetAwaiter().GetResult(); } catch { }
+            }
+        }
+
+        /// <summary>Caller holds <see cref="_videoLock"/>.</summary>
+        private void StopVideoLocked()
+        {
+            var session = _videoSession;
+            _videoSession = null;
+            try { session?.Dispose(); } catch (Exception ex) { _server.Log?.Invoke($"{Peer}: video dispose failed: {ex.Message}"); }
+            _frames?.Writer.TryComplete();
+            _frames = null;
+            _framePump = null;
         }
 
         /// <summary>Checks the viewer's proof against its paired key (by viewer id) and then the token. Returns the secret that matched.</summary>
@@ -487,6 +673,12 @@ public sealed class AgentServer : IAsyncDisposable
                 case AgentMessageType.Scroll:
                     _server.HandleScroll(h);
                     return null; // fire and forget: a reply per wheel tick would only add latency
+                case AgentMessageType.StartVideo:
+                    return HandleStartVideo(h);
+                case AgentMessageType.SetVideo:
+                    return HandleSetVideo(h);
+                case AgentMessageType.StopVideo:
+                    return HandleStopVideo(h);
                 case AgentMessageType.ClipboardChanged:
                 case AgentMessageType.Pong:
                     return null; // informational

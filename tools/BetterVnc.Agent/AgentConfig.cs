@@ -33,6 +33,8 @@ public sealed class AgentConfig
 
     /// <summary>Accept high-resolution scroll events from the viewer (smooth scrolling). Off means VNC wheel clicks only.</summary>
     public bool EnableScroll { get; set; } = true;
+    /// <summary>Let viewers stream this screen as video (the viewer's "Stream" picture modes). Windows only so far; off means VNC pixels only.</summary>
+    public bool EnableVideo { get; set; } = true;
     /// <summary>Multiplier for the scroll distance the viewer sends (1.0 = one wheel notch moves what it moves on the Windows side).</summary>
     public double ScrollScale { get; set; } = 1.0;
     /// <summary>macOS only: flip the direction, for setups where the system applies "natural" scrolling to injected events too.</summary>

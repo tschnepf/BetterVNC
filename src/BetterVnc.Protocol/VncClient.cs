@@ -293,6 +293,76 @@ public sealed class VncClient : IDisposable
         });
     }
 
+    /// <summary>
+    /// Changes the Tight compression level and JPEG quality on the live connection: RFB allows a new SetEncodings at any
+    /// time, and a full (non-incremental) update follows so the whole picture is re-sent at the new quality. Whether the
+    /// server honours a lossy request shows up in <see cref="VncStatistics.TightJpegRects"/>.
+    /// </summary>
+    /// <param name="compressionLevel">0-9.</param>
+    /// <param name="jpegQuality">0-9, or -1 for lossless only.</param>
+    public void SetPictureQuality(int compressionLevel, int jpegQuality)
+    {
+        _options.CompressionLevel = Math.Clamp(compressionLevel, 0, 9);
+        _options.JpegQuality = jpegQuality < 0 ? -1 : Math.Clamp(jpegQuality, 0, 9);
+        if (_stream == null || _closing) return;
+        Emit(jpegQuality < 0 ? $"Picture: lossless, compression {_options.CompressionLevel}" : $"Picture: JPEG quality {_options.JpegQuality}, compression {_options.CompressionLevel}");
+        SendSetEncodings();
+        // A throttled incremental request that is still waiting is consumed by this full one.
+        _requestPending = false;
+        SendFramebufferUpdateRequest(false);
+    }
+
+    /// <summary>Asks the server for the whole framebuffer again (non-incremental), consuming any throttled request still waiting.</summary>
+    public void RefreshPicture()
+    {
+        if (_stream == null || _closing) return;
+        _requestPending = false;
+        SendFramebufferUpdateRequest(false);
+    }
+
+    private TimeSpan _updateInterval;
+    private volatile bool _requestPending;
+    private Timer? _requestTimer;
+
+    /// <summary>
+    /// Minimum time between framebuffer update requests. Zero (the default) asks for the next incremental update as soon
+    /// as one arrives, which is right when RFB carries the picture. While the picture comes from somewhere else (a video
+    /// stream from the guest agent) a long interval keeps cursor shapes, resizes and the fallback picture flowing at a
+    /// trickle instead of doubling the bandwidth. Lowering it releases a waiting request at once.
+    /// </summary>
+    public TimeSpan UpdateInterval
+    {
+        get => _updateInterval;
+        set
+        {
+            if (value < TimeSpan.Zero) value = TimeSpan.Zero;
+            _updateInterval = value;
+            if (value == TimeSpan.Zero && _requestPending)
+            {
+                _requestPending = false;
+                SendFramebufferUpdateRequest(true);
+            }
+        }
+    }
+
+    private void ScheduleIncrementalRequest()
+    {
+        var interval = _updateInterval;
+        if (interval <= TimeSpan.Zero)
+        {
+            SendFramebufferUpdateRequest(true);
+            return;
+        }
+        _requestPending = true;
+        var timer = _requestTimer ??= new Timer(_ =>
+        {
+            if (!_requestPending || _closing) return;
+            _requestPending = false;
+            SendFramebufferUpdateRequest(true);
+        });
+        timer.Change(interval, Timeout.InfiniteTimeSpan);
+    }
+
     private void SendSetEncodings()
     {
         var encodings = new List<int>(_options.PreferredEncodings);
@@ -532,6 +602,7 @@ public sealed class VncClient : IDisposable
                     case RfbEncoding.Tight:
                         _tight.Decode(r, fb, rect);
                         Statistics.TightRects++;
+                        Statistics.TightJpegRects = _tight.JpegRectangles;
                         fb.MarkDirty(rect);
                         break;
                     case RfbEncoding.Zrle:
@@ -605,7 +676,7 @@ public sealed class VncClient : IDisposable
 
         var dirty = fb.TakeDirty();
         if (dirty.Length > 0) FramebufferUpdated?.Invoke(dirty);
-        SendFramebufferUpdateRequest(true);
+        ScheduleIncrementalRequest();
     }
 
     private void HandleServerCutText(RfbReader r)
@@ -722,6 +793,9 @@ public sealed class VncClient : IDisposable
     private void Cleanup()
     {
         _closing = true;
+        _requestPending = false;
+        try { _requestTimer?.Dispose(); } catch { }
+        _requestTimer = null;
         try { _stream?.Dispose(); } catch { }
         try { _tcp?.Dispose(); } catch { }
         _stream = null;

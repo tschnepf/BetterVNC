@@ -50,10 +50,18 @@ public sealed class AgentConnection : IDisposable
     public string[] RemoteFeatures { get; private set; } = Array.Empty<string>();
     /// <summary>True when the agent accepts <see cref="ScrollAsync"/>.</summary>
     public bool SupportsScroll => RemoteFeatures.Contains(AgentFeature.Scroll);
+    /// <summary>True when the agent can stream its screen (<see cref="StartVideoAsync"/>); <see cref="RemoteCodecs"/> says in what.</summary>
+    public bool SupportsVideo => RemoteFeatures.Contains(AgentFeature.Video) && RemoteCodecs.Length > 0;
+    /// <summary>Codecs the agent can encode, most preferred first; empty when it cannot stream.</summary>
+    public string[] RemoteCodecs { get; private set; } = Array.Empty<string>();
     public bool IsConnected => _stream != null && _disposed == 0 && !_closed;
 
     /// <summary>The guest clipboard changed; the message lists formats and, for files, names and sizes.</summary>
     public event Action<AgentMessage>? ClipboardChanged;
+    /// <summary>One encoded video frame (header plus payload), raised on the receive thread while a stream runs.</summary>
+    public event Action<AgentFrame>? VideoFrameReceived;
+    /// <summary>The agent ended the stream by itself; the string says why (may be null).</summary>
+    public event Action<string?>? VideoStopped;
     /// <summary>The connection ended; the exception is null for a clean close by the agent.</summary>
     public event Action<Exception?>? Disconnected;
 
@@ -200,6 +208,7 @@ public sealed class AgentConnection : IDisposable
             throw new AgentAuthenticationException("The agent could not prove it knows the token.");
         RemoteFormats = welcome.Header.Formats ?? Array.Empty<string>();
         RemoteFeatures = welcome.Header.Features ?? Array.Empty<string>();
+        RemoteCodecs = welcome.Header.Codecs ?? Array.Empty<string>();
     }
 
     private void Attach(TcpClient tcp, NetworkStream stream)
@@ -228,6 +237,12 @@ public sealed class AgentConnection : IDisposable
                 {
                     case AgentMessageType.ClipboardChanged:
                         ClipboardChanged?.Invoke(h);
+                        break;
+                    case AgentMessageType.VideoFrame:
+                        VideoFrameReceived?.Invoke(frame);
+                        break;
+                    case AgentMessageType.VideoStopped:
+                        VideoStopped?.Invoke(h.Message);
                         break;
                     case AgentMessageType.Ping:
                         await SendAsync(AgentMessage.Of(AgentMessageType.Pong, h.Id), default, ct).ConfigureAwait(false);
@@ -307,8 +322,40 @@ public sealed class AgentConnection : IDisposable
         }, default, ct);
     }
 
-    public async Task<TimeSpan> PingAsync
-(CancellationToken ct)
+    /// <summary>The negotiated parameters of a stream, from the agent's <see cref="AgentMessageType.VideoStarted"/> reply.</summary>
+    public sealed record VideoStartInfo(string Codec, int BitrateKbps, int MaxFps, int Width, int Height, string EncoderKind);
+
+    /// <summary>
+    /// Asks the agent to stream its screen. <paramref name="codecs"/> lists what this side can decode, most preferred
+    /// first; the agent picks the first it can encode. Frames arrive through <see cref="VideoFrameReceived"/>. Throws
+    /// <see cref="NotSupportedException"/> when the agent did not announce video, <see cref="AgentProtocolException"/>
+    /// when it refuses (no common codec, capture failed).
+    /// </summary>
+    public async Task<VideoStartInfo> StartVideoAsync(IEnumerable<string> codecs, int bitrateKbps, int maxFps, CancellationToken ct)
+    {
+        if (!SupportsVideo) throw new NotSupportedException("The agent does not stream video.");
+        var reply = await RequestAsync(new AgentMessage
+        {
+            Type = AgentMessageType.StartVideo,
+            Codecs = codecs.ToArray(),
+            Bitrate = bitrateKbps,
+            MaxFps = maxFps,
+        }, default, ct).ConfigureAwait(false);
+        var h = reply.Header;
+        if (h.Type != AgentMessageType.VideoStarted || string.IsNullOrEmpty(h.Codec))
+            throw new AgentProtocolException($"Unexpected reply '{h.Type}' to startVideo.");
+        return new VideoStartInfo(h.Codec, h.Bitrate ?? bitrateKbps, h.MaxFps ?? maxFps, h.Width ?? 0, h.Height ?? 0, h.Encoder ?? AgentVideoEncoder.Software);
+    }
+
+    /// <summary>Changes the running stream's bitrate and/or frame-rate cap (null keeps a value), optionally asking for a key frame.</summary>
+    public Task SetVideoAsync(int? bitrateKbps, int? maxFps, bool keyframe, CancellationToken ct) =>
+        RequestAsync(new AgentMessage { Type = AgentMessageType.SetVideo, Bitrate = bitrateKbps, MaxFps = maxFps, KeyframeRequest = keyframe ? true : null }, default, ct);
+
+    /// <summary>Stops the stream; frames already in flight may still arrive briefly.</summary>
+    public Task StopVideoAsync(CancellationToken ct) =>
+        RequestAsync(AgentMessage.Of(AgentMessageType.StopVideo), default, ct);
+
+    public async Task<TimeSpan> PingAsync(CancellationToken ct)
     {
         var sw = System.Diagnostics.Stopwatch.StartNew();
         await RequestAsync(AgentMessage.Of(AgentMessageType.Ping), default, ct).ConfigureAwait(false);
