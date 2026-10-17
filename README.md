@@ -75,9 +75,11 @@ resize, clipboard, QEMU key/audio messages). They are built as a standalone exec
 dotnet build tests/BetterVnc.Protocol.Tests && tests/BetterVnc.Protocol.Tests/bin/Debug/net10.0/BetterVnc.Protocol.Tests.exe
 ```
 
-`dotnet test` also works on machines without Smart App Control. With Smart App Control on,
-Windows refuses to load the unsigned test DLL into Microsoft's signed `testhost.exe`, which is
-why the tests are an exe.
+The tests are executables rather than `dotnet test` projects for two reasons: with Smart App Control
+on, Windows refuses to load the unsigned test DLL into Microsoft's signed `testhost.exe`, and the
+.NET 10 SDK's `dotnet test` no longer drives xunit.v3 projects in its default (VSTest) mode. The
+release workflow runs the three executables the same way. `tests/BetterVnc.Agent.Tests` and
+`tests/BetterVnc.Media.Tests` (the latter under `net10.0-windows`) are built and run alike.
 
 ### Demo server
 
