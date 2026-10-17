@@ -13,7 +13,8 @@ public sealed class VideoRequest
 /// <param name="Keyframe">Decodable on its own (always true for JPEG).</param>
 /// <param name="TimestampMicros">Capture time in microseconds since the session started.</param>
 /// <param name="Width">Frame size; may change when the guest changes resolution.</param>
-public readonly record struct VideoFrame(ReadOnlyMemory<byte> Data, bool Keyframe, long TimestampMicros, int Width, int Height);
+/// <param name="OffsetX">Position of the frame in the desktop when it shows only part of it (see <see cref="IVideoSession.Offset"/>); null for the whole desktop.</param>
+public readonly record struct VideoFrame(ReadOnlyMemory<byte> Data, bool Keyframe, long TimestampMicros, int Width, int Height, int? OffsetX = null, int? OffsetY = null);
 
 /// <summary>
 /// Screen capture plus encoder on the machine the agent runs on. Implementations are OS specific; an agent without one
@@ -42,6 +43,11 @@ public interface IVideoSession : IDisposable
     /// <summary>Size of the frames at start; frames carry their own size afterwards.</summary>
     int Width { get; }
     int Height { get; }
+    /// <summary>
+    /// Where the frames sit in the desktop (pixels from its top-left corner) when they show only part of it, such as the
+    /// primary display of a desktop too large to encode as one picture; null when they show the whole desktop.
+    /// </summary>
+    (int X, int Y)? Offset => null;
     /// <summary>See <see cref="AgentVideoEncoder"/>.</summary>
     string EncoderKind { get; }
 

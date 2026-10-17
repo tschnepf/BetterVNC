@@ -65,7 +65,22 @@ internal sealed class H264ScreenSession : IVideoSession
     public int Width { get; private set; }
     public int Height { get; private set; }
     public string EncoderKind => _encoder.IsHardware ? AgentVideoEncoder.Hardware : AgentVideoEncoder.Software;
-    public string Description => $"{_grabber.Name}, {_encoder.Name} ({EncoderKind})";
+    public string Description => $"{_grabber.Name}, {_encoder.Name} ({EncoderKind}){(Offset is { } at ? $", the primary display at {at.X},{at.Y} of the {SystemInformation.VirtualScreen.Width}x{SystemInformation.VirtualScreen.Height} desktop" : "")}";
+
+    /// <summary>
+    /// When only the primary display is streamed: where it sits in the virtual screen, measured from the virtual screen's
+    /// top-left corner the way an RFB framebuffer is. Null while the whole desktop is streamed.
+    /// </summary>
+    public (int X, int Y)? Offset
+    {
+        get
+        {
+            if (!_primaryOnly) return null;
+            var all = SystemInformation.VirtualScreen;
+            var grabber = _grabber;
+            return (grabber.Left - all.Left, grabber.Top - all.Top);
+        }
+    }
 
     public void Start() => _thread.Start();
 
@@ -225,8 +240,9 @@ internal sealed class H264ScreenSession : IVideoSession
     {
         _encoder.Pump(output);
         if (output.Count == 0) return;
+        var at = Offset;
         foreach (var f in output)
-            _onFrame(new VideoFrame(f.Data, f.Keyframe, f.TimestampMicros, _encoder.Width, _encoder.Height));
+            _onFrame(new VideoFrame(f.Data, f.Keyframe, f.TimestampMicros, _encoder.Width, _encoder.Height, at?.X, at?.Y));
         output.Clear();
     }
 
@@ -280,6 +296,9 @@ internal interface IScreenGrabber : IDisposable
     string Name { get; }
     int Width { get; }
     int Height { get; }
+    /// <summary>Top-left corner of the captured area in virtual-screen coordinates (negative for a display left of or above the primary one).</summary>
+    int Left { get; }
+    int Top { get; }
     /// <summary>Waits up to <paramref name="timeoutMs"/> for the screen to change; true when it did and <paramref name="bgra"/> holds the new picture.</summary>
     bool TryCapture(int timeoutMs, byte[] bgra);
 }
@@ -293,6 +312,8 @@ internal sealed class DxgiGrabber : IScreenGrabber
     public string Name => $"Desktop Duplication ({_dup.OutputCount} output{(_dup.OutputCount == 1 ? "" : "s")})";
     public int Width => _dup.Width;
     public int Height => _dup.Height;
+    public int Left => _dup.Left;
+    public int Top => _dup.Top;
 
     public bool TryCapture(int timeoutMs, byte[] bgra)
     {
@@ -334,6 +355,8 @@ internal sealed class GdiGrabber : IScreenGrabber
     public string Name => _primaryOnly ? "GDI capture (primary display)" : "GDI capture";
     public int Width => _bounds.Width;
     public int Height => _bounds.Height;
+    public int Left => _bounds.Left;
+    public int Top => _bounds.Top;
 
     public bool TryCapture(int timeoutMs, byte[] bgra)
     {

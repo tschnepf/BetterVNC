@@ -322,8 +322,12 @@ public sealed class AgentConnection : IDisposable
         }, default, ct);
     }
 
-    /// <summary>The negotiated parameters of a stream, from the agent's <see cref="AgentMessageType.VideoStarted"/> reply.</summary>
-    public sealed record VideoStartInfo(string Codec, int BitrateKbps, int MaxFps, int Width, int Height, string EncoderKind);
+    /// <summary>
+    /// The negotiated parameters of a stream, from the agent's <see cref="AgentMessageType.VideoStarted"/> reply.
+    /// <paramref name="OffsetX"/>/<paramref name="OffsetY"/> say where the frames sit in the desktop when they show only
+    /// part of it (see <see cref="AgentMessage.OffsetX"/>); null when they show the whole desktop.
+    /// </summary>
+    public sealed record VideoStartInfo(string Codec, int BitrateKbps, int MaxFps, int Width, int Height, string EncoderKind, int? OffsetX = null, int? OffsetY = null);
 
     /// <summary>
     /// Asks the agent to stream its screen. <paramref name="codecs"/> lists what this side can decode, most preferred
@@ -344,7 +348,7 @@ public sealed class AgentConnection : IDisposable
         var h = reply.Header;
         if (h.Type != AgentMessageType.VideoStarted || string.IsNullOrEmpty(h.Codec))
             throw new AgentProtocolException($"Unexpected reply '{h.Type}' to startVideo.");
-        return new VideoStartInfo(h.Codec, h.Bitrate ?? bitrateKbps, h.MaxFps ?? maxFps, h.Width ?? 0, h.Height ?? 0, h.Encoder ?? AgentVideoEncoder.Software);
+        return new VideoStartInfo(h.Codec, h.Bitrate ?? bitrateKbps, h.MaxFps ?? maxFps, h.Width ?? 0, h.Height ?? 0, h.Encoder ?? AgentVideoEncoder.Software, h.OffsetX, h.OffsetY);
     }
 
     /// <summary>Changes the running stream's bitrate and/or frame-rate cap (null keeps a value), optionally asking for a key frame.</summary>

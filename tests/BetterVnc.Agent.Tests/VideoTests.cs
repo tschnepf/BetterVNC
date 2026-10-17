@@ -11,6 +11,8 @@ public sealed class FakeVideoSource : IGuestVideoSource
     public IReadOnlyList<string> Codecs { get; set; } = new[] { AgentVideoCodec.Jpeg };
     /// <summary>When set, Start throws with this message (capture impossible).</summary>
     public string? FailStart { get; set; }
+    /// <summary>When set, sessions report their frames as this part of the desktop (a primary display inside a larger one).</summary>
+    public (int X, int Y)? Offset { get; set; }
     public int Starts { get; private set; }
     public FakeSession? Last { get; private set; }
     private readonly System.Threading.Channels.Channel<FakeSession> _sessions = System.Threading.Channels.Channel.CreateUnbounded<FakeSession>();
@@ -22,7 +24,7 @@ public sealed class FakeVideoSource : IGuestVideoSource
     {
         Starts++;
         if (FailStart != null) throw new InvalidOperationException(FailStart);
-        var s = new FakeSession(request, onFrame, onEnded);
+        var s = new FakeSession(request, onFrame, onEnded) { Offset = Offset };
         Last = s;
         _sessions.Writer.TryWrite(s);
         return s;
@@ -49,6 +51,7 @@ public sealed class FakeVideoSource : IGuestVideoSource
         public int MaxFps { get; private set; }
         public int Width => 1920;
         public int Height => 1080;
+        public (int X, int Y)? Offset { get; set; }
         public string EncoderKind => AgentVideoEncoder.Software;
         public int KeyframeRequests { get; private set; }
         public bool IsDisposed => _disposed.Task.IsCompleted;
@@ -63,7 +66,7 @@ public sealed class FakeVideoSource : IGuestVideoSource
         public void RequestKeyframe() => KeyframeRequests++;
 
         /// <summary>Pushes one frame as the capture thread would.</summary>
-        public void Emit(byte[] data) => _onFrame(new VideoFrame(data, true, ++_n * 16_667L, Width, Height));
+        public void Emit(byte[] data) => _onFrame(new VideoFrame(data, true, ++_n * 16_667L, Width, Height, Offset?.X, Offset?.Y));
 
         /// <summary>The capture died (locked desktop, ...).</summary>
         public void End(string reason) => _onEnded(reason);
@@ -109,6 +112,41 @@ public class VideoFramingTests
         Assert.Equal(720, frame.Header.Height);
         Assert.Equal(7, frame.Header.Sequence);
         Assert.Equal(payload, frame.Payload.ToArray());
+        Assert.Null(frame.Header.OffsetX);
+        Assert.Null(frame.Header.OffsetY);
+    }
+
+    [Fact]
+    public async Task Frame_offset_round_trips_and_is_absent_from_whole_desktop_headers()
+    {
+        static async Task<(AgentMessage Header, string Json)> RoundTrip(AgentMessage header)
+        {
+            using var ms = new MemoryStream();
+            await AgentFraming.WriteAsync(ms, header, new byte[] { 1 }, default);
+            string json = Encoding.UTF8.GetString(ms.ToArray());
+            ms.Position = 0;
+            var frame = await AgentFraming.ReadAsync(ms, AgentFraming.DefaultMaxPayloadBytes, default);
+            return (frame!.Header, json);
+        }
+
+        // The primary display sits to the right of a monitor that is 1920 wide and 200 px lower than the desktop's top edge.
+        var partial = await RoundTrip(new AgentMessage { Type = AgentMessageType.VideoFrame, Width = 2256, Height = 1504, OffsetX = 1920, OffsetY = 200, Sequence = 1 });
+        Assert.Equal(1920, partial.Header.OffsetX);
+        Assert.Equal(200, partial.Header.OffsetY);
+        Assert.Contains("\"offsetX\":1920", partial.Json);
+        Assert.Contains("\"offsetY\":200", partial.Json);
+
+        // A primary display at the desktop origin still says so explicitly: 0 is not the same as "the whole desktop".
+        var atOrigin = await RoundTrip(new AgentMessage { Type = AgentMessageType.VideoStarted, Width = 2256, Height = 1504, OffsetX = 0, OffsetY = 0 });
+        Assert.Equal(0, atOrigin.Header.OffsetX);
+        Assert.Equal(0, atOrigin.Header.OffsetY);
+        Assert.Contains("\"offsetX\":0", atOrigin.Json);
+
+        // A whole-desktop stream (the single-display case) carries no offset fields at all, as before.
+        var whole = await RoundTrip(new AgentMessage { Type = AgentMessageType.VideoFrame, Width = 2256, Height = 1504, Sequence = 1 });
+        Assert.Null(whole.Header.OffsetX);
+        Assert.Null(whole.Header.OffsetY);
+        Assert.DoesNotContain("offset", whole.Json, StringComparison.OrdinalIgnoreCase);
     }
 }
 
@@ -180,6 +218,8 @@ public class VideoServerTests : IAsyncDisposable
         Assert.Equal(30, info.MaxFps);
         Assert.Equal(1920, info.Width);
         Assert.Equal(1080, info.Height);
+        Assert.Null(info.OffsetX); // the whole desktop: no placement
+        Assert.Null(info.OffsetY);
         Assert.Equal(AgentVideoEncoder.Software, info.EncoderKind);
         Assert.Equal(1, _server.StreamingSessions);
 
@@ -198,6 +238,7 @@ public class VideoServerTests : IAsyncDisposable
             Assert.All(received, f => Assert.True(f.Header.Keyframe));
             Assert.Equal(1920, received[0].Header.Width);
             Assert.Equal(3 * 16_667L, received[2].Header.Timestamp);
+            Assert.All(received, f => Assert.Null(f.Header.OffsetX));
         }
 
         await client.SetVideoAsync(1000, 15, keyframe: true, default);
@@ -209,6 +250,33 @@ public class VideoServerTests : IAsyncDisposable
         await session.Disposed;
         Assert.Equal(0, _server.StreamingSessions);
         Assert.True(client.IsConnected); // the clipboard side of the session is untouched
+    }
+
+    [Fact]
+    public async Task Stream_of_part_of_the_desktop_says_where_its_frames_sit()
+    {
+        _video.Offset = (1920, 0); // the primary display to the right of a 1920-wide monitor, as on a docked laptop
+        using var client = NewClient();
+        await client.ConnectAsync(default);
+        var received = new TaskCompletionSource<AgentFrame>(TaskCreationOptions.RunContinuationsAsynchronously);
+        client.VideoFrameReceived += f => received.TrySetResult(f);
+
+        var info = await client.StartVideoAsync(new[] { AgentVideoCodec.Jpeg }, 8000, 60, default);
+        Assert.Equal(1920, info.OffsetX);
+        Assert.Equal(0, info.OffsetY);
+        Assert.Equal(1920, info.Width);
+        Assert.Equal(1080, info.Height);
+
+        var session = await _video.NextSession();
+        session.Emit(new byte[] { 9 });
+        var frame = await received.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        Assert.Equal(1920, frame.Header.OffsetX);
+        Assert.Equal(0, frame.Header.OffsetY);
+        Assert.Equal(1920, frame.Header.Width);
+        Assert.Equal(1080, frame.Header.Height);
+
+        await client.StopVideoAsync(default);
+        await session.Disposed;
     }
 
     [Fact]

@@ -196,6 +196,14 @@ public sealed class AgentMessage
     /// <summary>Frame size in pixels (videoStarted, and on frames whose size changed).</summary>
     public int? Width { get; set; }
     public int? Height { get; set; }
+    /// <summary>
+    /// Where the frame sits in the desktop, in pixels from the desktop's top-left corner (videoStarted, videoFrame).
+    /// Present only when the frames show part of the desktop, such as the primary display of a multi-monitor desktop
+    /// too large to encode as one H.264 picture; absent when they show the whole desktop. The viewer paints such frames
+    /// onto that part of its framebuffer and keeps the RFB picture for the rest.
+    /// </summary>
+    public int? OffsetX { get; set; }
+    public int? OffsetY { get; set; }
     /// <summary>True on a frame that can be decoded on its own (always true for JPEG).</summary>
     public bool? Keyframe { get; set; }
     /// <summary>Capture time of a frame in microseconds since the stream started.</summary>

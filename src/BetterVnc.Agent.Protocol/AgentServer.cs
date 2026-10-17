@@ -480,7 +480,7 @@ public sealed class AgentServer : IAsyncDisposable
                 _videoSession = session;
                 started = session;
                 _framePump = Task.Run(() => PumpFramesAsync(frames));
-                _server.Log?.Invoke($"{Peer}: video started ({session.Codec}, {session.BitrateKbps} kbit/s, {session.MaxFps} fps max, {session.Width}x{session.Height}, {session.EncoderKind})");
+                _server.Log?.Invoke($"{Peer}: video started ({session.Codec}, {session.BitrateKbps} kbit/s, {session.MaxFps} fps max, {session.Width}x{session.Height}{(session.Offset is { } at ? $" at {at.X},{at.Y}" : "")}, {session.EncoderKind})");
                 return new AgentFrame(new AgentMessage
                 {
                     Type = AgentMessageType.VideoStarted,
@@ -490,6 +490,8 @@ public sealed class AgentServer : IAsyncDisposable
                     MaxFps = session.MaxFps,
                     Width = session.Width,
                     Height = session.Height,
+                    OffsetX = session.Offset?.X,
+                    OffsetY = session.Offset?.Y,
                     Encoder = session.EncoderKind,
                 });
             }
@@ -504,6 +506,8 @@ public sealed class AgentServer : IAsyncDisposable
                 Timestamp = frame.TimestampMicros,
                 Width = frame.Width,
                 Height = frame.Height,
+                OffsetX = frame.OffsetX,
+                OffsetY = frame.OffsetY,
                 Sequence = Interlocked.Increment(ref _frameSequence),
             };
             // The source may reuse its buffer as soon as we return, so the bytes are copied here, once.

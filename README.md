@@ -167,7 +167,10 @@ Microsoft's Media Foundation H.264 decoder in low-latency mode on a worker threa
 BGRX and shows the newest picture when it falls behind (older ones are still decoded, they are the
 references); a gap in the frame sequence, on either side, makes it ask for a key frame and wait for
 it. A desktop wider or taller than H.264 allows (4096×2304, i.e. several monitors side by side) is
-streamed as its primary display only. Measured with `bettervnc-agent probe … video` against a local
+streamed as its primary display only, and the agent says where that display sits in the desktop
+(`offsetX`/`offsetY` in `videoStarted` and on every frame), so the viewer paints the stream onto
+exactly that part of the picture while the other monitors stay on the lossless VNC picture instead
+of the one display being stretched across all of them. Measured with `bettervnc-agent probe … video` against a local
 agent on a 2256×1504 display with an AMD Radeon 890M (hardware encoder), a 1200×800 window of
 random colour blocks repainting at 60 Hz:
 

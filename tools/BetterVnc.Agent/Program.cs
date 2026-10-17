@@ -407,6 +407,7 @@ public static class Program
                     string? saveTo = args.Count > 3 ? args[3] : null;
                     long frames = 0, bytes = 0, keyframes = 0;
                     int w = 0, h = 0;
+                    string at = "";
                     byte[]? first = null;
                     conn.VideoFrameReceived += f =>
                     {
@@ -415,19 +416,20 @@ public static class Program
                         if (f.Header.Keyframe == true) Interlocked.Increment(ref keyframes);
                         w = f.Header.Width ?? w;
                         h = f.Header.Height ?? h;
+                        at = f.Header.OffsetX is { } ox ? $" at {ox},{f.Header.OffsetY ?? 0}" : "";
                         first ??= f.Payload.ToArray();
                     };
                     conn.VideoStopped += r => Console.WriteLine("Stream stopped by the agent: " + (r ?? "no reason given"));
                     var codecs = args.Count > 4 ? new[] { args[4] } : new[] { AgentVideoCodec.H264, AgentVideoCodec.Jpeg };
                     var info = await conn.StartVideoAsync(codecs, bitrate, fps, cts.Token);
-                    Console.WriteLine($"Streaming {info.Codec} {info.Width}x{info.Height}, {info.BitrateKbps} kbit/s, {info.MaxFps} fps max, {info.EncoderKind} encoder.");
+                    Console.WriteLine($"Streaming {info.Codec} {info.Width}x{info.Height}{(info.OffsetX is { } iox ? $" at {iox},{info.OffsetY ?? 0} of the desktop (part of it)" : "")}, {info.BitrateKbps} kbit/s, {info.MaxFps} fps max, {info.EncoderKind} encoder.");
                     Console.WriteLine("Move something on the agent's screen: unchanged frames are not sent.");
                     long lastFrames = 0, lastBytes = 0;
                     for (int i = 0; i < seconds && !cts.IsCancellationRequested; i++)
                     {
                         try { await Task.Delay(1000, cts.Token); } catch (OperationCanceledException) { break; }
                         long f = Interlocked.Read(ref frames), b = Interlocked.Read(ref bytes);
-                        Console.WriteLine($"  {i + 1,3} s  {f - lastFrames,4} frames  {(b - lastBytes) * 8 / 1000.0,8:0} kbit/s  {w}x{h}");
+                        Console.WriteLine($"  {i + 1,3} s  {f - lastFrames,4} frames  {(b - lastBytes) * 8 / 1000.0,8:0} kbit/s  {w}x{h}{at}");
                         lastFrames = f;
                         lastBytes = b;
                     }

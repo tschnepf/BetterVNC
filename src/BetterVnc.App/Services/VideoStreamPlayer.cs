@@ -112,7 +112,8 @@ public sealed class VideoStreamPlayer : IDisposable
         _client.UpdateInterval = RfbIntervalWhileStreaming;
         IdleFallbackActive = false;
         _idleTimer.Start();
-        Message?.Invoke($"Streaming {info.Codec} {info.Width}×{info.Height} from the guest agent ({info.EncoderKind} encoder, {info.BitrateKbps / 1000.0:0.#} Mbit/s, {info.MaxFps} fps max)");
+        string where = info.OffsetX is { } ox ? $" (the primary display, at {ox},{info.OffsetY ?? 0} of the desktop; the other displays stay on VNC)" : "";
+        Message?.Invoke($"Streaming {info.Codec} {info.Width}×{info.Height}{where} from the guest agent ({info.EncoderKind} encoder, {info.BitrateKbps / 1000.0:0.#} Mbit/s, {info.MaxFps} fps max)");
     }
 
     /// <summary>Stops the stream and returns the picture to RFB with a full lossless update.</summary>
@@ -191,6 +192,8 @@ public sealed class VideoStreamPlayer : IDisposable
                 var h = frame.Header;
                 var info = _agent.StreamInfo;
                 string codec = h.Codec ?? info?.Codec ?? AgentVideoCodec.Jpeg;
+                // Where the frame sits in the desktop when it shows only part of it (the frame header wins over videoStarted).
+                (int X, int Y)? offset = h.OffsetX is { } hx ? (hx, h.OffsetY ?? 0) : info?.OffsetX is { } ix ? (ix, info.OffsetY ?? 0) : null;
                 int gen = Volatile.Read(ref _generation);
                 if (gen != generation)
                 {
@@ -238,7 +241,7 @@ public sealed class VideoStreamPlayer : IDisposable
                             if (!show) return;
                             var bgrx = Rent(picture.Width * picture.Height * 4);
                             picture.ToBgrx(bgrx);
-                            _view.PresentExternalFrame(bgrx, picture.Width, picture.Height, Return);
+                            _view.PresentExternalFrame(bgrx, picture.Width, picture.Height, Return, offset);
                             shown = true;
                         });
                         if (!shown) { Interlocked.Increment(ref _framesSkipped); continue; }
@@ -249,7 +252,7 @@ public sealed class VideoStreamPlayer : IDisposable
                         int w = h.Width ?? info?.Width ?? 0;
                         int hgt = h.Height ?? info?.Height ?? 0;
                         var bgrx = _jpeg.DecodeToBgrx(frame.Payload.Span, w, hgt);
-                        _view.PresentExternalFrame(bgrx, w, hgt);
+                        _view.PresentExternalFrame(bgrx, w, hgt, null, offset);
                     }
                 }
                 catch (Exception ex)

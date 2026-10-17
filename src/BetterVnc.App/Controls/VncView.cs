@@ -103,21 +103,29 @@ public sealed class VncView : Grid
 
     private WriteableBitmap? _externalBitmap;
     private volatile bool _externalShown;
+    /// <summary>
+    /// Where partial frames land in the framebuffer (see <see cref="PresentExternalFrame"/>); null while frames show the
+    /// whole desktop and are stretched over the framebuffer area. Only touched on the dispatcher.
+    /// </summary>
+    private RfbRect? _externalRect;
 
     /// <summary>True while the displayed picture comes from <see cref="PresentExternalFrame"/> rather than the RFB framebuffer.</summary>
     public bool IsExternalShown => _externalShown;
 
     private readonly object _pendingLock = new();
-    private (byte[] Pixels, int Width, int Height, Action<byte[]>? Release)? _pendingExternal;
+    private (byte[] Pixels, int Width, int Height, (int X, int Y)? Offset, Action<byte[]>? Release)? _pendingExternal;
 
     /// <summary>
     /// Shows a decoded frame from somewhere other than RFB (the guest agent's video stream) in place of the framebuffer.
     /// The RFB framebuffer keeps being decoded underneath so <see cref="ShowFramebuffer"/> can switch back instantly.
     /// <paramref name="bgrx"/> holds width*height*4 bytes; it belongs to the view until <paramref name="release"/> is
     /// called with it (or forever when no release is given). A frame that arrives before the previous one was drawn
-    /// replaces it: the newest picture wins. Safe to call from any thread.
+    /// replaces it: the newest picture wins. Without <paramref name="offset"/> the frame is the whole remote desktop and
+    /// is scaled over the framebuffer area. With one, it shows only the part of the desktop whose top-left corner is at
+    /// that framebuffer position (the primary display of a desktop too large to encode): it is painted there pixel for
+    /// pixel, clipped to the framebuffer, and the RFB picture stays visible around it. Safe to call from any thread.
     /// </summary>
-    public void PresentExternalFrame(byte[] bgrx, int width, int height, Action<byte[]>? release = null)
+    public void PresentExternalFrame(byte[] bgrx, int width, int height, Action<byte[]>? release = null, (int X, int Y)? offset = null)
     {
         if (width <= 0 || height <= 0 || bgrx.Length < width * height * 4) { release?.Invoke(bgrx); return; }
         bool queue;
@@ -125,12 +133,12 @@ public sealed class VncView : Grid
         {
             if (_pendingExternal is { } superseded) superseded.Release?.Invoke(superseded.Pixels);
             queue = _pendingExternal == null;
-            _pendingExternal = (bgrx, width, height, release);
+            _pendingExternal = (bgrx, width, height, offset, release);
         }
         if (!queue) return;
         Dispatcher.BeginInvoke(() =>
         {
-            (byte[] Pixels, int Width, int Height, Action<byte[]>? Release) frame;
+            (byte[] Pixels, int Width, int Height, (int X, int Y)? Offset, Action<byte[]>? Release) frame;
             lock (_pendingLock)
             {
                 if (_pendingExternal is not { } pending) return;
@@ -140,18 +148,99 @@ public sealed class VncView : Grid
             try
             {
                 if (_client == null) return;
-                if (_externalBitmap == null || _externalBitmap.PixelWidth != frame.Width || _externalBitmap.PixelHeight != frame.Height)
-                    _externalBitmap = new WriteableBitmap(frame.Width, frame.Height, 96, 96, PixelFormats.Bgr32, null);
-                _externalBitmap.WritePixels(new Int32Rect(0, 0, frame.Width, frame.Height), frame.Pixels, frame.Width * 4, 0);
+                if (frame.Offset is { } at)
+                {
+                    if (!PresentPartialFrame(frame.Pixels, frame.Width, frame.Height, at)) return;
+                }
+                else
+                {
+                    _externalRect = null;
+                    if (_externalBitmap == null || _externalBitmap.PixelWidth != frame.Width || _externalBitmap.PixelHeight != frame.Height)
+                        _externalBitmap = new WriteableBitmap(frame.Width, frame.Height, 96, 96, PixelFormats.Bgr32, null);
+                    _externalBitmap.WritePixels(new Int32Rect(0, 0, frame.Width, frame.Height), frame.Pixels, frame.Width * 4, 0);
+                }
                 if (!_externalShown)
                 {
                     _externalShown = true;
                     _image.Source = _externalBitmap;
                 }
+                else if (frame.Offset != null && !ReferenceEquals(_image.Source, _externalBitmap))
+                {
+                    _image.Source = _externalBitmap; // the framebuffer was resized meanwhile and the bitmap with it
+                }
                 CountFrame();
             }
             finally { frame.Release?.Invoke(frame.Pixels); }
         }, DispatcherPriority.Render);
+    }
+
+    /// <summary>
+    /// Writes a frame that covers only part of the desktop into a framebuffer-sized external bitmap at <paramref name="at"/>.
+    /// The rest of that bitmap carries the RFB picture: copied in full when the bitmap is new, the stream resumes or the
+    /// frame moves, and kept current by <see cref="Render"/> afterwards. False when there is no framebuffer to paint into.
+    /// </summary>
+    private bool PresentPartialFrame(byte[] pixels, int width, int height, (int X, int Y) at)
+    {
+        var fb = _client!.Framebuffer;
+        int fbW = fb.Width, fbH = fb.Height;
+        if (fbW <= 0 || fbH <= 0) return false;
+        bool fresh = _externalBitmap == null || _externalBitmap.PixelWidth != fbW || _externalBitmap.PixelHeight != fbH;
+        if (fresh) _externalBitmap = new WriteableBitmap(fbW, fbH, 96, 96, PixelFormats.Bgr32, null);
+        var target = new RfbRect(at.X, at.Y, width, height);
+        if (fresh || !_externalShown || _externalRect != target)
+        {
+            _externalRect = target;
+            CopyFramebufferInto(_externalBitmap!, fb, new[] { fb.Bounds }, exclude: null);
+        }
+        var visible = target.Intersect(fb.Bounds);
+        if (visible.IsEmpty) return true; // the display lies outside what the VNC server shares; nothing to show of it
+        var source = new Int32Rect(visible.X - at.X, visible.Y - at.Y, visible.Width, visible.Height);
+        _externalBitmap!.WritePixels(source, pixels, width * 4, visible.X, visible.Y);
+        return true;
+    }
+
+    /// <summary>
+    /// Copies <paramref name="rects"/> of the RFB framebuffer into <paramref name="bmp"/>, which has the framebuffer's size,
+    /// leaving <paramref name="exclude"/> (the streamed part) alone.
+    /// </summary>
+    private static unsafe void CopyFramebufferInto(WriteableBitmap bmp, Framebuffer fb, IEnumerable<RfbRect> rects, RfbRect? exclude)
+    {
+        bmp.Lock();
+        try
+        {
+            lock (fb.SyncRoot)
+            {
+                if (fb.Width != bmp.PixelWidth || fb.Height != bmp.PixelHeight) return; // resize pending
+                byte* dst = (byte*)bmp.BackBuffer;
+                int dstStride = bmp.BackBufferStride;
+                fixed (byte* src = fb.Pixels)
+                {
+                    foreach (var r0 in rects)
+                    {
+                        foreach (var r in Outside(r0.Intersect(fb.Bounds), exclude))
+                        {
+                            int rowBytes = r.Width * 4;
+                            for (int y = 0; y < r.Height; y++)
+                                Buffer.MemoryCopy(src + fb.Offset(r.X, r.Y + y), dst + (r.Y + y) * dstStride + r.X * 4, rowBytes, rowBytes);
+                            bmp.AddDirtyRect(new Int32Rect(r.X, r.Y, r.Width, r.Height));
+                        }
+                    }
+                }
+            }
+        }
+        finally { bmp.Unlock(); }
+    }
+
+    /// <summary>The parts of <paramref name="r"/> not covered by <paramref name="hole"/>: up to four rectangles, none empty.</summary>
+    private static IEnumerable<RfbRect> Outside(RfbRect r, RfbRect? hole)
+    {
+        if (r.IsEmpty) yield break;
+        var i = hole is { } h ? r.Intersect(h) : default;
+        if (i.IsEmpty) { yield return r; yield break; }
+        if (i.Y > r.Y) yield return new RfbRect(r.X, r.Y, r.Width, i.Y - r.Y);
+        if (i.Bottom < r.Bottom) yield return new RfbRect(r.X, i.Bottom, r.Width, r.Bottom - i.Bottom);
+        if (i.X > r.X) yield return new RfbRect(r.X, i.Y, i.X - r.X, i.Height);
+        if (i.Right < r.Right) yield return new RfbRect(i.Right, i.Y, r.Right - i.Right, i.Height);
     }
 
     /// <summary>Returns to the RFB framebuffer picture (repainting all of it). Safe to call from any thread.</summary>
@@ -283,6 +372,10 @@ public sealed class VncView : Grid
         {
             bmp.Unlock();
         }
+
+        // A stream of part of the desktop shows the RFB picture around it: keep that part of its bitmap current as well.
+        if (_externalShown && _externalRect is { } streamed && _externalBitmap is { } ext)
+            CopyFramebufferInto(ext, fb, rects, exclude: streamed);
 
         // While a stream is on screen the framebuffer is kept current but not shown, so it is not a rendered frame.
         if (!_externalShown) CountFrame();
