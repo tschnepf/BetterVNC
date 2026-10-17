@@ -107,27 +107,50 @@ public sealed class VncView : Grid
     /// <summary>True while the displayed picture comes from <see cref="PresentExternalFrame"/> rather than the RFB framebuffer.</summary>
     public bool IsExternalShown => _externalShown;
 
+    private readonly object _pendingLock = new();
+    private (byte[] Pixels, int Width, int Height, Action<byte[]>? Release)? _pendingExternal;
+
     /// <summary>
     /// Shows a decoded frame from somewhere other than RFB (the guest agent's video stream) in place of the framebuffer.
     /// The RFB framebuffer keeps being decoded underneath so <see cref="ShowFramebuffer"/> can switch back instantly.
-    /// <paramref name="bgrx"/> holds width*height*4 bytes and must not be reused by the caller until the next frame.
-    /// Safe to call from any thread.
+    /// <paramref name="bgrx"/> holds width*height*4 bytes; it belongs to the view until <paramref name="release"/> is
+    /// called with it (or forever when no release is given). A frame that arrives before the previous one was drawn
+    /// replaces it: the newest picture wins. Safe to call from any thread.
     /// </summary>
-    public void PresentExternalFrame(byte[] bgrx, int width, int height)
+    public void PresentExternalFrame(byte[] bgrx, int width, int height, Action<byte[]>? release = null)
     {
-        if (width <= 0 || height <= 0 || bgrx.Length < width * height * 4) return;
+        if (width <= 0 || height <= 0 || bgrx.Length < width * height * 4) { release?.Invoke(bgrx); return; }
+        bool queue;
+        lock (_pendingLock)
+        {
+            if (_pendingExternal is { } superseded) superseded.Release?.Invoke(superseded.Pixels);
+            queue = _pendingExternal == null;
+            _pendingExternal = (bgrx, width, height, release);
+        }
+        if (!queue) return;
         Dispatcher.BeginInvoke(() =>
         {
-            if (_client == null) return;
-            if (_externalBitmap == null || _externalBitmap.PixelWidth != width || _externalBitmap.PixelHeight != height)
-                _externalBitmap = new WriteableBitmap(width, height, 96, 96, PixelFormats.Bgr32, null);
-            _externalBitmap.WritePixels(new Int32Rect(0, 0, width, height), bgrx, width * 4, 0);
-            if (!_externalShown)
+            (byte[] Pixels, int Width, int Height, Action<byte[]>? Release) frame;
+            lock (_pendingLock)
             {
-                _externalShown = true;
-                _image.Source = _externalBitmap;
+                if (_pendingExternal is not { } pending) return;
+                frame = pending;
+                _pendingExternal = null;
             }
-            CountFrame();
+            try
+            {
+                if (_client == null) return;
+                if (_externalBitmap == null || _externalBitmap.PixelWidth != frame.Width || _externalBitmap.PixelHeight != frame.Height)
+                    _externalBitmap = new WriteableBitmap(frame.Width, frame.Height, 96, 96, PixelFormats.Bgr32, null);
+                _externalBitmap.WritePixels(new Int32Rect(0, 0, frame.Width, frame.Height), frame.Pixels, frame.Width * 4, 0);
+                if (!_externalShown)
+                {
+                    _externalShown = true;
+                    _image.Source = _externalBitmap;
+                }
+                CountFrame();
+            }
+            finally { frame.Release?.Invoke(frame.Pixels); }
         }, DispatcherPriority.Render);
     }
 

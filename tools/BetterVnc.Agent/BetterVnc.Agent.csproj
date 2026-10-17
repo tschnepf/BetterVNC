@@ -55,6 +55,7 @@
     <Compile Remove="Clipboards\WindowsClipboard.cs" />
     <Compile Remove="Input\WindowsInput.cs" />
     <Compile Remove="Video\WindowsScreenSource.cs" />
+    <Compile Remove="Video\H264ScreenSession.cs" />
     <Compile Remove="Pairing\WindowsApprover.cs" />
     <Compile Remove="Tray\TrayApp.cs" />
     <Compile Remove="Tray\SettingsForm.cs" />
@@ -63,6 +64,11 @@
 
   <ItemGroup>
     <ProjectReference Include="..\..\src\BetterVnc.Agent.Protocol\BetterVnc.Agent.Protocol.csproj" />
+  </ItemGroup>
+
+  <ItemGroup Condition="'$(TargetFramework)' == 'net10.0-windows'">
+    <!-- Media Foundation H.264 encoder and Desktop Duplication capture for the screen stream. -->
+    <ProjectReference Include="..\..\src\BetterVnc.Media\BetterVnc.Media.csproj" />
   </ItemGroup>
 
 </Project>

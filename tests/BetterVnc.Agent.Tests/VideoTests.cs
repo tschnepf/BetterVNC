@@ -212,6 +212,40 @@ public class VideoServerTests : IAsyncDisposable
     }
 
     [Fact]
+    public async Task Agent_offering_both_codecs_gives_the_viewer_its_first_preference()
+    {
+        _video.Codecs = new[] { AgentVideoCodec.H264, AgentVideoCodec.Jpeg };
+        using var client = NewClient();
+        await client.ConnectAsync(default);
+        Assert.Equal(new[] { AgentVideoCodec.H264, AgentVideoCodec.Jpeg }, client.RemoteCodecs);
+
+        // The viewer prefers H.264: both have it, H.264 wins even though the agent would also do JPEG.
+        var info = await client.StartVideoAsync(new[] { AgentVideoCodec.H264, AgentVideoCodec.Jpeg }, 8000, 60, default);
+        Assert.Equal(AgentVideoCodec.H264, info.Codec);
+        var session = await _video.NextSession();
+        Assert.Equal(AgentVideoCodec.H264, session.Codec);
+
+        // A viewer that only decodes JPEG still gets JPEG from the same agent.
+        var jpeg = await client.StartVideoAsync(new[] { AgentVideoCodec.Jpeg }, 8000, 60, default);
+        Assert.Equal(AgentVideoCodec.Jpeg, jpeg.Codec);
+        await session.Disposed;
+        Assert.Equal(AgentVideoCodec.Jpeg, (await _video.NextSession()).Codec);
+
+        // The viewer's order decides, not the agent's.
+        var jpegFirst = await client.StartVideoAsync(new[] { AgentVideoCodec.Jpeg, AgentVideoCodec.H264 }, 8000, 60, default);
+        Assert.Equal(AgentVideoCodec.Jpeg, jpegFirst.Codec);
+    }
+
+    [Fact]
+    public void Viewer_side_preference_lists_h264_before_jpeg()
+    {
+        // The viewer's AgentClient.DecodableCodecs is { h264, jpeg }; the probe uses the same list. Keep the protocol
+        // constants it is built from stable.
+        Assert.Equal("h264", AgentVideoCodec.H264);
+        Assert.Equal("jpeg", AgentVideoCodec.Jpeg);
+    }
+
+    [Fact]
     public async Task No_common_codec_is_refused()
     {
         using var client = NewClient();

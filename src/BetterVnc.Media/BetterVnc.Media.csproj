@@ -1,0 +1,18 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    Windows media plumbing shared by the viewer and the Windows build of the guest agent: Media Foundation H.264
+    encoder and decoder wrappers, DXGI Desktop Duplication capture, and the BGRA/NV12 pixel conversions between
+    them. Plain COM interop over mfplat/d3d11/dxgi; no NuGet packages, so the agent's single-file publish stays simple.
+  -->
+
+  <PropertyGroup>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <RootNamespace>BetterVnc.Media</RootNamespace>
+    <LangVersion>latest</LangVersion>
+  </PropertyGroup>
+
+</Project>

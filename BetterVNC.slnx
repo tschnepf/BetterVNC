@@ -2,10 +2,12 @@
   <Folder Name="/src/">
     <Project Path="src/BetterVnc.Agent.Protocol/BetterVnc.Agent.Protocol.csproj" />
     <Project Path="src/BetterVnc.App/BetterVnc.App.csproj" />
+    <Project Path="src/BetterVnc.Media/BetterVnc.Media.csproj" />
     <Project Path="src/BetterVnc.Protocol/BetterVnc.Protocol.csproj" />
   </Folder>
   <Folder Name="/tests/">
     <Project Path="tests/BetterVnc.Agent.Tests/BetterVnc.Agent.Tests.csproj" />
+    <Project Path="tests/BetterVnc.Media.Tests/BetterVnc.Media.Tests.csproj" />
     <Project Path="tests/BetterVnc.Protocol.Tests/BetterVnc.Protocol.Tests.csproj" />
   </Folder>
   <Folder Name="/tools/">

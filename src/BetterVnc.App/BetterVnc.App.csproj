@@ -24,6 +24,7 @@
   <ItemGroup>
     <ProjectReference Include="..\BetterVnc.Protocol\BetterVnc.Protocol.csproj" />
     <ProjectReference Include="..\BetterVnc.Agent.Protocol\BetterVnc.Agent.Protocol.csproj" />
+    <ProjectReference Include="..\BetterVnc.Media\BetterVnc.Media.csproj" />
   </ItemGroup>
 
 </Project>

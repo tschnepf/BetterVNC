@@ -1,18 +1,22 @@
+using System.Collections.Concurrent;
 using System.Threading.Channels;
 using System.Windows.Threading;
 using BetterVnc.Agent.Protocol;
 using BetterVnc.App.Controls;
 using BetterVnc.App.Models;
+using BetterVnc.Media;
 using BetterVnc.Protocol;
 
 namespace BetterVnc.App.Services;
 
 /// <summary>
 /// Plays the guest agent's video stream into a <see cref="VncView"/> while the RFB connection goes on carrying input,
-/// cursor shapes and resizes at a trickle. Frames are decoded off the UI thread with a latest-frame-wins policy, so a
-/// slow decoder skips frames instead of falling behind. When the agent sends nothing for a moment (the screen is still)
-/// the view switches back to the RFB framebuffer and a full lossless update is requested, so a quiet desktop is always
-/// shown pixel-exact; the first new frame switches back to the stream.
+/// cursor shapes and resizes at a trickle. Frames are decoded off the UI thread with a latest-frame-wins policy for
+/// what is shown: motion JPEG frames stand alone, so a slow decoder simply skips to the newest; H.264 delta frames
+/// all go through the decoder (they are each other's reference) but only the newest picture is converted and shown.
+/// When the agent sends nothing for a moment (the screen is still) the view switches back to the RFB framebuffer and
+/// a full lossless update is requested, so a quiet desktop is always shown pixel-exact; the first new frame switches
+/// back to the stream.
 /// </summary>
 public sealed class VideoStreamPlayer : IDisposable
 {
@@ -25,11 +29,15 @@ public sealed class VideoStreamPlayer : IDisposable
     private readonly VncClient _client;
     private readonly VncView _view;
     private readonly Dispatcher _dispatcher;
-    private readonly Channel<AgentFrame> _frames = Channel.CreateBounded<AgentFrame>(new BoundedChannelOptions(1) { FullMode = BoundedChannelFullMode.DropOldest, SingleReader = true });
+    private readonly Channel<AgentFrame> _frames;
     private readonly CancellationTokenSource _cts = new();
     private readonly DispatcherTimer _idleTimer;
     private readonly WicJpegDecoder _jpeg = new();
+    private readonly ConcurrentBag<byte[]> _pool = new();
     private Task? _decodeLoop;
+    private int _generation;
+    private volatile bool _lostFrames;
+    private long _lastKeyframeRequest;
     private bool _disposed;
 
     // statistics (read from the UI thread, written from the decode thread; slightly stale is fine)
@@ -43,6 +51,9 @@ public sealed class VideoStreamPlayer : IDisposable
         _client = client;
         _view = view;
         _dispatcher = dispatcher;
+        // Room for a burst of H.264 delta frames; when even that overflows the oldest go and a key frame is requested.
+        _frames = Channel.CreateBounded<AgentFrame>(new BoundedChannelOptions(32) { FullMode = BoundedChannelFullMode.DropOldest, SingleReader = true },
+            _ => { Interlocked.Increment(ref _framesSkipped); _lostFrames = true; });
         _idleTimer = new DispatcherTimer(DispatcherPriority.Background, dispatcher) { Interval = IdleAfter };
         _idleTimer.Tick += (_, _) => OnIdle();
         _agent.StreamFrame += OnFrame;
@@ -90,6 +101,7 @@ public sealed class VideoStreamPlayer : IDisposable
         }
         var info = await _agent.StartStreamAsync(mode.BitrateKbps, mode.MaxFps).ConfigureAwait(true);
         Mode = mode;
+        Interlocked.Increment(ref _generation);
         Interlocked.Exchange(ref _bytesReceived, 0);
         Interlocked.Exchange(ref _framesReceived, 0);
         Interlocked.Exchange(ref _framesDecoded, 0);
@@ -137,38 +149,123 @@ public sealed class VideoStreamPlayer : IDisposable
         if (!IsStreaming) return;
         Interlocked.Increment(ref _framesReceived);
         Interlocked.Add(ref _bytesReceived, frame.Payload.Length);
-        if (!_frames.Writer.TryWrite(frame)) Interlocked.Increment(ref _framesSkipped);
+        _frames.Writer.TryWrite(frame);
+    }
+
+    private byte[] Rent(int size)
+    {
+        while (_pool.TryTake(out var buffer))
+            if (buffer.Length == size) return buffer;
+        return new byte[size];
+    }
+
+    private void Return(byte[] buffer)
+    {
+        if (_pool.Count < 4) _pool.Add(buffer);
+    }
+
+    /// <summary>Asks the agent for a key frame (at most twice a second) after frames were lost on the way or dropped here.</summary>
+    private void RequestKeyframe()
+    {
+        long now = Environment.TickCount64;
+        if (now - Interlocked.Read(ref _lastKeyframeRequest) < 500) return;
+        Interlocked.Exchange(ref _lastKeyframeRequest, now);
+        _ = _dispatcher.BeginInvoke(async () =>
+        {
+            try { await _agent.SetStreamAsync(null, null, keyframe: true); }
+            catch (Exception ex) { Message?.Invoke("Key frame request failed: " + ex.Message); }
+        });
     }
 
     private async Task DecodeLoopAsync(CancellationToken ct)
     {
+        H264Decoder? h264 = null;
+        int generation = -1;
+        int? lastSequence = null;
+        bool awaitingKeyframe = false;
         try
         {
             await foreach (var frame in _frames.Reader.ReadAllAsync(ct).ConfigureAwait(false))
             {
                 if (!IsStreaming) continue;
                 var h = frame.Header;
-                int w = h.Width ?? _agent.StreamInfo?.Width ?? 0;
-                int hgt = h.Height ?? _agent.StreamInfo?.Height ?? 0;
-                byte[] bgrx;
+                var info = _agent.StreamInfo;
+                string codec = h.Codec ?? info?.Codec ?? AgentVideoCodec.Jpeg;
+                int gen = Volatile.Read(ref _generation);
+                if (gen != generation)
+                {
+                    // A new stream: decoder state from the previous one is meaningless.
+                    generation = gen;
+                    lastSequence = null;
+                    awaitingKeyframe = false;
+                    _lostFrames = false;
+                    h264?.Dispose();
+                    h264 = null;
+                }
+
                 try
                 {
-                    // Only JPEG is decodable in this build; the codec was negotiated from DecodableCodecs so nothing else arrives.
-                    bgrx = _jpeg.DecodeToBgrx(frame.Payload.Span, w, hgt);
+                    if (string.Equals(codec, AgentVideoCodec.H264, StringComparison.OrdinalIgnoreCase))
+                    {
+                        if (h264 == null)
+                        {
+                            h264 = new H264Decoder();
+                            var name = h264.Name;
+                            _ = _dispatcher.BeginInvoke(() => Message?.Invoke($"H.264 decoder: {name}"));
+                        }
+                        // Delta frames need every frame before them since the last key frame. A gap in the sequence
+                        // (the agent dropped frames on a slow link) or a drop here means: wait for the next key frame.
+                        if (_lostFrames) { _lostFrames = false; awaitingKeyframe = true; }
+                        if (h.Sequence is { } seq)
+                        {
+                            if (lastSequence is { } last && seq != last + 1) awaitingKeyframe = true;
+                            lastSequence = seq;
+                        }
+                        if (awaitingKeyframe)
+                        {
+                            if (h.Keyframe != true)
+                            {
+                                Interlocked.Increment(ref _framesSkipped);
+                                RequestKeyframe();
+                                continue;
+                            }
+                            awaitingKeyframe = false;
+                        }
+                        bool show = _frames.Reader.Count == 0; // latest picture wins; older ones are decoded for their references only
+                        bool shown = false;
+                        h264.Decode(frame.Payload.Span, h.Timestamp ?? 0, (in DecodedFrame picture) =>
+                        {
+                            if (!show) return;
+                            var bgrx = Rent(picture.Width * picture.Height * 4);
+                            picture.ToBgrx(bgrx);
+                            _view.PresentExternalFrame(bgrx, picture.Width, picture.Height, Return);
+                            shown = true;
+                        });
+                        if (!shown) { Interlocked.Increment(ref _framesSkipped); continue; }
+                    }
+                    else
+                    {
+                        if (_frames.Reader.Count > 0) { Interlocked.Increment(ref _framesSkipped); continue; } // every JPEG stands alone: skip to the newest
+                        int w = h.Width ?? info?.Width ?? 0;
+                        int hgt = h.Height ?? info?.Height ?? 0;
+                        var bgrx = _jpeg.DecodeToBgrx(frame.Payload.Span, w, hgt);
+                        _view.PresentExternalFrame(bgrx, w, hgt);
+                    }
                 }
                 catch (Exception ex)
                 {
                     Interlocked.Increment(ref _framesSkipped);
                     _ = _dispatcher.BeginInvoke(() => Message?.Invoke("Frame decode failed: " + ex.Message));
+                    if (h264 != null) { awaitingKeyframe = true; RequestKeyframe(); }
                     continue;
                 }
                 Interlocked.Increment(ref _framesDecoded);
-                _view.PresentExternalFrame(bgrx, w, hgt);
                 _ = _dispatcher.BeginInvoke(OnFramePresented, DispatcherPriority.Background);
             }
         }
         catch (OperationCanceledException) { }
         catch (ChannelClosedException) { }
+        finally { h264?.Dispose(); }
     }
 
     private void OnFramePresented()

@@ -142,29 +142,60 @@ on the box makes the current choice the default.
 |---|---|---|
 | VNC lossless | Exact pixels over RFB (Tight on QEMU, ZRLE on macOS). | Always. |
 | VNC compressed, high / medium / low | Tight JPEG quality 9 / 6 / 3 on the live connection. Switching re-sends the whole screen at the new quality. | The server honours lossy requests. QEMU does so only when the VM's VNC server is started with `lossy=on` (libvirt does not expose it; use a `<qemu:commandline>` override). The status bar says `JPEG n` once JPEG rectangles arrive and `requested (none received yet)` while the server ignores the request. macOS Screen Sharing has no lossy encoding, so these entries are greyed out there. |
-| Stream, quality / balanced / low bandwidth | The guest agent captures the screen and sends it as video at about 20 / 8 / 2.5 Mbit/s. RFB stays connected underneath for input, cursor shapes and resizes, polled once a second. Whenever the screen is still for 0.7 s the viewer switches back to the lossless RFB picture and asks for a full update, so a quiet desktop is always pixel-exact; the next frame switches back to the stream. | The guest agent is connected, is a build that announces `video`, runs on Windows (macOS and Linux capture are not done yet) and has `enableVideo` on (default; also a checkbox in the tray settings). Greyed out otherwise, with the reason in the tooltip. A plain VNC connection without an agent shows only the VNC entries. |
+| Stream, quality / balanced / low bandwidth | The guest agent captures the screen and sends it as H.264 video (motion JPEG with old agents) at about 20 / 8 / 2.5 Mbit/s. RFB stays connected underneath for input, cursor shapes and resizes, polled once a second. Whenever the screen is still for 0.7 s the viewer switches back to the lossless RFB picture and asks for a full update, so a quiet desktop is always pixel-exact; the next frame switches back to the stream. | The guest agent is connected, is a build that announces `video`, runs on Windows (macOS and Linux capture are not done yet) and has `enableVideo` on (default; also a checkbox in the tray settings). Greyed out otherwise, with the reason in the tooltip. A plain VNC connection without an agent shows only the VNC entries. |
 
 Choosing a stream mode before the agent is up is fine: the session starts on lossless VNC and the
 stream takes over the moment the agent connects, the same way the clipboard features light up. If
 the agent goes away the picture falls back to VNC and the stream resumes when it is back.
 
-The current agent encodes **motion JPEG** (every frame a complete JPEG, unchanged frames skipped),
-captured with GDI. The bitrate is held by pacing: each frame earns a pause proportional to its size,
-and the JPEG quality then trades frame rate against sharpness, dropping when frames are too big to
-run at the frame-rate cap and creeping back up when there is room. Because every frame is a whole
-picture, the frame rate is what gives: measured on a 2256×1504 desktop, "balanced" (8 Mbit/s) held
-its budget within a second at about 7 fps of continuous motion; a 1080p VM gets roughly twice that. It needs no codec on either side
-and already behaves far better than lossless VNC when the whole screen moves, but it is not as
-efficient as a real video codec: expect 8 Mbit/s to look soft on fast motion. The protocol
-negotiates the codec (`codecs` in the `welcome` and in `startVideo`), so an H.264 source using the
-guest's hardware encoder can be added without changing the viewer's side of the handshake. The
-stream travels over the agent's TCP connection, which is authenticated but not encrypted: keep it on
-the LAN or inside an SSH tunnel.
+The codec is negotiated per stream: the viewer lists what it decodes in `startVideo` (`h264`,
+then `jpeg`) and the agent takes the first one it can encode, so an old viewer and a new agent, or
+the other way round, still meet on motion JPEG.
+
+**H.264** is what a Windows agent and the viewer normally agree on. The agent captures with DXGI
+Desktop Duplication, which hands over a frame only when something was drawn, so an unchanged screen
+costs nothing and the viewer's idle fallback keeps working; where duplication is unavailable (RDP
+sessions, the secure desktop, basic display adapters) it falls back to GDI polling with a pixel
+compare. Frames are converted to NV12 on the capture thread and encoded by the Media Foundation
+H.264 encoder: the GPU vendor's hardware encoder when one is registered (AMD, Intel and NVIDIA all
+ship one; `videoStarted` then reports `encoder: hardware`), otherwise Microsoft's software encoder.
+The stream is CBR at the requested bitrate with no B-frames and low-latency mode; the bitrate is
+re-tuned in place when the picture mode changes; key frames are sent only when needed (stream start,
+a dropped frame, a resolution change, a viewer's request) and every key frame carries SPS and PPS;
+the padding hardware encoders add to hold CBR is stripped before sending. The viewer decodes with
+Microsoft's Media Foundation H.264 decoder in low-latency mode on a worker thread, converts NV12 to
+BGRX and shows the newest picture when it falls behind (older ones are still decoded, they are the
+references); a gap in the frame sequence, on either side, makes it ask for a key frame and wait for
+it. A desktop wider or taller than H.264 allows (4096×2304, i.e. several monitors side by side) is
+streamed as its primary display only. Measured with `bettervnc-agent probe … video` against a local
+agent on a 2256×1504 display with an AMD Radeon 890M (hardware encoder), a 1200×800 window of
+random colour blocks repainting at 60 Hz:
+
+| Picture mode | Frames per second | Bitrate seen |
+|---|---|---|
+| Stream, quality (20 Mbit/s, 60 fps cap) | 56 to 60 | 8 to 9.5 Mbit/s (that is all this picture needs) |
+| Stream, balanced (8 Mbit/s, 60 fps cap) | 56 to 61 | 6 to 6.8 Mbit/s |
+| Stream, low bandwidth (2.5 Mbit/s, 30 fps cap) | 30 | 2.4 to 2.9 Mbit/s |
+
+With every pixel of the display changing every frame the encoder still delivered 57 fps at the
+60 fps presets; the capture thread spends about 9 ms per frame on the BGRA to NV12 conversion and
+the upload, the encoding itself runs on the GPU in parallel. Motion JPEG on the same display managed
+about 7 fps at 8 Mbit/s.
+
+**Motion JPEG** is the fallback that needs no codec on either side: every changed frame is a complete
+JPEG, captured with GDI. The bitrate is held by pacing (each frame earns a pause proportional to its
+size) and the JPEG quality trades frame rate against sharpness. Because every frame is a whole
+picture, the frame rate is what gives: expect single-digit frame rates at a few Mbit/s on a large
+desktop. Linux and macOS agents do not stream yet.
+
+The stream travels over the agent's TCP connection, which is authenticated but not encrypted: keep it
+on the LAN or inside an SSH tunnel.
 
 To check a stream from the command line:
 
 ```bash
-bettervnc-agent probe <guest-ip> <token or pair> video 8000 30 5 first-frame.jpg
+bettervnc-agent probe <guest-ip> <token or pair> video 8000 60 5 first-frame.h264
+bettervnc-agent probe <guest-ip> <token or pair> video 8000 30 5 first-frame.jpg jpeg
 ```
 
 ### How it works

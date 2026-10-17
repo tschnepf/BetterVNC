@@ -450,10 +450,16 @@ public sealed class AgentServer : IAsyncDisposable
             lock (_videoLock)
             {
                 StopVideoLocked();
-                var frames = System.Threading.Channels.Channel.CreateBounded<(AgentMessage, byte[])>(new System.Threading.Channels.BoundedChannelOptions(3)
+                IVideoSession? started = null;
+                var frames = System.Threading.Channels.Channel.CreateBounded<(AgentMessage Header, byte[] Data)>(new System.Threading.Channels.BoundedChannelOptions(3)
                 {
                     FullMode = System.Threading.Channels.BoundedChannelFullMode.DropOldest, // a slow link sees fewer frames, never older ones
                     SingleReader = true,
+                }, dropped =>
+                {
+                    Interlocked.Increment(ref _framesDropped);
+                    // With a delta codec the frames after a dropped one cannot be decoded; the next one must be a key frame.
+                    if (dropped.Header.Keyframe != true) { try { started?.RequestKeyframe(); } catch { } }
                 });
                 _frames = frames;
                 _frameSequence = 0;
@@ -472,6 +478,7 @@ public sealed class AgentServer : IAsyncDisposable
                     return new AgentFrame(AgentMessage.ErrorReply(req.Id, "Cannot capture the screen: " + ex.Message));
                 }
                 _videoSession = session;
+                started = session;
                 _framePump = Task.Run(() => PumpFramesAsync(frames));
                 _server.Log?.Invoke($"{Peer}: video started ({session.Codec}, {session.BitrateKbps} kbit/s, {session.MaxFps} fps max, {session.Width}x{session.Height}, {session.EncoderKind})");
                 return new AgentFrame(new AgentMessage
@@ -500,7 +507,7 @@ public sealed class AgentServer : IAsyncDisposable
                 Sequence = Interlocked.Increment(ref _frameSequence),
             };
             // The source may reuse its buffer as soon as we return, so the bytes are copied here, once.
-            if (!frames.Writer.TryWrite((header, frame.Data.ToArray()))) Interlocked.Increment(ref _framesDropped);
+            frames.Writer.TryWrite((header, frame.Data.ToArray()));
         }
 
         private async Task PumpFramesAsync(System.Threading.Channels.Channel<(AgentMessage Header, byte[] Data)> frames)

@@ -119,7 +119,7 @@ public static class Program
               bettervnc-agent probe <host[:port]> <token or 'pair'> info | watch | get <text|html|png|files> [out]
                                                             | set text <string> | set png <file> | set files <path>...
                                                             | scroll <dx px> <dy px> [steps]   (dy > 0 scrolls up)
-                                                            | video [kbit/s] [fps] [seconds] [first-frame.jpg]
+                                                            | video [kbit/s] [fps] [seconds] [first-frame.jpg|.h264] [codec]
 
             Without a command the agent starts serving and creates bettervnc-agent.json next to the executable on first
             start. Viewers get in by pairing (you click Allow in a dialog on this screen) or with the token. The file also
@@ -405,19 +405,21 @@ public static class Program
                     int fps = args.Count > 1 ? int.Parse(args[1]) : 30;
                     int seconds = args.Count > 2 ? int.Parse(args[2]) : 5;
                     string? saveTo = args.Count > 3 ? args[3] : null;
-                    long frames = 0, bytes = 0;
+                    long frames = 0, bytes = 0, keyframes = 0;
                     int w = 0, h = 0;
                     byte[]? first = null;
                     conn.VideoFrameReceived += f =>
                     {
                         Interlocked.Increment(ref frames);
                         Interlocked.Add(ref bytes, f.Payload.Length);
+                        if (f.Header.Keyframe == true) Interlocked.Increment(ref keyframes);
                         w = f.Header.Width ?? w;
                         h = f.Header.Height ?? h;
                         first ??= f.Payload.ToArray();
                     };
                     conn.VideoStopped += r => Console.WriteLine("Stream stopped by the agent: " + (r ?? "no reason given"));
-                    var info = await conn.StartVideoAsync(new[] { AgentVideoCodec.Jpeg }, bitrate, fps, cts.Token);
+                    var codecs = args.Count > 4 ? new[] { args[4] } : new[] { AgentVideoCodec.H264, AgentVideoCodec.Jpeg };
+                    var info = await conn.StartVideoAsync(codecs, bitrate, fps, cts.Token);
                     Console.WriteLine($"Streaming {info.Codec} {info.Width}x{info.Height}, {info.BitrateKbps} kbit/s, {info.MaxFps} fps max, {info.EncoderKind} encoder.");
                     Console.WriteLine("Move something on the agent's screen: unchanged frames are not sent.");
                     long lastFrames = 0, lastBytes = 0;
@@ -430,7 +432,7 @@ public static class Program
                         lastBytes = b;
                     }
                     await conn.StopVideoAsync(CancellationToken.None);
-                    Console.WriteLine($"Total: {frames} frames, {bytes / 1024} KB.");
+                    Console.WriteLine($"Total: {frames} frames ({keyframes} key frames), {bytes / 1024} KB.");
                     if (saveTo != null && first != null)
                     {
                         await File.WriteAllBytesAsync(saveTo, first);

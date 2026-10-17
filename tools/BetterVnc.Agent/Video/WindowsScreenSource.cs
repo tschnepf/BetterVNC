@@ -5,27 +5,47 @@ using System.Drawing.Imaging;
 using System.Runtime.InteropServices;
 using System.Windows.Forms;
 using BetterVnc.Agent.Protocol;
+using BetterVnc.Media;
 
 namespace BetterVnc.Agent.Video;
 
 /// <summary>
-/// Screen streaming for the Windows agent, baseline edition: GDI captures the whole virtual screen, every changed frame
-/// is encoded as a JPEG (motion JPEG) and the quality is steered so a second of frames stays near the requested bitrate.
-/// Unchanged frames are not sent at all, which is what lets the viewer show the lossless VNC picture while the screen is
-/// still. No codec library is needed on either side; an H.264 source can slot in next to this one later.
+/// Screen streaming for the Windows agent. Two codecs: H.264 (see <see cref="H264ScreenSession"/>: Desktop
+/// Duplication capture, Media Foundation encoder, hardware when the GPU has one) is offered first whenever Media
+/// Foundation has an H.264 encoder, which every supported Windows has; motion JPEG (GDI capture, every changed
+/// frame a complete JPEG, quality steered to the bitrate) is the fallback that needs no codec at all. In both,
+/// unchanged frames are not sent, which is what lets the viewer show the lossless VNC picture while the screen is
+/// still.
 /// </summary>
 public sealed class WindowsScreenSource : IGuestVideoSource
 {
-    public IReadOnlyList<string> Codecs { get; } = new[] { AgentVideoCodec.Jpeg };
+    private readonly string? _h264;
+
+    public WindowsScreenSource()
+    {
+        _h264 = H264Encoder.DescribeAvailable();
+        Codecs = _h264 != null ? new[] { AgentVideoCodec.H264, AgentVideoCodec.Jpeg } : new[] { AgentVideoCodec.Jpeg };
+    }
+
+    public IReadOnlyList<string> Codecs { get; }
 
     public Action<string>? Log { get; set; }
 
-    public string Description => "GDI capture, JPEG (software), whole virtual screen";
+    public string Description => _h264 != null
+        ? $"H.264 with {_h264}, Desktop Duplication capture (GDI fallback); or motion JPEG over GDI"
+        : "motion JPEG (software) over GDI; Media Foundation has no H.264 encoder here";
 
     public IVideoSession Start(VideoRequest request, Action<VideoFrame> onFrame, Action<string?> onEnded)
     {
+        if (string.Equals(request.Codec, AgentVideoCodec.H264, StringComparison.OrdinalIgnoreCase) && _h264 != null)
+        {
+            var h264 = new H264ScreenSession(request, onFrame, onEnded, Log);
+            Log?.Invoke("H.264 stream: " + h264.Description);
+            h264.Start();
+            return h264;
+        }
         if (!string.Equals(request.Codec, AgentVideoCodec.Jpeg, StringComparison.OrdinalIgnoreCase))
-            throw new NotSupportedException($"Codec '{request.Codec}' is not available; this agent encodes JPEG only.");
+            throw new NotSupportedException($"Codec '{request.Codec}' is not available; this agent encodes {string.Join(" and ", Codecs)}.");
         var bounds = SystemInformation.VirtualScreen;
         if (bounds.Width <= 0 || bounds.Height <= 0)
             throw new InvalidOperationException("No screen to capture (the agent is not running on an interactive desktop).");
@@ -36,12 +56,12 @@ public sealed class WindowsScreenSource : IGuestVideoSource
             try { g.CopyFromScreen(bounds.Left, bounds.Top, 0, 0, probe.Size, CopyPixelOperation.SourceCopy); }
             catch (Win32Exception ex) { throw new InvalidOperationException("The screen cannot be read right now (locked, or a different session): " + ex.Message); }
         }
-        var session = new Session(request, bounds, onFrame, onEnded, Log);
+        var session = new JpegSession(request, bounds, onFrame, onEnded, Log);
         session.Start();
         return session;
     }
 
-    private sealed class Session : IVideoSession
+    private sealed class JpegSession : IVideoSession
     {
         private static readonly ImageCodecInfo JpegCodec = ImageCodecInfo.GetImageEncoders().First(c => c.FormatID == ImageFormat.Jpeg.Guid);
         private const int MinQuality = 20, MaxQuality = 92, StartQuality = 75;
@@ -57,7 +77,7 @@ public sealed class WindowsScreenSource : IGuestVideoSource
         private volatile bool _disposed;
         private int _quality = StartQuality;
 
-        public Session(VideoRequest request, Rectangle bounds, Action<VideoFrame> onFrame, Action<string?> onEnded, Action<string>? log)
+        public JpegSession(VideoRequest request, Rectangle bounds, Action<VideoFrame> onFrame, Action<string?> onEnded, Action<string>? log)
         {
             _onFrame = onFrame;
             _onEnded = onEnded;

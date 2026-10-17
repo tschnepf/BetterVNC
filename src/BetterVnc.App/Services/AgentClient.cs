@@ -52,8 +52,8 @@ public sealed class AgentClient : IDisposable, IScrollInjector
 
     // ------------------------------------------------------------------ video
 
-    /// <summary>Codecs this viewer can decode, most preferred first. JPEG (motion JPEG) needs nothing beyond WIC.</summary>
-    public static readonly string[] DecodableCodecs = { AgentVideoCodec.Jpeg };
+    /// <summary>Codecs this viewer can decode, most preferred first: H.264 through Media Foundation, then motion JPEG through WIC.</summary>
+    public static readonly string[] DecodableCodecs = { AgentVideoCodec.H264, AgentVideoCodec.Jpeg };
 
     /// <summary>Codecs both sides agree on, in this viewer's order of preference; empty when streaming is impossible.</summary>
     public string[] StreamCodecs
