@@ -151,6 +151,7 @@ internal static class MFGuids
     public static readonly Guid CODECAPI_AVLowLatencyMode = new("9c27891a-ed7a-40e1-88e8-b22727a024ee");
     public static readonly Guid CODECAPI_AVEncCommonQualityVsSpeed = new("98332df8-03cd-476b-89fa-3f9e442dec9f");
     public static readonly Guid CODECAPI_AVEncVideoMaxNumRefFrame = new("964829ed-94f9-43b4-b74d-ef40944b69a0");
+    public static readonly Guid CODECAPI_AVEncNumWorkerThreads = new("b0c8bf60-16f7-4951-a30b-1db1609293d6");
 
     public static readonly Guid IID_IMFTransform = new("bf94c121-5b05-4e6f-8000-ba598961414d");
 }
