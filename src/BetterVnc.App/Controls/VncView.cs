@@ -2,12 +2,14 @@ using System.Runtime.InteropServices;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Input;
+using System.Windows.Interop;
 using System.Windows.Media;
 using System.Windows.Media.Imaging;
 using System.Windows.Threading;
 using BetterVnc.Agent.Protocol;
 using BetterVnc.App.Input;
 using BetterVnc.App.Models;
+using BetterVnc.Media;
 using BetterVnc.Protocol;
 using static BetterVnc.App.Input.NativeMethods;
 
@@ -148,6 +150,13 @@ public sealed class VncView : Grid
             try
             {
                 if (_client == null) return;
+                if (_gpuShown)
+                {
+                    // The GPU path refused this frame: WPF takes over, and the surface must not cover it.
+                    _gpuShown = false;
+                    _externalShown = false;
+                    UpdateVideoPlacement();
+                }
                 if (frame.Offset is { } at)
                 {
                     if (!PresentPartialFrame(frame.Pixels, frame.Width, frame.Height, at)) return;
@@ -250,15 +259,246 @@ public sealed class VncView : Grid
         {
             if (!_externalShown) return;
             _externalShown = false;
+            if (_gpuShown)
+            {
+                // The framebuffer is already the image underneath; taking the surface away uncovers it.
+                _gpuShown = false;
+                UpdateVideoPlacement();
+            }
             _image.Source = _bitmap;
             if (_client != null) lock (_dirtyLock) _dirty.Add(_client.Framebuffer.Bounds);
             QueueRender();
         }, DispatcherPriority.Render);
     }
 
-    private void CountFrame()
+    // ------------------------------------------------------------------ GPU presentation (agent video stream)
+
+    private VideoSurfaceHost? _surface;
+    private D3D11VideoDevice? _gpuDevice;
+    private VideoRenderer? _renderer;      // read on the decode thread
+    private bool _gpuUnavailable;
+    private readonly object _gpuLock = new();
+    private (int Width, int Height, (int X, int Y)? Offset) _gpuFrame; // the last picture presented; under _gpuLock
+    private bool _gpuUpdateQueued;         // under _gpuLock
+    private int _gpuFramesUncounted;       // Interlocked
+    private bool _gpuShown;                // dispatcher only, like the rest below
+    private bool _videoSurfaceBlocked;
+    private VideoPlacement _placement;
+
+    /// <summary>How streamed frames reach the screen: the GPU surface and its adapter, or why WPF draws them.</summary>
+    public string GpuVideoStatus { get; private set; } = "GPU presentation not set up";
+
+    /// <summary>
+    /// The device the stream's H.264 decoder should decode on (DXVA), so its pictures go to the GPU surface without
+    /// leaving the GPU; null while frames are drawn through WPF. Any thread.
+    /// </summary>
+    public D3D11VideoDevice? GpuVideoDevice => Volatile.Read(ref _renderer) != null ? _gpuDevice : null;
+
+    /// <summary>
+    /// True while a WPF element must show over the picture (the connecting / disconnected overlay): the GPU surface is a
+    /// child window and would cover it, so it is taken away until this goes back to false.
+    /// </summary>
+    public bool VideoSurfaceBlocked
     {
-        _frames++;
+        get => _videoSurfaceBlocked;
+        set
+        {
+            _videoSurfaceBlocked = value;
+            UpdateVideoPlacement();
+        }
+    }
+
+    /// <summary>
+    /// Sets up GPU presentation for streamed frames: a Direct3D 11 device (<see cref="GpuVideoDevice"/>) and a flip-model
+    /// swap chain in a child window over the picture. False when Direct3D 11 is unavailable or failed before;
+    /// <see cref="PresentVideoFrame(in DecodedFrame, ValueTuple{int, int}?)"/> then refuses frames and
+    /// <see cref="PresentExternalFrame"/> draws them through WPF. Dispatcher only; cheap after the first call.
+    /// </summary>
+    public bool EnableGpuVideo()
+    {
+        if (_renderer != null) return true;
+        if (_gpuUnavailable) return false;
+        VideoRenderer? renderer = null;
+        try
+        {
+            _gpuDevice = D3D11VideoDevice.Create();
+            renderer = new VideoRenderer(_gpuDevice);
+            var surface = new VideoSurfaceHost(UpdateVideoPlacement);
+            var r = renderer;
+            surface.WindowChanged += hwnd =>
+            {
+                r.SetWindow(hwnd);
+                _placement = default; // the renderer starts over with this window: push the layout again
+                if (hwnd == IntPtr.Zero) ShutDownGpu("the window closed");
+                else UpdateVideoPlacement();
+            };
+            _surface = surface;
+            Children.Add(surface);
+            Volatile.Write(ref _renderer, renderer);
+            GpuVideoStatus = $"GPU presentation on {_gpuDevice.AdapterName} (flip-model swap chain, frame latency 1, GPU thread priority {_gpuDevice.GpuThreadPriority})";
+            return true;
+        }
+        catch (Exception ex)
+        {
+            if (_surface != null) Children.Remove(_surface);
+            _surface = null;
+            renderer?.Dispose();
+            _gpuDevice?.Dispose();
+            _gpuDevice = null;
+            _gpuUnavailable = true;
+            GpuVideoStatus = $"GPU presentation unavailable ({ex.Message}); frames are drawn through WPF";
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// Shows a decoded picture through the GPU surface: a hardware decoder's texture is copied on the GPU, a software
+    /// decoder's NV12 is uploaded, and the shader converts and scales it; it is presented at once, so the newest frame is
+    /// what the compositor shows. <paramref name="offset"/> works as for <see cref="PresentExternalFrame"/>. Call from the
+    /// decoder's frame callback (the decode thread). False when the GPU path is not set up or gave up; the caller then
+    /// converts the frame itself and uses <see cref="PresentExternalFrame"/>.
+    /// </summary>
+    public bool PresentVideoFrame(in DecodedFrame frame, (int X, int Y)? offset = null)
+    {
+        var renderer = Volatile.Read(ref _renderer);
+        if (renderer == null) return false;
+        if (!renderer.Present(in frame))
+        {
+            OnRendererRefused(renderer);
+            return false;
+        }
+        QueueGpuUpdate(frame.Width, frame.Height, offset);
+        return true;
+    }
+
+    /// <summary>The same for a BGRX picture (width*4 bytes per row): a motion JPEG frame.</summary>
+    public bool PresentVideoFrame(byte[] bgrx, int width, int height, (int X, int Y)? offset = null)
+    {
+        var renderer = Volatile.Read(ref _renderer);
+        if (renderer == null) return false;
+        if (!renderer.Present(bgrx, width, height))
+        {
+            OnRendererRefused(renderer);
+            return false;
+        }
+        QueueGpuUpdate(width, height, offset);
+        return true;
+    }
+
+    private void OnRendererRefused(VideoRenderer renderer)
+    {
+        if (renderer.IsUsable) return; // just that frame (a texture it cannot show); the caller falls back for it
+        string reason = renderer.Failure ?? "it was shut down";
+        Dispatcher.BeginInvoke(() => { if (ReferenceEquals(_renderer, renderer)) ShutDownGpu(reason); });
+    }
+
+    /// <summary>Drops GPU presentation for good (device lost, window gone); later frames go through WPF.</summary>
+    private void ShutDownGpu(string reason)
+    {
+        var renderer = Interlocked.Exchange(ref _renderer, null);
+        _gpuUnavailable = true;
+        GpuVideoStatus = $"GPU presentation stopped ({reason}); frames are drawn through WPF";
+        if (_gpuShown)
+        {
+            _gpuShown = false;
+            _externalShown = false;
+        }
+        _placement = default;
+        _surface?.Place(default);
+        renderer?.Dispose();
+        _gpuDevice?.Dispose();
+        _gpuDevice = null;
+    }
+
+    /// <summary>Decode thread: remember what was presented and let the dispatcher show the surface and place it (coalesced).</summary>
+    private void QueueGpuUpdate(int width, int height, (int X, int Y)? offset)
+    {
+        Interlocked.Increment(ref _gpuFramesUncounted);
+        lock (_gpuLock)
+        {
+            _gpuFrame = (width, height, offset);
+            if (_gpuUpdateQueued) return;
+            _gpuUpdateQueued = true;
+        }
+        Dispatcher.BeginInvoke(ApplyGpuFrame, DispatcherPriority.Render);
+    }
+
+    private void ApplyGpuFrame()
+    {
+        lock (_gpuLock) _gpuUpdateQueued = false;
+        int frames = Interlocked.Exchange(ref _gpuFramesUncounted, 0);
+        if (_client == null || _renderer == null) return;
+        if (!_gpuShown)
+        {
+            // From the RFB picture (or the WPF stream path) to the GPU surface. The framebuffer stays the image underneath:
+            // it shows around a partial frame, and the moment the surface is taken away again.
+            _gpuShown = true;
+            _externalShown = true;
+            _externalRect = null;
+            _image.Source = _bitmap;
+        }
+        UpdateVideoPlacement(); // the frame may have changed size or position
+        CountFrame(frames);
+    }
+
+    /// <summary>Puts the surface over the streamed picture, or shrinks it to nothing while it must not show. Dispatcher only.</summary>
+    private void UpdateVideoPlacement()
+    {
+        var surface = _surface;
+        var renderer = _renderer;
+        if (surface == null || renderer == null) return;
+        var placement = _gpuShown && !_videoSurfaceBlocked ? ComputePlacement() : default;
+        if (placement == _placement) return;
+        _placement = placement;
+        surface.Place(placement);
+        var d = placement.Destination;
+        renderer.SetLayout(placement.Width, placement.Height, d.X, d.Y, d.Width, d.Height);
+    }
+
+    private VideoPlacement ComputePlacement()
+    {
+        var client = _client;
+        if (client == null || _bitmap == null || !IsVisible) return default;
+        if (PresentationSource.FromVisual(this) is not HwndSource { RootVisual: Visual root, CompositionTarget: { } target }) return default;
+        if (!_image.IsDescendantOf(root)) return default;
+        var m = target.TransformToDevice;
+        PixelRect Device(Rect r) => r.IsEmpty ? default : new PixelRect(r.X * m.M11, r.Y * m.M22, r.Width * m.M11, r.Height * m.M22);
+        var image = Device(_image.TransformToAncestor(root).TransformBounds(new Rect(_image.RenderSize)));
+        var clip = Device(VisibleArea(root));
+        (int Width, int Height, (int X, int Y)? Offset) frame;
+        lock (_gpuLock) frame = _gpuFrame;
+        var fb = client.Framebuffer;
+        return VideoLayout.Place(image, fb.Width, fb.Height, frame.Width, frame.Height, frame.Offset, clip);
+    }
+
+    /// <summary>The part of this view that can be seen, inside every scroll viewport and clipping panel above it, in root coordinates.</summary>
+    private Rect VisibleArea(Visual root)
+    {
+        var area = TransformToAncestor(root).TransformBounds(new Rect(RenderSize));
+        for (var v = VisualTreeHelper.GetParent(this); v != null && !ReferenceEquals(v, root); v = VisualTreeHelper.GetParent(v))
+        {
+            if (v is UIElement e && (e is ScrollContentPresenter || e.ClipToBounds))
+                area.Intersect(e.TransformToAncestor(root).TransformBounds(new Rect(e.RenderSize)));
+            if (area.IsEmpty) break;
+        }
+        return area;
+    }
+
+    /// <summary>Takes any streamed picture off the screen at once (the connection it came from is going). Dispatcher only.</summary>
+    private void HideStream()
+    {
+        _externalShown = false;
+        _externalRect = null;
+        if (_gpuShown)
+        {
+            _gpuShown = false;
+            UpdateVideoPlacement();
+        }
+    }
+
+    private void CountFrame(int frames = 1)
+    {
+        _frames += frames;
         var now = DateTime.UtcNow;
         var elapsed = (now - _frameWindowStart).TotalSeconds;
         if (elapsed >= 1)
@@ -284,6 +524,7 @@ public sealed class VncView : Grid
 
     public void Detach()
     {
+        HideStream();
         if (_client == null) return;
         _client.FramebufferUpdated -= OnFramebufferUpdated;
         _client.FramebufferResized -= OnFramebufferResized;
@@ -614,6 +855,21 @@ public sealed class VncView : Grid
     {
         var client = _client;
         if (client == null) return null;
+        if (_gpuShown && _renderer?.CaptureFrame(out int w, out int h) is { } frame)
+        {
+            (int Width, int Height, (int X, int Y)? Offset) shown;
+            lock (_gpuLock) shown = _gpuFrame;
+            if (shown.Offset is not { } at) return BitmapSource.Create(w, h, 96, 96, PixelFormats.Bgr32, null, frame, w * 4);
+            // A partial frame: paste the streamed display into the framebuffer picture, as it is on screen.
+            var desk = client.Framebuffer;
+            byte[] all;
+            int fw, fh;
+            lock (desk.SyncRoot) { all = desk.CopyOut(desk.Bounds); fw = desk.Width; fh = desk.Height; }
+            var visible = new RfbRect(at.X, at.Y, w, h).Intersect(new RfbRect(0, 0, fw, fh));
+            for (int row = 0; row < visible.Height; row++)
+                Buffer.BlockCopy(frame, ((visible.Y - at.Y + row) * w + visible.X - at.X) * 4, all, ((visible.Y + row) * fw + visible.X) * 4, visible.Width * 4);
+            return BitmapSource.Create(fw, fh, 96, 96, PixelFormats.Bgr32, null, all, fw * 4);
+        }
         if (_externalShown && _externalBitmap != null)
         {
             var copy = _externalBitmap.Clone();

@@ -27,7 +27,7 @@ internal static unsafe class MF
     public const uint MFT_OUTPUT_STREAM_PROVIDES_SAMPLES = 0x100;
     public const uint MFT_OUTPUT_DATA_BUFFER_FORMAT_CHANGE = 0x100;
     public const uint MFT_ENUM_FLAG_SYNCMFT = 1, MFT_ENUM_FLAG_ASYNCMFT = 2, MFT_ENUM_FLAG_HARDWARE = 4, MFT_ENUM_FLAG_SORTANDFILTER = 0x40;
-    public const uint MFT_MESSAGE_COMMAND_FLUSH = 0, MFT_MESSAGE_COMMAND_DRAIN = 1;
+    public const uint MFT_MESSAGE_COMMAND_FLUSH = 0, MFT_MESSAGE_COMMAND_DRAIN = 1, MFT_MESSAGE_SET_D3D_MANAGER = 2;
     public const uint MFT_MESSAGE_NOTIFY_BEGIN_STREAMING = 0x10000000, MFT_MESSAGE_NOTIFY_END_STREAMING = 0x10000001;
     public const uint MFT_MESSAGE_NOTIFY_END_OF_STREAM = 0x10000002, MFT_MESSAGE_NOTIFY_START_OF_STREAM = 0x10000003;
     public const uint MFVideoInterlace_Progressive = 2;
@@ -43,6 +43,12 @@ internal static unsafe class MF
     [DllImport("mfplat.dll")] public static extern int MFCreateMemoryBuffer(uint maxLength, out IMFMediaBuffer buffer);
     [DllImport("mfplat.dll")] public static extern int MFCreateAlignedMemoryBuffer(uint maxLength, uint alignmentFlags, out IMFMediaBuffer buffer);
     [DllImport("mfplat.dll")] public static extern int MFTEnumEx(in Guid category, uint flags, MFT_REGISTER_TYPE_INFO* input, MFT_REGISTER_TYPE_INFO* output, out IntPtr activates, out uint count);
+
+    [DllImport("mfplat.dll")] public static extern int MFCreateDXGIDeviceManager(out uint resetToken, out IntPtr manager);
+
+    /// <summary>IMFDXGIDeviceManager::ResetDevice on a raw pointer (the manager travels between threads with its device).</summary>
+    public static int ResetDevice(IntPtr manager, IntPtr device, uint resetToken) =>
+        ((delegate* unmanaged[Stdcall]<IntPtr, IntPtr, uint, int>)Com.Slot(manager, 7))(manager, device, resetToken);
 
     public static ulong Pack(uint hi, uint lo) => ((ulong)hi << 32) | lo;
 
@@ -472,6 +478,14 @@ internal unsafe interface IMFTransform
     [PreserveSig] int ProcessMessage(uint message, UIntPtr param);
     [PreserveSig] int ProcessInput(uint id, IMFSample sample, uint flags);
     [PreserveSig] int ProcessOutput(uint flags, uint count, MFT_OUTPUT_DATA_BUFFER* buffers, out uint status);
+}
+
+/// <summary>A media buffer that wraps a Direct3D 11 texture: what a decoder given a D3D manager outputs.</summary>
+[ComImport, Guid("e7174cfa-1c9e-48b1-8866-626226bfc258"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+internal interface IMFDXGIBuffer
+{
+    [PreserveSig] int GetResource(in Guid riid, out IntPtr resource);
+    [PreserveSig] int GetSubresourceIndex(out uint index);
 }
 
 [ComImport, Guid("901db4c7-31ce-41a2-85dc-8fa0bf41b8da"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]

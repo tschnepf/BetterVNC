@@ -13,7 +13,10 @@ namespace BetterVnc.App.Services;
 /// Plays the guest agent's video stream into a <see cref="VncView"/> while the RFB connection goes on carrying input,
 /// cursor shapes and resizes at a trickle. Frames are decoded off the UI thread with a latest-frame-wins policy for
 /// what is shown: motion JPEG frames stand alone, so a slow decoder simply skips to the newest; H.264 delta frames
-/// all go through the decoder (they are each other's reference) but only the newest picture is converted and shown.
+/// all go through the decoder (they are each other's reference) but only the newest picture is shown.
+/// Where it can, H.264 is decoded on the GPU (DXVA, on the view's Direct3D device) and presented from there by the
+/// view's swap chain, never touching the CPU or the UI thread; otherwise the decoder runs in software and the view
+/// converts on the GPU, or, without Direct3D, the frame is converted here and drawn through WPF.
 /// When the agent sends nothing for a moment (the screen is still) the view switches back to the RFB framebuffer and
 /// a full lossless update is requested, so a quiet desktop is always shown pixel-exact; the first new frame switches
 /// back to the stream.
@@ -70,6 +73,8 @@ public sealed class VideoStreamPlayer : IDisposable
     public long FramesDecoded => Interlocked.Read(ref _framesDecoded);
     public long FramesSkipped => Interlocked.Read(ref _framesSkipped);
     public long BytesReceived => Interlocked.Read(ref _bytesReceived);
+    /// <summary>How the current stream is decoded and shown, for the status bar ("DXVA → GPU", "software → WPF"); null before the first picture.</summary>
+    public string? DecodePath { get; private set; }
 
     /// <summary>Short status for the status bar.</summary>
     public event Action<string>? Message;
@@ -99,8 +104,11 @@ public sealed class VideoStreamPlayer : IDisposable
             Message?.Invoke($"Stream re-tuned to {mode.BitrateKbps / 1000.0:0.#} Mbit/s, {mode.MaxFps} fps max");
             return;
         }
+        // The decoder of this stream needs the view's Direct3D device to decode on the GPU; set it up before frames come.
+        _view.EnableGpuVideo();
         var info = await _agent.StartStreamAsync(mode.BitrateKbps, mode.MaxFps).ConfigureAwait(true);
         Mode = mode;
+        DecodePath = null;
         Interlocked.Increment(ref _generation);
         Interlocked.Exchange(ref _bytesReceived, 0);
         Interlocked.Exchange(ref _framesReceived, 0);
@@ -178,12 +186,33 @@ public sealed class VideoStreamPlayer : IDisposable
         });
     }
 
+    /// <summary>Puts a line in the status bar and the trace log (the decoder and presentation path in use, fallbacks).</summary>
+    private void Report(string line)
+    {
+        System.Diagnostics.Trace.WriteLine("BetterVNC stream: " + line);
+        _ = _dispatcher.BeginInvoke(() => Message?.Invoke(line));
+    }
+
+    /// <summary>Says which decoder runs and how its pictures reach the screen, from the first picture it delivered.</summary>
+    private void DescribeDecoder(H264Decoder decoder, bool texture)
+    {
+        bool gpu = _view.GpuVideoDevice != null;
+        string decode = texture ? "hardware (DXVA)"
+            : decoder.HardwareFailure is { } why ? $"software (hardware refused: {why})"
+            : "software";
+        DecodePath = (texture ? "DXVA" : "software") + (gpu ? " → GPU" : " → WPF");
+        Report($"H.264 decoder: {decoder.Name}, {decode}; {_view.GpuVideoStatus}");
+    }
+
     private async Task DecodeLoopAsync(CancellationToken ct)
     {
         H264Decoder? h264 = null;
         int generation = -1;
         int? lastSequence = null;
         bool awaitingKeyframe = false;
+        bool softwareOnly = false;     // the GPU path failed on this stream: decode on the CPU from then on
+        bool reportDecoder = false;    // describe the decode path once the first picture shows what it really is
+        bool reportedJpeg = false;
         try
         {
             await foreach (var frame in _frames.Reader.ReadAllAsync(ct).ConfigureAwait(false))
@@ -201,6 +230,8 @@ public sealed class VideoStreamPlayer : IDisposable
                     generation = gen;
                     lastSequence = null;
                     awaitingKeyframe = false;
+                    softwareOnly = false;
+                    reportedJpeg = false;
                     _lostFrames = false;
                     h264?.Dispose();
                     h264 = null;
@@ -212,9 +243,9 @@ public sealed class VideoStreamPlayer : IDisposable
                     {
                         if (h264 == null)
                         {
-                            h264 = new H264Decoder();
-                            var name = h264.Name;
-                            _ = _dispatcher.BeginInvoke(() => Message?.Invoke($"H.264 decoder: {name}"));
+                            // With the view's device the decoder uses DXVA; it falls back to software by itself if refused.
+                            h264 = new H264Decoder(softwareOnly ? null : _view.GpuVideoDevice);
+                            reportDecoder = true;
                         }
                         // Delta frames need every frame before them since the last key frame. A gap in the sequence
                         // (the agent dropped frames on a slow link) or a drop here means: wait for the next key frame.
@@ -235,15 +266,34 @@ public sealed class VideoStreamPlayer : IDisposable
                             awaitingKeyframe = false;
                         }
                         bool show = _frames.Reader.Count == 0; // latest picture wins; older ones are decoded for their references only
-                        bool shown = false;
+                        bool shown = false, gpuRefused = false;
+                        var decoder = h264;
                         h264.Decode(frame.Payload.Span, h.Timestamp ?? 0, (in DecodedFrame picture) =>
                         {
+                            if (reportDecoder)
+                            {
+                                reportDecoder = false;
+                                DescribeDecoder(decoder, picture.IsTexture);
+                            }
                             if (!show) return;
+                            // GPU: the texture (or the NV12 planes) goes to the view's swap chain from this thread, no queue.
+                            if (_view.PresentVideoFrame(in picture, offset)) { shown = true; return; }
+                            if (picture.IsTexture) { gpuRefused = true; return; }
                             var bgrx = Rent(picture.Width * picture.Height * 4);
                             picture.ToBgrx(bgrx);
                             _view.PresentExternalFrame(bgrx, picture.Width, picture.Height, Return, offset);
                             shown = true;
                         });
+                        if (gpuRefused)
+                        {
+                            // The GPU surface gave up on a hardware picture: decode in software from the next key frame.
+                            h264.Dispose();
+                            h264 = null;
+                            softwareOnly = true;
+                            awaitingKeyframe = true;
+                            RequestKeyframe();
+                            Report($"{_view.GpuVideoStatus}; H.264 now decodes in software");
+                        }
                         if (!shown) { Interlocked.Increment(ref _framesSkipped); continue; }
                     }
                     else
@@ -252,14 +302,33 @@ public sealed class VideoStreamPlayer : IDisposable
                         int w = h.Width ?? info?.Width ?? 0;
                         int hgt = h.Height ?? info?.Height ?? 0;
                         var bgrx = _jpeg.DecodeToBgrx(frame.Payload.Span, w, hgt);
-                        _view.PresentExternalFrame(bgrx, w, hgt, null, offset);
+                        bool gpu = _view.PresentVideoFrame(bgrx, w, hgt, offset);
+                        if (!gpu) _view.PresentExternalFrame(bgrx, w, hgt, null, offset);
+                        if (!reportedJpeg)
+                        {
+                            reportedJpeg = true;
+                            DecodePath = gpu ? "JPEG → GPU" : "JPEG → WPF";
+                            Report($"Motion JPEG decoder: WIC; {_view.GpuVideoStatus}");
+                        }
                     }
                 }
                 catch (Exception ex)
                 {
                     Interlocked.Increment(ref _framesSkipped);
                     _ = _dispatcher.BeginInvoke(() => Message?.Invoke("Frame decode failed: " + ex.Message));
-                    if (h264 != null) { awaitingKeyframe = true; RequestKeyframe(); }
+                    if (h264 != null)
+                    {
+                        if (h264.IsHardware)
+                        {
+                            // Never fight a failing GPU decoder: the CPU path decodes everything the agent sends.
+                            h264.Dispose();
+                            h264 = null;
+                            softwareOnly = true;
+                            Report($"Hardware H.264 decode failed ({ex.Message}); decoding in software");
+                        }
+                        awaitingKeyframe = true;
+                        RequestKeyframe();
+                    }
                     continue;
                 }
                 Interlocked.Increment(ref _framesDecoded);

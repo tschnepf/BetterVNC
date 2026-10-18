@@ -15,5 +15,6 @@
     <Project Path="tools/BetterVnc.DemoServer/BetterVnc.DemoServer.csproj" />
     <Project Path="tools/BetterVnc.IconGen/BetterVnc.IconGen.csproj" />
     <Project Path="tools/BetterVnc.Probe/BetterVnc.Probe.csproj" />
+    <Project Path="tools/BetterVnc.StreamBench/BetterVnc.StreamBench.csproj" />
   </Folder>
 </Solution>
