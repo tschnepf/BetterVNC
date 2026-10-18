@@ -29,38 +29,43 @@ final class VideoEncoder {
 
     init(codec: Codec, width: Int, height: Int, bitrateKbps: Int, fps: Int, allowLowLatency: Bool,
          output: @escaping (CMSampleBuffer) -> Void) throws {
-        var created: VTCompressionSession?
-        var status: OSStatus = noErr
-        var lowLatency = false
         // Low-latency rate control (H.264) is made for exactly this kind of stream: steady frame sizes, no frame held
-        // back. Not every Mac offers it, so it is asked for first and the ordinary real-time mode taken otherwise.
+        // back. Not every Mac offers it, so it is asked for first and the ordinary real-time mode taken otherwise. Where
+        // it only comes in software (seen in a macOS virtual machine) an ordinary hardware session wins.
+        var best: (session: VTCompressionSession, lowLatency: Bool, hardware: Bool)?
+        var status: OSStatus = noErr
         for low in (allowLowLatency && codec == .h264) ? [true, false] : [false] {
             var specification: [CFString: Any] = [kVTVideoEncoderSpecification_EnableHardwareAcceleratedVideoEncoder: true]
             if low { specification[kVTVideoEncoderSpecification_EnableLowLatencyRateControl] = true }
-            created = nil
+            var created: VTCompressionSession?
             status = VTCompressionSessionCreate(
                 allocator: kCFAllocatorDefault, width: Int32(width), height: Int32(height), codecType: codec.type,
                 encoderSpecification: specification as CFDictionary, imageBufferAttributes: nil,
                 compressedDataAllocator: nil, outputCallback: nil, refcon: nil, compressionSessionOut: &created)
-            if status == noErr && created != nil {
-                lowLatency = low
-                break
+            guard status == noErr, let session = created else { continue }
+            let hardware = VideoEncoder.copyBool(session, kVTCompressionPropertyKey_UsingHardwareAcceleratedVideoEncoder)
+            if let previous = best, previous.hardware || !hardware {
+                VTCompressionSessionInvalidate(session)
+            } else {
+                if let previous = best { VTCompressionSessionInvalidate(previous.session) }
+                best = (session, low, hardware)
             }
+            if best?.hardware == true { break }
         }
-        guard status == noErr, let session = created else {
+        guard let chosen = best else {
             throw HelperError("VideoToolbox could not create a \(codec.label) encoder for \(width)x\(height) (error \(status)).")
         }
         self.codec = codec
         self.width = width
         self.height = height
-        self.session = session
-        self.lowLatency = lowLatency
+        self.session = chosen.session
+        self.lowLatency = chosen.lowLatency
+        self.isHardware = chosen.hardware
         self.output = output
-        self.isHardware = VideoEncoder.copyBool(session, kVTCompressionPropertyKey_UsingHardwareAcceleratedVideoEncoder)
 
         set(kVTCompressionPropertyKey_RealTime, kCFBooleanTrue)
         set(kVTCompressionPropertyKey_AllowFrameReordering, kCFBooleanFalse)
-        set(kVTCompressionPropertyKey_MaxFrameDelayCount, NSNumber(value: 0))
+        if !lowLatency { set(kVTCompressionPropertyKey_MaxFrameDelayCount, NSNumber(value: 0)) } // implied by low latency
         switch codec {
         case .hevc: set(kVTCompressionPropertyKey_ProfileLevel, kVTProfileLevel_HEVC_Main_AutoLevel)
         case .h264: set(kVTCompressionPropertyKey_ProfileLevel,
