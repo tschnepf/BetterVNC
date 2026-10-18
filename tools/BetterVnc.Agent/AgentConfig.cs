@@ -42,7 +42,13 @@ public sealed class AgentConfig
     /// <summary>macOS only: forward gesture phases so apps treat the stream like a trackpad gesture. Turn off if an app misbehaves.</summary>
     public bool ScrollPhases { get; set; } = true;
 
-    public static string DefaultPath => Path.Combine(AppContext.BaseDirectory, FileName);
+    /// <summary>
+    /// Next to the program, except inside a macOS app bundle: writing there would break the bundle's signature (and with it
+    /// the privacy permissions), so the agent uses the installed location, ~/Library/Application Support/BetterVNC.
+    /// </summary>
+    public static string DefaultPath => MacAppBundle.EnclosingBundle(Path.Combine(AppContext.BaseDirectory, MacAppBundle.ExecutableName)) != null
+        ? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), "Library", "Application Support", "BetterVNC", FileName)
+        : Path.Combine(AppContext.BaseDirectory, FileName);
 
     public static AgentConfig? Load(string path)
     {
@@ -53,6 +59,7 @@ public sealed class AgentConfig
     public void Save(string path)
     {
         var tmp = path + ".tmp";
+        Directory.CreateDirectory(Path.GetDirectoryName(Path.GetFullPath(path))!);
         File.WriteAllText(tmp, JsonSerializer.Serialize(this, JsonOptions));
         File.Move(tmp, path, overwrite: true);
         if (!OperatingSystem.IsWindows())

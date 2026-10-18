@@ -56,16 +56,20 @@ public static class Installer
         Directory.CreateDirectory(layout.Dir);
         Directory.CreateDirectory(Path.GetDirectoryName(layout.Config)!);
         StopRunning(layout);
-        if (!PathsEqual(source, layout.Exe))
-        {
-            File.Copy(source, layout.Exe, overwrite: true);
-            if (!OperatingSystem.IsWindows())
-                File.SetUnixFileMode(layout.Exe, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute | UnixFileMode.GroupRead | UnixFileMode.GroupExecute | UnixFileMode.OtherRead | UnixFileMode.OtherExecute);
-        }
         if (OperatingSystem.IsMacOS())
         {
-            Quiet("xattr", "-d", "com.apple.quarantine", layout.Exe);
-            InstallCaptureHelper(layout);
+            try { InstallAppBundle(source, layout); }
+            catch (Exception ex)
+            {
+                Console.Error.WriteLine($"Could not build {MacAppBundle.Name}: {ex.Message}");
+                if (File.Exists(layout.Exe)) StartNow(layout); // the previous install is untouched; bring it back
+                return 1;
+            }
+        }
+        else if (!PathsEqual(source, layout.Exe))
+        {
+            File.Copy(source, layout.Exe, overwrite: true);
+            if (!OperatingSystem.IsWindows()) File.SetUnixFileMode(layout.Exe, Executable);
         }
         cfg.Save(layout.Config);
 
@@ -118,7 +122,11 @@ public static class Installer
         if (OperatingSystem.IsLinux()) TryDelete(Path.Combine(Home, ".config", "autostart", "bettervnc-agent.desktop"));
         TryDelete(layout.Config);
         foreach (var f in new[] { "bettervnc-agent.log", "bettervnc-agent.log.1", "run-hidden.vbs" }) TryDelete(Path.Combine(layout.Dir, f));
-        if (OperatingSystem.IsMacOS()) TryDelete(Path.Combine(layout.Dir, Video.MacScreenSource.HelperName));
+        if (OperatingSystem.IsMacOS())
+        {
+            TryDeleteTree(MacAppBundle.EnclosingBundle(layout.Exe)!);
+            foreach (var f in LegacyMacFiles) TryDelete(Path.Combine(layout.Dir, f));
+        }
         TryDelete(Path.Combine(Home, "Library", "Logs", "bettervnc-agent.log"));
         var self = Environment.ProcessPath;
         if (self != null && PathsEqual(self, layout.Exe) && OperatingSystem.IsWindows())
@@ -134,27 +142,44 @@ public static class Installer
         return 0;
     }
 
+    private const UnixFileMode Executable = UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute
+        | UnixFileMode.GroupRead | UnixFileMode.GroupExecute | UnixFileMode.OtherRead | UnixFileMode.OtherExecute;
+
+    /// <summary>What versions before the app bundle installed on macOS, next to the config.</summary>
+    private static readonly string[] LegacyMacFiles = { MacAppBundle.ExecutableName, Video.MacScreenSource.HelperName };
+
     /// <summary>
-    /// macOS: the screen capture helper goes next to the installed agent, where <see cref="Video.MacScreenSource"/> looks
-    /// for it. The old copy is deleted first rather than overwritten, because macOS kills a program whose signed file
-    /// changed in place.
+    /// macOS: builds <see cref="MacAppBundle.Name"/> from this agent and the capture helper next to it, signs it ad hoc and
+    /// puts it in place of the installed one. It is built in a staging folder first, so reinstalling from the installed
+    /// copy works and a failure leaves the old install alone; the old bundle is then removed rather than overwritten,
+    /// because macOS kills a program whose signed file changed in place. The bare program and helper of earlier versions go.
     /// </summary>
     [System.Runtime.Versioning.SupportedOSPlatform("macos")]
-    private static void InstallCaptureHelper(Layout layout)
+    private static void InstallAppBundle(string source, Layout layout)
     {
-        var name = Video.MacScreenSource.HelperName;
-        var from = Video.MacScreenSource.FindHelper();
-        var to = Path.Combine(layout.Dir, name);
-        if (from == null)
+        var bundle = MacAppBundle.EnclosingBundle(layout.Exe)!;
+        var stagingDir = Path.Combine(layout.Dir, ".staging");
+        var staging = Path.Combine(stagingDir, MacAppBundle.Name);
+        TryDeleteTree(stagingDir);
+        var helper = Video.MacScreenSource.FindHelper();
+        if (helper == null) Console.WriteLine($"  warning  : {Video.MacScreenSource.HelperName} is not next to this agent, so screen streaming will not be available.");
+        var version = typeof(Installer).Assembly.GetName().Version?.ToString(3) ?? "0.0.0";
+        var exe = MacAppBundle.Write(staging, source, helper, version, MacAppBundle.EmbeddedIcon());
+        File.SetUnixFileMode(exe, Executable);
+        if (helper != null)
         {
-            Console.WriteLine($"  warning  : {name} is not next to this agent, so screen streaming will not be available.");
-            return;
+            var stagedHelper = Path.Combine(Path.GetDirectoryName(exe)!, Video.MacScreenSource.HelperName);
+            File.SetUnixFileMode(stagedHelper, Executable);
+            Run("codesign", "--force", "--sign", "-", stagedHelper);
         }
-        if (PathsEqual(from, to)) return;
-        TryDelete(to);
-        File.Copy(from, to);
-        File.SetUnixFileMode(to, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute | UnixFileMode.GroupRead | UnixFileMode.GroupExecute | UnixFileMode.OtherRead | UnixFileMode.OtherExecute);
-        Quiet("xattr", "-d", "com.apple.quarantine", to);
+        // Apple silicon runs only signed code, and the bundle's signature is what ties Info.plist, and with it the
+        // privacy permissions, to the program.
+        Run("codesign", "--force", "--sign", "-", staging);
+        TryDeleteTree(bundle);
+        Directory.Move(staging, bundle);
+        TryDeleteTree(stagingDir);
+        Quiet("xattr", "-dr", "com.apple.quarantine", bundle);
+        foreach (var f in LegacyMacFiles) TryDelete(Path.Combine(layout.Dir, f));
     }
 
     // ------------------------------------------------------------------ autostart
@@ -211,6 +236,9 @@ public static class Installer
             sb.AppendLine("  <key>RunAtLoad</key><true/>");
             sb.AppendLine("  <key>KeepAlive</key><true/>");
             sb.AppendLine("  <key>ProcessType</key><string>Interactive</string>");
+            // Login Items in System Settings then shows the app's name and icon instead of the bare program.
+            if (MacAppBundle.EnclosingBundle(exe) != null)
+                sb.AppendLine($"  <key>AssociatedBundleIdentifiers</key><string>{MacAppBundle.BundleId}</string>");
             sb.AppendLine($"  <key>StandardOutPath</key><string>{Xml(log)}</string>");
             sb.AppendLine($"  <key>StandardErrorPath</key><string>{Xml(log)}</string>");
             sb.AppendLine("</dict></plist>");
@@ -317,7 +345,7 @@ public static class Installer
             {
                 var dir = Path.Combine(Home, "Library", "Application Support", "BetterVNC");
                 var plist = Path.Combine(Home, "Library", "LaunchAgents", LaunchLabel + ".plist");
-                return new Layout(dir, Path.Combine(dir, "bettervnc-agent"), Path.Combine(dir, AgentConfig.FileName), plist, $"LaunchAgent {plist}");
+                return new Layout(dir, MacAppBundle.ExecutablePath(Path.Combine(dir, MacAppBundle.Name)), Path.Combine(dir, AgentConfig.FileName), plist, $"LaunchAgent {plist}");
             }
             var bin = Path.Combine(Home, ".local", "bin");
             var unit = Path.Combine(Home, ".config", "systemd", "user", ServiceName + ".service");
@@ -345,6 +373,11 @@ public static class Installer
     private static void TryDelete(string path)
     {
         try { if (path.Length > 0 && File.Exists(path)) File.Delete(path); } catch (Exception ex) { Console.WriteLine($"  could not delete {path}: {ex.Message}"); }
+    }
+
+    private static void TryDeleteTree(string dir)
+    {
+        try { if (Directory.Exists(dir)) Directory.Delete(dir, recursive: true); } catch (Exception ex) { Console.WriteLine($"  could not delete {dir}: {ex.Message}"); }
     }
 
     private static void TryDeleteDir(string dir)

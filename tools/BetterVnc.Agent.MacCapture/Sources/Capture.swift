@@ -157,7 +157,7 @@ final class Capture: NSObject, SCStreamOutput, SCStreamDelegate {
 
     private static func fail(_ error: Error?) -> Never {
         if !CGPreflightScreenCaptureAccess() {
-            AgentPipe.fail("macOS has not allowed bettervnc-agent to record the screen. Allow it in System Settings > Privacy & Security > Screen Recording (Screen & System Audio Recording on macOS 15), then start the stream again.")
+            AgentPipe.fail("macOS has not allowed the BetterVNC agent to record the screen. Turn on BetterVNC Agent in System Settings > Privacy & Security > Screen & System Audio Recording (Screen Recording before macOS 15), then pick the Stream mode again.")
         }
         AgentPipe.fail("Screen capture failed: \(error?.localizedDescription ?? "unknown error")")
     }

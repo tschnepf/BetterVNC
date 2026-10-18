@@ -53,6 +53,11 @@
   </ItemGroup>
 
   <ItemGroup Condition="'$(TargetFramework)' != 'net10.0-windows'">
+    <!-- Icon of BetterVNC Agent.app, which "install" builds on macOS (MacAppBundle). -->
+    <EmbeddedResource Include="..\..\docs\icon.png" Link="Assets\BetterVNC.png" LogicalName="BetterVNC.png" />
+  </ItemGroup>
+
+  <ItemGroup Condition="'$(TargetFramework)' != 'net10.0-windows'">
     <Compile Remove="Clipboards\WindowsClipboard.cs" />
     <Compile Remove="Input\WindowsInput.cs" />
     <Compile Remove="Video\WindowsScreenSource.cs" />

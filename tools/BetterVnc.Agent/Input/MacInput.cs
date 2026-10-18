@@ -95,7 +95,7 @@ public sealed class MacInput : IGuestInput, IDisposable
             _trustChecked = true;
             if (!IsTrusted(prompt: true))
                 Log?.Invoke("Scroll injection needs the Accessibility permission: System Settings > Privacy & Security > Accessibility, " +
-                            "add bettervnc-agent (and the terminal or launchd job that starts it). Events are dropped until then.");
+                            "turn on BetterVNC Agent (or, when you started it from Terminal, Terminal). Events are dropped until then.");
         }
 
         double sign = _invert ? -1 : 1;

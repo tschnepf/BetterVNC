@@ -178,7 +178,7 @@ public static class Program
         Console.WriteLine($"Screen streaming: {host.VideoDescription}");
 #if !WINDOWS
         if (host.Input is Input.MacInput mac && !mac.IsTrusted(prompt: false))
-            Console.WriteLine("  Accessibility permission missing: System Settings > Privacy & Security > Accessibility > add bettervnc-agent. Scroll events are dropped until then.");
+            Console.WriteLine("  Accessibility permission missing: System Settings > Privacy & Security > Accessibility > turn on BetterVNC Agent. Scroll events are dropped until then.");
 #endif
         if (created) Console.WriteLine("New config written. Connect from BetterVNC and click Allow in the dialog that appears here, or set a token with 'bettervnc-agent token generate'.");
 

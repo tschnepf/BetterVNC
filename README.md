@@ -259,16 +259,19 @@ part of the VNC picture and the other displays stay on VNC. The Windows agent ta
 does not scale yet: it streams at the desktop's size and the viewer scales.
 
 **Screen Recording permission (macOS).** Capturing the screen needs the Screen Recording permission
-(called Screen & System Audio Recording on macOS 15). The first time a viewer starts a stream, macOS
-shows its prompt on the Mac's screen; you can answer it through the VNC picture. Allow
-`bettervnc-agent` in System Settings, Privacy & Security, then pick the Stream mode again. Until then
-the stream fails with a message saying so and the viewer stays on VNC. If no prompt appears (or the
-entry is there but streaming still fails, as can happen after an upgrade replaced the binary), click
-**+** in that list, press Cmd+Shift+G and enter `~/Library/Application Support/BetterVNC/bettervnc-agent`
-(the copy the LaunchAgent runs), or remove and re-add the entry, then restart the agent with
-`launchctl kickstart -k gui/$(id -u)/com.bettervnc.agent`. macOS 15 and later can ask again from
-time to time whether the agent may keep recording. At startup the agent's log says
-`Screen streaming: … Screen Recording permission not granted yet` while it is missing.
+(called Screen & System Audio Recording since macOS 15). On a Mac the agent is installed as an
+application, **BetterVNC Agent** (`~/Library/Application Support/BetterVNC/BetterVNC Agent.app`), because
+macOS lists only applications in its privacy settings; a bare program gets a hidden entry that cannot
+be switched on. The first time a viewer starts a stream, macOS shows its prompt on the Mac's screen
+(you can answer it through the VNC picture) and adds **BetterVNC Agent**, switched off, to System
+Settings, Privacy & Security, Screen & System Audio Recording. Switch it on, accept **Quit & Reopen**
+if macOS offers it (the agent comes straight back), and the stream starts by itself if a Stream mode
+is still selected. Until then the stream fails with a message saying so and the viewer stays on VNC.
+The agent is signed ad hoc, so macOS ties the permission to this exact build: after an upgrade the
+switch can look on while streaming fails; switch it off and on again (or remove the entry with **−**).
+macOS 15 and later can ask again from time to time whether the agent may keep recording. At startup
+the agent's log says `Screen streaming: … Screen Recording permission not granted yet` while it is
+missing.
 
 **Motion JPEG** is the fallback that needs no codec on either side: every changed frame is a complete
 JPEG, captured with GDI. The bitrate is held by pacing (each frame earns a pause proportional to its
@@ -366,7 +369,7 @@ connections), registers it to start at login with the OS's own mechanism and sta
 |---|---|---|---|
 | Windows | `%LOCALAPPDATA%\Programs\BetterVNC Agent\` | scheduled task "BetterVNC agent" at logon (hidden window); a firewall rule is added if the prompt is elevated, otherwise Windows asks once | next to the program |
 | Linux | `~/.local/bin/bettervnc-agent`, `~/.config/bettervnc-agent.json` | systemd user service `bettervnc-agent` (or `~/.config/autostart` without systemd) | `~/.local/state/` |
-| macOS | `~/Library/Application Support/BetterVNC/` | LaunchAgent `~/Library/LaunchAgents/com.bettervnc.agent.plist` | `~/Library/Logs/bettervnc-agent.log` |
+| macOS | `~/Library/Application Support/BetterVNC/` (the program as `BetterVNC Agent.app`, with the capture helper inside) | LaunchAgent `~/Library/LaunchAgents/com.bettervnc.agent.plist` | `~/Library/Logs/bettervnc-agent.log` |
 
 Options: `install --port 5971` or `--listen 127.0.0.1` (then reach it through an SSH tunnel).
 `install --dry-run` only shows what would be done. `uninstall` stops the agent and removes all of it.
@@ -417,10 +420,11 @@ dialog live: not as a Windows service, and on Linux with `DISPLAY` or `WAYLAND_D
   no tray icon on Linux; use the command line.
 * **macOS**: text through `pbcopy`/`pbpaste`; images, files, HTML and change detection through
   `osascript` (JavaScript for Automation against `NSPasteboard`). Nothing needs to be installed. The
-  binary is unsigned, so `install.sh` clears the download quarantine before running it. Screen
-  streaming comes from `bettervnc-capture`, which `install` copies next to the agent; it needs the
-  [Screen Recording permission](#picture-modes-and-screen-streaming), which macOS asks for when the
-  first stream starts.
+  binary is unsigned, so `install.sh` clears the download quarantine before running it. `install`
+  wraps the agent and the screen capture helper (`bettervnc-capture`) in an application,
+  `BetterVNC Agent.app`, signed ad hoc, so macOS lists it by name for the
+  [Screen Recording](#picture-modes-and-screen-streaming) and [Accessibility](#smooth-scrolling)
+  permissions.
 
 ### Smooth scrolling
 
@@ -446,12 +450,12 @@ faster Mac), and for macOS `scrollInvert` (if the direction comes out reversed o
 `scrollPhases` (set to `false` if an app misbehaves with trackpad-style gestures). Restart the agent
 after editing.
 
-**macOS permission.** Posting input events requires Accessibility. On the first scroll the agent asks
-macOS to show the permission prompt; if it does not appear (the agent runs from a LaunchAgent), open
-System Settings, Privacy & Security, Accessibility, click **+**, press Cmd+Shift+G and enter the path
-of `bettervnc-agent` (for example `/usr/local/bin/bettervnc-agent`), then enable it. When you start the
-agent from Terminal for a test, Terminal itself must be allowed as well. The permission is tied to the
-binary: after replacing it with a new build, remove and re-add the entry if scrolling stops. The agent
+**macOS permission.** Posting input events requires Accessibility. At startup the agent asks macOS for
+it, which adds **BetterVNC Agent**, switched off, to System Settings, Privacy & Security, Accessibility:
+switch it on. If it is not listed, click **+**, press Cmd+Shift+G and enter
+`~/Library/Application Support/BetterVNC/BetterVNC Agent.app`. When you start the agent from Terminal
+for a test, Terminal itself must be allowed instead. The permission is tied to the build: after an
+upgrade, switch the entry off and on again (or remove and re-add it) if scrolling stops. The agent
 prints `Accessibility permission missing` at startup while it is not granted, and
 `bettervnc-agent probe <host> <token> scroll 0 -240` scrolls the window under the Mac's pointer down by
 240 px to test it. Since the viewer already keeps the Mac's pointer where yours is, scrolling lands in
