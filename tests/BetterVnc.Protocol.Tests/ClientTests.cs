@@ -353,6 +353,37 @@ public class ClientTests
         }
     }
 
+    [Theory]
+    [InlineData(0)] // all LEDs off: an unread byte would parse as a FramebufferUpdate header
+    [InlineData(2)] // Num Lock: an unread byte would parse as a Bell and hide the bug
+    [InlineData(6)] // Caps + Num Lock: an unread byte would be an unknown message type
+    public async Task Led_state_and_cursor_without_subscribers_keep_the_stream_in_step(int leds)
+    {
+        // QEMU sends the LED state and the cursor shape right after SetEncodings, before the viewer has attached
+        // its handlers; their payloads must be consumed regardless.
+        var (server, client) = await ConnectAsync();
+        using (server) using (client)
+        {
+            Exception? error = null;
+            client.Disconnected += ex => error = ex;
+            var cursor = Bgrx(0x00FF00, 4).Concat(new byte[] { 0b11000000, 0b11000000 }).ToArray();
+            server.SendUpdate(new FakeRfbServer.Rect(0, 0, 1, 1, RfbEncoding.QemuLedState, new[] { (byte)leds }));
+            server.SendUpdate(new FakeRfbServer.Rect(1, 1, 2, 2, RfbEncoding.Cursor, cursor));
+            // The same pair inside one update, followed by pixels.
+            server.SendUpdate(
+                new FakeRfbServer.Rect(0, 0, 1, 1, RfbEncoding.QemuLedState, new[] { (byte)leds }),
+                new FakeRfbServer.Rect(0, 0, 2, 2, RfbEncoding.Cursor, cursor),
+                new FakeRfbServer.Rect(4, 4, 2, 1, RfbEncoding.Raw, Bgrx(0x123456, 2)));
+            // A fresh framebuffer reports itself dirty in full, so update events alone do not show the pixels landed.
+            for (int i = 0; i < 100 && client.IsConnected && Pixel(client, 5, 4) != 0x123456u; i++)
+                await Task.Delay(50);
+            Assert.True(client.IsConnected, error?.Message);
+            Assert.Equal(0x123456u, Pixel(client, 5, 4));
+            Assert.True(client.Capabilities.QemuLedState);
+            Assert.Equal(2, client.CurrentCursor?.Width);
+        }
+    }
+
     [Fact]
     public async Task Desktop_size_resizes_framebuffer_and_requests_full_update()
     {

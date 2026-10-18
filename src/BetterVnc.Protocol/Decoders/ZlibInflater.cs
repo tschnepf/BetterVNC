@@ -11,10 +11,21 @@ namespace BetterVnc.Protocol.Decoders;
 public sealed class ZlibInflater
 {
     private readonly Inflater _inflater = new(noHeader: false);
+    private readonly byte[] _drain = new byte[1];
 
     public void Reset() => _inflater.Reset();
 
-    /// <summary>Inflates <paramref name="input"/> until exactly <paramref name="output"/>.Length bytes were produced.</summary>
+    /// <summary>
+    /// Inflates <paramref name="input"/> until exactly <paramref name="outputLength"/> bytes were produced,
+    /// then consumes whatever is left of the chunk.
+    /// </summary>
+    /// <remarks>
+    /// Servers end every rectangle's chunk with a zlib sync flush: an empty stored block
+    /// (<c>00 00 FF FF</c>) that yields no output. SharpZipLib's <see cref="Inflater.Inflate(byte[], int, int)"/>
+    /// returns as soon as the requested output is produced, leaving those bytes unread, and its next
+    /// <c>SetInput</c> then throws "Old input was not completely processed". QEMU's Tight and Zlib
+    /// encoders trip this on the second rectangle of a connection, so the tail has to be drained here.
+    /// </remarks>
     public void Inflate(byte[] input, int inputOffset, int inputLength, byte[] output, int outputOffset, int outputLength)
     {
         _inflater.SetInput(input, inputOffset, inputLength);
@@ -32,6 +43,25 @@ public sealed class ZlibInflater
                     throw new VncException("zlib stream requires a preset dictionary");
             }
             produced += n;
+        }
+        DrainInput();
+    }
+
+    /// <summary>
+    /// Decodes the rest of the current input (the sync-flush marker) so the inflater accepts the next
+    /// chunk. A server that sends more pixel data than the rectangle holds is a protocol error.
+    /// </summary>
+    private void DrainInput()
+    {
+        while (!_inflater.IsNeedingInput && !_inflater.IsFinished)
+        {
+            int n = _inflater.Inflate(_drain, 0, 1);
+            if (n > 0)
+                throw new VncException("zlib chunk holds more data than the rectangle");
+            if (_inflater.IsNeedingDictionary)
+                throw new VncException("zlib stream requires a preset dictionary");
+            if (n == 0 && !_inflater.IsNeedingInput && !_inflater.IsFinished)
+                break; // the inflater made no progress; the remainder is unusable either way
         }
     }
 

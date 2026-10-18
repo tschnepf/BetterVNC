@@ -520,6 +520,8 @@ public sealed class VncView : Grid
         client.FramebufferUpdated += OnFramebufferUpdated;
         client.FramebufferResized += OnFramebufferResized;
         client.CursorChanged += OnCursorChanged;
+        // The first shape usually arrives before this view subscribes.
+        if (client.CurrentCursor is { } cursor) OnCursorChanged(cursor);
         CreateBitmap(client.Framebuffer.Width, client.Framebuffer.Height);
         lock (_dirtyLock) _dirty.Add(client.Framebuffer.Bounds);
         QueueRender();
