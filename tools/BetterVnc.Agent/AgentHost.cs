@@ -65,6 +65,8 @@ public sealed class AgentHost : IAsyncDisposable
     public event Action? Changed;
     /// <summary>A pairing was approved.</summary>
     public event Action<PairedViewer>? Paired;
+    /// <summary>macOS: a stream or a scroll was refused for want of Screen Recording or Accessibility; from any thread.</summary>
+    public event Action? PermissionsNeeded;
 
     public string StatusLine
     {
@@ -215,7 +217,8 @@ public sealed class AgentHost : IAsyncDisposable
 #if WINDOWS
         return new WindowsInput(cfg.ScrollScale);
 #else
-        if (OperatingSystem.IsMacOS()) return new MacInput(cfg.ScrollScale, cfg.ScrollInvert, cfg.ScrollPhases) { Log = Log };
+        if (OperatingSystem.IsMacOS())
+            return new MacInput(cfg.ScrollScale, cfg.ScrollInvert, cfg.ScrollPhases) { Log = Log, AccessibilityMissing = PermissionsNeededHandler };
         if (OperatingSystem.IsLinux() || OperatingSystem.IsFreeBSD()) return LinuxInput.TryCreate(cfg.ScrollScale, Log);
         return null;
 #endif
@@ -226,9 +229,18 @@ public sealed class AgentHost : IAsyncDisposable
 #if WINDOWS
         return new Video.WindowsScreenSource { Log = Log };
 #else
-        if (OperatingSystem.IsMacOS()) return new Video.MacScreenSource { Log = Log };
+        if (OperatingSystem.IsMacOS()) return new Video.MacScreenSource { Log = Log, PermissionMissing = () => PermissionsNeededHandler() };
         return null; // a Linux (PipeWire) source is still to come
 #endif
+    }
+
+    /// <summary>Raises <see cref="PermissionsNeeded"/>; false when nothing listens (console mode), so the caller can fall back to macOS's own prompt.</summary>
+    private bool PermissionsNeededHandler()
+    {
+        var handlers = PermissionsNeeded;
+        if (handlers == null) return false;
+        try { handlers(); } catch (Exception ex) { Log("Permission wizard failed: " + ex.Message); }
+        return true;
     }
 
     public string VideoDescription => Video switch

@@ -37,6 +37,9 @@ public sealed class MacScreenSource : IGuestVideoSource
 
     public Action<string>? Log { get; set; }
 
+    /// <summary>Called when a stream could not start because macOS does not allow screen recording (the menu bar then offers its permission wizard).</summary>
+    public Action? PermissionMissing { get; set; }
+
     public string Description
     {
         get
@@ -90,7 +93,12 @@ public sealed class MacScreenSource : IGuestVideoSource
         process.BeginErrorReadLine();
 
         var session = new CaptureHelperSession(request, process.StandardOutput.BaseStream, process.StandardInput.BaseStream, process, onFrame, onEnded, log);
-        session.Start(StartTimeout);
+        try { session.Start(StartTimeout); }
+        catch
+        {
+            if (PermissionMissing is { } missing && !MacPermissions.ScreenRecording) missing();
+            throw;
+        }
         Log?.Invoke($"{(codec == "hevc" ? "HEVC" : "H.264")} stream: {session.Description}");
         return session;
     }

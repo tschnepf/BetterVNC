@@ -19,7 +19,6 @@ public sealed class MacInput : IGuestInput, IDisposable
 {
     private const string CoreGraphics = "/System/Library/Frameworks/CoreGraphics.framework/CoreGraphics";
     private const string CoreFoundation = "/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation";
-    private const string ApplicationServices = "/System/Library/Frameworks/ApplicationServices.framework/ApplicationServices";
 
     private const uint kCGScrollEventUnitPixel = 0;
     private const uint kCGHIDEventTap = 0;
@@ -33,9 +32,6 @@ public sealed class MacInput : IGuestInput, IDisposable
     [DllImport(CoreGraphics)] private static extern void CGEventSetIntegerValueField(IntPtr evt, uint field, long value);
     [DllImport(CoreGraphics)] private static extern void CGEventPost(uint tap, IntPtr evt);
     [DllImport(CoreFoundation)] private static extern void CFRelease(IntPtr cf);
-    [DllImport(CoreFoundation)] private static extern IntPtr CFDictionaryCreate(IntPtr allocator, IntPtr[] keys, IntPtr[] values, long numValues, IntPtr keyCallBacks, IntPtr valueCallBacks);
-    [DllImport(ApplicationServices)] private static extern bool AXIsProcessTrusted();
-    [DllImport(ApplicationServices)] private static extern bool AXIsProcessTrustedWithOptions(IntPtr options);
 
     private readonly double _scale;
     private readonly bool _invert;
@@ -59,26 +55,18 @@ public sealed class MacInput : IGuestInput, IDisposable
     public string Description => "CoreGraphics pixel scroll" + (Phases ? " with phases" : "");
     public Action<string>? Log { get; set; }
 
+    /// <summary>
+    /// Called once when the first scroll arrives while Accessibility is not allowed; returns true when the menu bar's
+    /// permission wizard takes care of it, false to have macOS show its own prompt.
+    /// </summary>
+    public Func<bool>? AccessibilityMissing { get; set; }
+
     /// <summary>True when macOS lets this process post events. Shows the system prompt once when <paramref name="prompt"/> is set.</summary>
     public bool IsTrusted(bool prompt)
     {
         try
         {
-            if (AXIsProcessTrusted()) return true;
-            if (!prompt) return false;
-            IntPtr options = IntPtr.Zero;
-            try
-            {
-                var appServices = NativeLibrary.Load(ApplicationServices);
-                var cf = NativeLibrary.Load(CoreFoundation);
-                var key = Marshal.ReadIntPtr(NativeLibrary.GetExport(appServices, "kAXTrustedCheckOptionPrompt"));
-                var yes = Marshal.ReadIntPtr(NativeLibrary.GetExport(cf, "kCFBooleanTrue"));
-                var keyCallbacks = NativeLibrary.GetExport(cf, "kCFTypeDictionaryKeyCallBacks");
-                var valueCallbacks = NativeLibrary.GetExport(cf, "kCFTypeDictionaryValueCallBacks");
-                options = CFDictionaryCreate(IntPtr.Zero, new[] { key }, new[] { yes }, 1, keyCallbacks, valueCallbacks);
-                return AXIsProcessTrustedWithOptions(options);
-            }
-            finally { if (options != IntPtr.Zero) CFRelease(options); }
+            return prompt ? MacPermissions.RequestAccessibility() : MacPermissions.Accessibility;
         }
         catch (Exception ex)
         {
@@ -93,9 +81,12 @@ public sealed class MacInput : IGuestInput, IDisposable
         if (!_trustChecked)
         {
             _trustChecked = true;
-            if (!IsTrusted(prompt: true))
+            if (!IsTrusted(prompt: false))
+            {
                 Log?.Invoke("Scroll injection needs the Accessibility permission: System Settings > Privacy & Security > Accessibility, " +
                             "turn on BetterVNC Agent (or, when you started it from Terminal, Terminal). Events are dropped until then.");
+                if (AccessibilityMissing?.Invoke() != true) IsTrusted(prompt: true); // no wizard (console mode): macOS's own prompt
+            }
         }
 
         double sign = _invert ? -1 : 1;

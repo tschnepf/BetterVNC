@@ -11,7 +11,8 @@
 //
 //   bitrate <kbit/s>    fps <n>    keyframe    size <width> <height> (largest picture; 0 0 = the display's size)    quit
 //
-// It stops when standard input closes. --probe prints what this Mac offers as key=value lines and exits.
+// It stops when standard input closes. --probe prints what this Mac offers as key=value lines and exits;
+// --permissions prints only whether screen recording is allowed (screenRecording=granted|denied).
 import AppKit
 import CoreGraphics
 import Foundation
@@ -49,6 +50,10 @@ func number(_ option: String) -> Int {
 while index < arguments.count {
     switch arguments[index] {
     case "--probe": probe = true
+    case "--permissions":
+        // Asked by the agent's permission wizard; a new process sees a switch turned on since the agent started.
+        print("screenRecording=\(CGPreflightScreenCaptureAccess() ? "granted" : "denied")")
+        exit(0)
     case "--codec":
         guard let codec = Codec(rawValue: value("--codec")) else { usage("--codec is h264 or hevc") }
         settings.codec = codec

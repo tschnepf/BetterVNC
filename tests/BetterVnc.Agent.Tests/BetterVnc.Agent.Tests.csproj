@@ -25,6 +25,8 @@
     <Compile Include="..\..\tools\BetterVnc.Agent\MacAppBundle.cs" Link="Linked\MacAppBundle.cs" />
     <!-- Only its helper command line is tested here; the rest needs a Mac. -->
     <Compile Include="..\..\tools\BetterVnc.Agent\Video\MacScreenSource.cs" Link="Linked\MacScreenSource.cs" />
+    <Compile Include="..\..\tools\BetterVnc.Agent\MacPermissions.cs" Link="Linked\MacPermissions.cs" />
+    <Compile Include="..\..\tools\BetterVnc.Agent\Clipboards\ProcessRunner.cs" Link="Linked\ProcessRunner.cs" />
   </ItemGroup>
 
 </Project>

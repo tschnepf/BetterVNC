@@ -34,7 +34,7 @@ public static class MacStatusItem
     private static IntPtr Sel(string s) => sel_registerName(s);
     private static IntPtr NSStr(string s) => SendStr(objc_getClass("NSString"), Sel("stringWithUTF8String:"), s);
 
-    private enum Item { Status = 1, Viewers = 2, AllowPairing = 3, PairedViewers = 4, Token = 5, Port = 6, ListenAll = 7, Autostart = 8, OpenLog = 9, Quit = 10 }
+    private enum Item { Status = 1, Viewers = 2, AllowPairing = 3, PairedViewers = 4, Token = 5, Port = 6, ListenAll = 7, Autostart = 8, OpenLog = 9, Quit = 10, Permissions = 11 }
 
     private static AgentHost? _host;
     private static IntPtr _target;
@@ -80,6 +80,7 @@ public static class MacStatusItem
         AddItem(menu, Item.Port, "Port…");
         AddItem(menu, Item.ListenAll, "Reachable from the network");
         AddSeparator(menu);
+        AddItem(menu, Item.Permissions, "Permissions…");
         AddItem(menu, Item.Autostart, "Start at login");
         AddItem(menu, Item.OpenLog, "Open log");
         AddSeparator(menu);
@@ -88,7 +89,9 @@ public static class MacStatusItem
 
         host.Changed += RequestRefresh;
         host.Paired += v => host.Log($"Paired with {v.Name}");
+        host.PermissionsNeeded += () => ShowPermissionWizard(fromMenu: false);
         Refresh();
+        ShowPermissionWizard(fromMenu: false, delayMs: 2000); // at login: only when something is missing
         Send(app, Sel("run")); // blocks until Quit
     }
 
@@ -120,6 +123,7 @@ public static class MacStatusItem
         SetTitle(Item.Port, $"Port… ({h.Config.Port})");
         SetChecked(Item.ListenAll, h.Config.Listen != "127.0.0.1");
         SetChecked(Item.Autostart, Installer.IsAutostartEnabled());
+        SetTitle(Item.Permissions, _missingPermissions is { Length: > 0 } missing ? $"Permissions… ({missing} not allowed)" : "Permissions…");
     }
 
     [UnmanagedCallersOnly]
@@ -191,6 +195,9 @@ public static class MacStatusItem
             case Item.Autostart:
                 Installer.SetAutostart(!Installer.IsAutostartEnabled(), h.ConfigPath);
                 break;
+            case Item.Permissions:
+                ShowPermissionWizard(fromMenu: true);
+                break;
             case Item.OpenLog:
                 if (!File.Exists(h.LogPath)) File.WriteAllText(h.LogPath, "");
                 Process.Start(new ProcessStartInfo("open", new[] { h.LogPath }) { UseShellExecute = false });
@@ -199,6 +206,102 @@ public static class MacStatusItem
                 try { await h.DisposeAsync(); } catch { }
                 Environment.Exit(0);
                 break;
+        }
+    }
+
+    // ------------------------------------------------------------------ permission wizard
+
+    private const string OpenScreenRecording = "Open Screen Recording";
+    private const string OpenAccessibility = "Open Accessibility";
+    private static int _wizardRunning;
+    private static long _wizardDismissedAt = long.MinValue / 2;
+    private static volatile string? _missingPermissions;
+
+    /// <summary>
+    /// The permission wizard: says which of Screen Recording and Accessibility BetterVNC Agent still lacks and what each
+    /// is for, with a button per missing one that asks macOS (so the agent is listed) and opens that page of System
+    /// Settings. It then waits for the switch and comes back for the other one, or says that all is set. At login and
+    /// when a stream or a scroll is refused it appears only when something is missing, and not within two minutes of
+    /// "Later"; from the menu always. One at a time; any thread.
+    /// </summary>
+    private static void ShowPermissionWizard(bool fromMenu, int delayMs = 0)
+    {
+        if (!fromMenu && Environment.TickCount64 - Interlocked.Read(ref _wizardDismissedAt) < 120_000) return;
+        if (Interlocked.Exchange(ref _wizardRunning, 1) == 1) return;
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                if (delayMs > 0) await Task.Delay(delayMs);
+                RunPermissionWizard(confirmWhenDone: fromMenu);
+            }
+            catch (Exception ex) { _host?.Log("Permission wizard failed: " + ex.Message); }
+            finally
+            {
+                Volatile.Write(ref _wizardRunning, 0);
+                RequestRefresh();
+            }
+        });
+    }
+
+    private static void RunPermissionWizard(bool confirmWhenDone)
+    {
+        while (true)
+        {
+            bool screen = MacPermissions.ScreenRecording, access = MacPermissions.Accessibility;
+            _missingPermissions = (screen, access) switch
+            {
+                (false, false) => "Screen Recording, Accessibility",
+                (false, true) => "Screen Recording",
+                (true, false) => "Accessibility",
+                _ => null,
+            };
+            RequestRefresh();
+            if (screen && access)
+            {
+                if (confirmWhenDone)
+                    Dialog("BetterVNC Agent has both permissions it needs.\n\nScreen Recording: allowed, so the viewer's Stream picture modes work.\nAccessibility: allowed, so smooth scrolling works.");
+                return;
+            }
+
+            var text = "BetterVNC Agent needs two macOS permissions.\n\n" +
+                $"Screen Recording: {(screen ? "allowed" : "NOT ALLOWED YET")}. The viewer's Stream picture modes need it.\n" +
+                $"Accessibility: {(access ? "allowed" : "NOT ALLOWED YET")}. Smooth scrolling needs it.\n\n" +
+                "Click a button to open that page of System Settings, then switch on BetterVNC Agent there. " +
+                "If it is already on, switch it off and on again: macOS ties the permission to one build of the agent, so an update undoes it. " +
+                "If macOS offers Quit & Reopen, choose it: the agent starts again by itself.";
+            var buttons = new List<string> { "Later" };
+            if (!access) buttons.Add(OpenAccessibility);
+            if (!screen) buttons.Add(OpenScreenRecording);
+            var choice = Choose(text, buttons.ToArray());
+
+            Func<bool> granted;
+            if (choice == OpenScreenRecording)
+            {
+                MacPermissions.RequestScreenRecording(); // lists BetterVNC Agent if macOS has not seen it ask yet
+                MacPermissions.OpenSettings(MacPermissions.ScreenRecordingPane);
+                granted = () => MacPermissions.ScreenRecording;
+            }
+            else if (choice == OpenAccessibility)
+            {
+                MacPermissions.RequestAccessibility();
+                MacPermissions.OpenSettings(MacPermissions.AccessibilityPane);
+                granted = () => MacPermissions.Accessibility;
+            }
+            else
+            {
+                Interlocked.Exchange(ref _wizardDismissedAt, Environment.TickCount64);
+                return;
+            }
+
+            // Wait for the switch (up to ten minutes), then come back for the other one, or confirm.
+            var until = Environment.TickCount64 + 600_000;
+            while (!granted())
+            {
+                if (Environment.TickCount64 > until) return;
+                Thread.Sleep(2000);
+            }
+            confirmWhenDone = true;
         }
     }
 
@@ -224,6 +327,20 @@ public static class MacStatusItem
         var button = buttons.FirstOrDefault(b => output.StartsWith($"button returned:{b}")) ?? buttons[0];
         int idx = output.IndexOf("text returned:", StringComparison.Ordinal);
         return (button, idx >= 0 ? output[(idx + "text returned:".Length)..] : "");
+    }
+
+    /// <summary>
+    /// A dialog in front of other windows with up to three buttons, the last one the default and the first one Cancel;
+    /// returns the one clicked, or the first one when nobody answers within nine minutes.
+    /// </summary>
+    private static string Choose(string text, string[] buttons)
+    {
+        var list = string.Join(", ", buttons.Select(b => $"\"{b}\""));
+        var r = Osa($"activate\ndisplay dialog bvncText with title \"BetterVNC Agent\" buttons {{{list}}} default button \"{buttons[^1]}\" cancel button \"{buttons[0]}\" with icon caution giving up after 540", text);
+        if (!r.Ok) return buttons[0];
+        var output = r.Text.Trim(); // "button returned:Open Accessibility, gave up:false"
+        if (output.Contains("gave up:true")) return buttons[0];
+        return buttons.FirstOrDefault(b => output.StartsWith("button returned:" + b + ",", StringComparison.Ordinal) || output == "button returned:" + b) ?? buttons[0];
     }
 
     private static string[] ChooseFromList(string text, string[] items)

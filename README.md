@@ -269,6 +269,10 @@ if macOS offers it (the agent comes straight back), and the stream starts by its
 is still selected. Until then the stream fails with a message saying so and the viewer stays on VNC.
 The agent is signed ad hoc, so macOS ties the permission to this exact build: after an upgrade the
 switch can look on while streaming fails; switch it off and on again (or remove the entry with **−**).
+The menu bar item's **Permissions…** walks through both permissions: it says which are missing and
+what each is for, opens the right page of System Settings, waits for the switch and then moves on to
+the next one. It also comes up by itself at login, and when a stream or a scroll is refused, whenever
+a permission is missing.
 macOS 15 and later can ask again from time to time whether the agent may keep recording. At startup
 the agent's log says `Screen streaming: … Screen Recording permission not granted yet` while it is
 missing.
