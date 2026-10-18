@@ -20,6 +20,7 @@ public partial class SessionWindow : Window
     private readonly string _host;
     private readonly int _port;
     private readonly string? _passwordOverride;
+    private readonly string? _guestAddress;
     private VncClient? _client;
     private HwndSource? _hwndSource;
     private LowLevelKeyboardHook? _llHook;
@@ -56,10 +57,12 @@ public partial class SessionWindow : Window
 
     /// <param name="hostOverride">Resolved host/port/password for Unraid VMs (looked up over SSH before opening the window).</param>
     /// <param name="fullscreen">Start in fullscreen for this session only, without changing the profile's StartFullscreen setting.</param>
-    public SessionWindow(ConnectionProfile profile, string? hostOverride = null, int? portOverride = null, string? passwordOverride = null, bool fullscreen = false)
+    /// <param name="guestAddress">An Unraid VM's own address, where its guest agent listens; null when not known yet.</param>
+    public SessionWindow(ConnectionProfile profile, string? hostOverride = null, int? portOverride = null, string? passwordOverride = null, bool fullscreen = false, string? guestAddress = null)
     {
         InitializeComponent();
         _profile = profile;
+        _guestAddress = guestAddress;
         _startFullscreen = fullscreen || profile.StartFullscreen;
         // Profiles saved by older builds may still hold a "vnc://host" style value.
         var (parsedHost, parsedPort) = HostParser.Parse(hostOverride ?? profile.Host);
@@ -249,7 +252,7 @@ public partial class SessionWindow : Window
     private void StartAgent()
     {
         if (!AgentClient.IsConfigured(_profile) || _client == null) return;
-        var agent = new AgentClient(_profile, _host, Dispatcher);
+        var agent = new AgentClient(_profile, _host, Dispatcher, _guestAddress, GuestAddressLookUp());
         agent.StateChanged += () => { if (_agent == agent) OnAgentStateChanged(agent); };
         agent.Message += m => { if (_agent == agent) StatusLeft.Text = m; };
         agent.RemoteTextReceived += t => { if (_agent == agent) OnRemoteClipboard(t); };
@@ -261,6 +264,18 @@ public partial class SessionWindow : Window
         _player = player;
         StatusLeft.Text = $"Connecting to guest agent at {agent.Target}…";
         agent.Start();
+    }
+
+    /// <summary>
+    /// For an Unraid VM the VNC host is the Unraid server, so the agent's address (the VM's own) is looked up there,
+    /// again whenever it is unknown or stops answering. Null for every other kind of connection.
+    /// </summary>
+    private Func<CancellationToken, Task<string?>>? GuestAddressLookUp()
+    {
+        if (_profile.Kind != ConnectionKind.UnraidVm || _profile.UnraidVmName is not { Length: > 0 } vmName
+            || App.Profiles.FindServer(_profile.UnraidServerId) is not { } server)
+            return null;
+        return ct => new UnraidService(server).GetGuestAddressAsync(vmName, ct);
     }
 
     private void OnAgentStateChanged(AgentClient agent)
@@ -544,7 +559,7 @@ public partial class SessionWindow : Window
                 }
                 catch (System.Runtime.InteropServices.COMException) { await Task.Delay(30); }
             }
-            // Text travels over VNC; a copy that carries text and a picture (Excel, Word) is almost always meant as text.
+            // Text goes through PushLocalClipboard; a copy that carries text and a picture (Excel, Word) is almost always meant as text.
             if (!hasImage || hasText || hasFiles) return;
             await agent.PushClipboardImageAsync();
         }
@@ -569,7 +584,18 @@ public partial class SessionWindow : Window
         }
         if (string.IsNullOrEmpty(text) || text == _lastRemoteClipboard || text == _lastLocalClipboard) return;
         _lastLocalClipboard = text;
-        _client.SendClipboardText(text);
+        // Through the agent when it is connected: UTF-8, and it works where the VNC server keeps no clipboard of its own
+        // (QEMU without a qemu-vdagent channel, as on most Unraid VMs). Over VNC otherwise.
+        if (_agent is { IsConnected: true } agent) _ = PushTextThroughAgentAsync(agent, _client, text);
+        else _client.SendClipboardText(text);
+    }
+
+    private static async Task PushTextThroughAgentAsync(AgentClient agent, VncClient client, string text)
+    {
+        bool sent;
+        try { sent = await agent.PushTextAsync(text); }
+        catch (Exception) { sent = false; }
+        if (!sent) client.SendClipboardText(text);
     }
 
     private void OnRemoteClipboard(string text)

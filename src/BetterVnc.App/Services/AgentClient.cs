@@ -23,7 +23,8 @@ public sealed class AgentClient : IDisposable, IScrollInjector
     public const long AutoFetchFileLimit = 64L * 1024 * 1024;
 
     private readonly ConnectionProfile _profile;
-    private readonly string _host;
+    private volatile string? _host;
+    private readonly Func<CancellationToken, Task<string?>>? _lookUpGuestAddress;
     private readonly string _token;
     private readonly Dispatcher _dispatcher;
     private readonly CancellationTokenSource _cts = new();
@@ -33,11 +34,26 @@ public sealed class AgentClient : IDisposable, IScrollInjector
     private byte[]? _lastSentPngHash;
     private bool _disposed;
 
-    public AgentClient(ConnectionProfile profile, string vncHost, Dispatcher dispatcher)
+    /// <param name="guestAddress">
+    /// The guest's own address when the VNC host is not the guest itself: an Unraid VM's VNC is served by the Unraid
+    /// server, while the agent listens inside the VM. Null when it is not known yet.
+    /// </param>
+    /// <param name="lookUpGuestAddress">
+    /// Finds the guest's address again, for when it was not known (the VM is still booting) or an attempt failed (a new
+    /// DHCP lease). Null when the agent runs on the VNC host. An agent host set in the profile overrides both.
+    /// </param>
+    public AgentClient(ConnectionProfile profile, string vncHost, Dispatcher dispatcher,
+        string? guestAddress = null, Func<CancellationToken, Task<string?>>? lookUpGuestAddress = null)
     {
         _profile = profile;
         _dispatcher = dispatcher;
-        _host = string.IsNullOrWhiteSpace(profile.AgentHost) ? vncHost : profile.AgentHost!.Trim();
+        if (!string.IsNullOrWhiteSpace(profile.AgentHost))
+            _host = profile.AgentHost.Trim();
+        else
+        {
+            _host = lookUpGuestAddress != null ? guestAddress : guestAddress ?? vncHost;
+            _lookUpGuestAddress = lookUpGuestAddress;
+        }
         _token = ProfileStore.Unprotect(profile.AgentProtectedToken) ?? "";
     }
 
@@ -129,7 +145,7 @@ public sealed class AgentClient : IDisposable, IScrollInjector
         catch (Exception) when (!conn.IsConnected) { }
     }
     public string Status { get; private set; } = "agent: connecting";
-    public string Target => $"{_host}:{_profile.AgentPort}";
+    public string Target => _host is { } host ? $"{host}:{_profile.AgentPort}" : $"port {_profile.AgentPort} in the VM (address not known yet)";
 
     /// <summary>Connected, disconnected or failed; read <see cref="IsConnected"/> and <see cref="Status"/>.</summary>
     public event Action? StateChanged;
@@ -154,11 +170,33 @@ public sealed class AgentClient : IDisposable, IScrollInjector
         var identity = ViewerIdentity.Current;
         bool pairMode = _profile.AgentAuth == AgentAuthMode.Pair;
         string? pairKey = pairMode ? ProfileStore.Unprotect(_profile.AgentProtectedPairKey) : null;
+        bool lookUpAgain = false;
+        var nextLookUp = DateTime.MinValue;
         while (!ct.IsCancellationRequested)
         {
+            if (_lookUpGuestAddress != null && (_host == null || lookUpAgain) && DateTime.UtcNow >= nextLookUp)
+            {
+                // Each look-up is an SSH round trip to the Unraid server, so at most one per half minute.
+                lookUpAgain = false;
+                nextLookUp = DateTime.UtcNow + TimeSpan.FromSeconds(30);
+                try
+                {
+                    if (await _lookUpGuestAddress(ct).ConfigureAwait(false) is { } found) _host = found;
+                }
+                catch (OperationCanceledException) { break; }
+                catch { } // the server is unreachable; keep the address we have
+            }
+            if (_host is not { } host)
+            {
+                SetStatus("agent: VM address unknown");
+                Post(() => Message?.Invoke("Guest agent: the Unraid server does not know the VM's address yet (the VM needs the QEMU guest agent)"));
+                try { await Task.Delay(delay, ct).ConfigureAwait(false); } catch (OperationCanceledException) { break; }
+                if (delay < TimeSpan.FromSeconds(15)) delay += delay;
+                continue;
+            }
             var conn = new AgentConnection(new AgentConnectionOptions
             {
-                Host = _host,
+                Host = host,
                 Port = _profile.AgentPort,
                 Token = pairMode ? null : _token,
                 PairKey = pairKey,
@@ -217,6 +255,7 @@ public sealed class AgentClient : IDisposable, IScrollInjector
                 }
                 SetStatus("agent: reconnecting");
                 Post(() => Message?.Invoke("Guest agent disconnected" + (ex != null ? $": {ex.Message}" : "")));
+                lookUpAgain = true;
             }
             catch (OperationCanceledException) { break; }
             catch (AgentPairingException ex) when (ex.NeedsPairing && pairMode)
@@ -249,6 +288,7 @@ public sealed class AgentClient : IDisposable, IScrollInjector
             catch (Exception ex)
             {
                 SetStatus($"agent: unreachable ({ex.Message})");
+                lookUpAgain = true;
             }
             finally
             {
@@ -449,11 +489,13 @@ public sealed class AgentClient : IDisposable, IScrollInjector
         catch (Exception) { return false; }
     }
 
-    public async Task PushTextAsync(string text)
+    /// <summary>Puts text on the guest clipboard; false when the agent is not connected.</summary>
+    public async Task<bool> PushTextAsync(string text)
     {
         var conn = _connection;
-        if (conn == null) return;
+        if (conn == null) return false;
         await conn.SetClipboardAsync(AgentFormat.Text, Encoding.UTF8.GetBytes(text), _cts.Token);
+        return true;
     }
 
     public void Dispose()

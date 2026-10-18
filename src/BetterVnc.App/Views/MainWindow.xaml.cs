@@ -121,6 +121,7 @@ public partial class MainWindow : Window
         string? host = null;
         int? port = null;
         string? password = null;
+        string? guestAddress = null;
 
         if (profile.Kind == ConnectionKind.UnraidVm && App.Profiles.FindServer(profile.UnraidServerId) is { } server && !string.IsNullOrEmpty(profile.UnraidVmName))
         {
@@ -146,6 +147,7 @@ public partial class MainWindow : Window
                 host = server.Host;
                 port = vm.VncPort;
                 password = vm.VncPassword;
+                guestAddress = vm.GuestAddress;
                 if (port == null)
                 {
                     MessageBox.Show(this, $"VM \"{vm.Name}\" has no VNC display (is it using a passthrough GPU?).", "BetterVNC", MessageBoxButton.OK, MessageBoxImage.Warning);
@@ -162,7 +164,7 @@ public partial class MainWindow : Window
             }
         }
 
-        var win = new SessionWindow(profile, host, port, password, fullscreen: fullscreen == true);
+        var win = new SessionWindow(profile, host, port, password, fullscreen: fullscreen == true, guestAddress: guestAddress);
         win.Show();
     }
 

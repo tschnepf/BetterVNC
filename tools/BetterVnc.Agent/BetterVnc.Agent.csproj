@@ -45,6 +45,11 @@
 
   <PropertyGroup Condition="'$(TargetFramework)' == 'net10.0-windows'">
     <UseWindowsForms>true</UseWindowsForms>
+    <!--
+      GUI subsystem, so starting at sign-in opens no console window and needs no hidden launcher. Commands run from a
+      terminal attach to its console (Program.AttachToParentConsole).
+    -->
+    <OutputType>WinExe</OutputType>
   </PropertyGroup>
 
   <ItemGroup Condition="'$(TargetFramework)' == 'net10.0-windows'">

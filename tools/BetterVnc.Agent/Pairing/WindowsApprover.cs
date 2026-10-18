@@ -65,7 +65,7 @@ public sealed class WindowsApprover : IPairingApprover
                 UpdateAllowText();
             };
             _timer.Start();
-            // The agent is started hidden (scheduled task via wscript, LaunchAgent, Start-Process -WindowStyle Hidden);
+            // The agent may be started hidden (LaunchAgent, Start-Process -WindowStyle Hidden, an older install's hidden launcher);
             // Windows applies that startup style to the first window a process shows, so insist on being visible.
             Shown += (_, _) => { ShowWindow(Handle, SW_SHOWNORMAL); SetForegroundWindow(Handle); Activate(); _allow.Focus(); };
         }

@@ -18,7 +18,9 @@ public partial class UnraidServerWindow : Window
     {
         public required UnraidVmInfo Info { get; init; }
         public string Name => Info.Name;
-        public string Detail => Info.IsRunning ? $"{Info.State} · VNC port {Info.VncPort?.ToString() ?? "?"}{(Info.VncPassword != null ? " · password set" : "")}" : Info.State;
+        public string Detail => Info.IsRunning
+            ? $"{Info.State} · VNC port {Info.VncPort?.ToString() ?? "?"}{(Info.VncPassword != null ? " · password set" : "")}{(Info.GuestAddress != null ? $" · {Info.GuestAddress}" : "")}"
+            : Info.State;
         public string Warnings => Info.Warnings;
         public Visibility WarningVisibility => Info.Warnings.Length > 0 ? Visibility.Visible : Visibility.Collapsed;
         public Visibility StartVisibility => Info.IsRunning ? Visibility.Collapsed : Visibility.Visible;
@@ -131,7 +133,7 @@ public partial class UnraidServerWindow : Window
             App.Profiles.Connections.Add(profile);
             try { App.Profiles.Save(); } catch { }
         }
-        var win = new SessionWindow(profile, Server.Host, vm.VncPort, vm.VncPassword);
+        var win = new SessionWindow(profile, Server.Host, vm.VncPort, vm.VncPassword, guestAddress: vm.GuestAddress);
         win.Show();
     }
 

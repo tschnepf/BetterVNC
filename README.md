@@ -371,7 +371,7 @@ connections), registers it to start at login with the OS's own mechanism and sta
 
 | Remote | Program and config | Autostart | Log |
 |---|---|---|---|
-| Windows | `%LOCALAPPDATA%\Programs\BetterVNC Agent\` | scheduled task "BetterVNC agent" at logon (hidden window); a firewall rule is added if the prompt is elevated, otherwise Windows asks once | next to the program |
+| Windows | `%LOCALAPPDATA%\Programs\BetterVNC Agent\` | "BetterVNC agent" entry under `HKCU\Software\Microsoft\Windows\CurrentVersion\Run` (at sign-in; the program has no console window); a firewall rule for all network profiles is added if the prompt is elevated, otherwise Windows asks once (tick Public networks there if the machine's network is Public) | next to the program |
 | Linux | `~/.local/bin/bettervnc-agent`, `~/.config/bettervnc-agent.json` | systemd user service `bettervnc-agent` (or `~/.config/autostart` without systemd) | `~/.local/state/` |
 | macOS | `~/Library/Application Support/BetterVNC/` (the program as `BetterVNC Agent.app`, with the capture helper inside) | LaunchAgent `~/Library/LaunchAgents/com.bettervnc.agent.plist` | `~/Library/Logs/bettervnc-agent.log` |
 

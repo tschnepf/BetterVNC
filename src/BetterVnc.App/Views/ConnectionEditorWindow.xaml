@@ -119,7 +119,7 @@
                             <RowDefinition /><RowDefinition />
                         </Grid.RowDefinitions>
                         <Label Grid.Row="0" Content="Agent host" />
-                        <TextBox Grid.Row="0" Grid.Column="1" x:Name="AgentHostBox" Margin="0,3" ToolTip="Leave empty to use the VNC host. Unraid VMs: enter the VM's own IP address or host name (the VNC host is the Unraid server)." />
+                        <TextBox Grid.Row="0" Grid.Column="1" x:Name="AgentHostBox" Margin="0,3" ToolTip="Leave empty to use the VNC host. Unraid VMs linked to a server: leave empty and the VM's own address is looked up on the server on every connect (needs the QEMU guest agent in the VM), or enter the VM's IP address or host name." />
                         <Label Grid.Row="1" Content="Agent port" />
                         <TextBox Grid.Row="1" Grid.Column="1" x:Name="AgentPortBox" Margin="0,3" Width="100" HorizontalAlignment="Left" />
                     </Grid>
