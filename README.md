@@ -183,10 +183,17 @@ the other way round, still meet on motion JPEG.
 **H.264** is what a Windows agent and the viewer normally agree on. The agent captures with DXGI
 Desktop Duplication, which hands over a frame only when something was drawn, so an unchanged screen
 costs nothing and the viewer's idle fallback keeps working; where duplication is unavailable (RDP
-sessions, the secure desktop, basic display adapters) it falls back to GDI polling with a pixel
-compare. Frames are converted to NV12 on the capture thread and encoded by the Media Foundation
-H.264 encoder: the GPU vendor's hardware encoder when one is registered (AMD, Intel and NVIDIA all
-ship one; `videoStarted` then reports `encoder: hardware`), otherwise Microsoft's software encoder.
+sessions, the secure desktop, basic display adapters) it falls back to GDI polling that compares the
+picture in 64×64 tiles. Only what changed (the compositor's dirty and moved rectangles, or the tiles
+that differ) is copied and converted to NV12, with SIMD, into an input buffer the encoder reuses, and
+the Media Foundation H.264 encoder encodes the picture: the GPU vendor's hardware encoder when one is
+registered (AMD, Intel and NVIDIA all ship one; `videoStarted` then reports `encoder: hardware`),
+otherwise Microsoft's software encoder, which with the conversion leaves one logical processor free.
+The capture thread keeps at most one frame inside the encoder and steps the frame rate down (60, 30,
+20 fps) while capturing, converting and encoding take more than 70% of the frame interval, and back up
+when there is room; while frames flow the agent log has the time of each stage about once a second.
+`BETTERVNC_SOFTWARE_ENCODER=1` in the agent's environment makes it use the software encoder, as in a VM
+without a GPU.
 The stream is CBR at the requested bitrate with no B-frames and low-latency mode; the bitrate is
 re-tuned in place when the picture mode changes; key frames are sent only when needed (stream start,
 a dropped frame, a resolution change, a viewer's request) and every key frame carries SPS and PPS;
@@ -215,7 +222,7 @@ random colour blocks repainting at 60 Hz:
 | Stream, low bandwidth (2.5 Mbit/s, 30 fps cap) | 30 | 2.4 to 2.9 Mbit/s |
 
 With every pixel of the display changing every frame the encoder still delivered 57 fps at the
-60 fps presets; the capture thread spends about 9 ms per frame on the BGRA to NV12 conversion and
+60 fps presets; the capture thread spent about 9 ms per frame on the BGRA to NV12 conversion (before it was vectorised) and
 the upload, the encoding itself runs on the GPU in parallel. Motion JPEG on the same display managed
 about 7 fps at 8 Mbit/s.
 

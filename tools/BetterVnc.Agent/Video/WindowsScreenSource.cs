@@ -23,7 +23,7 @@ public sealed class WindowsScreenSource : IGuestVideoSource
 
     public WindowsScreenSource()
     {
-        _h264 = H264Encoder.DescribeAvailable();
+        _h264 = H264Encoder.DescribeAvailable(H264ScreenSession.PreferHardware);
         Codecs = _h264 != null ? new[] { AgentVideoCodec.H264, AgentVideoCodec.Jpeg } : new[] { AgentVideoCodec.Jpeg };
     }
 

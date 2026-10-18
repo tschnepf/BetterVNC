@@ -17,6 +17,7 @@ internal static unsafe class D3D
     public const uint D3D11_MAP_READ = 1;
     public const int DXGI_ERROR_INVALID_CALL = unchecked((int)0x887A0001);
     public const int DXGI_ERROR_NOT_FOUND = unchecked((int)0x887A0002);
+    public const int DXGI_ERROR_MORE_DATA = unchecked((int)0x887A0003);
     public const int DXGI_ERROR_UNSUPPORTED = unchecked((int)0x887A0004);
     public const int DXGI_ERROR_NOT_CURRENTLY_AVAILABLE = unchecked((int)0x887A0022);
     public const int DXGI_ERROR_ACCESS_LOST = unchecked((int)0x887A0026);
@@ -86,6 +87,14 @@ internal struct DXGI_OUTDUPL_FRAME_INFO
     public int PointerVisible;
     public uint TotalMetadataBufferSize;
     public uint PointerShapeBufferSize;
+}
+
+/// <summary>A region the compositor moved (scrolling, a dragged window): drawn at the destination from the source point.</summary>
+[StructLayout(LayoutKind.Sequential)]
+internal struct DXGI_OUTDUPL_MOVE_RECT
+{
+    public POINT SourcePoint;
+    public RECT DestinationRect;
 }
 
 [ComImport, Guid("db6f6ddb-ac77-4e88-8253-819df9bbf140"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]

@@ -1,26 +1,48 @@
+using System.Diagnostics;
 using System.Runtime.InteropServices;
 using BetterVnc.Media.Interop;
 
 namespace BetterVnc.Media;
 
-/// <summary>One encoded access unit. Key frames always carry SPS and PPS so a decoder can start on them.</summary>
-public readonly record struct EncodedFrame(byte[] Data, bool Keyframe, long TimestampMicros);
+/// <summary>
+/// One encoded access unit. Key frames always carry SPS and PPS so a decoder can start on them.
+/// <paramref name="EncodeMicros"/>: how long the frame was inside the encoder, from submission to output.
+/// </summary>
+public readonly record struct EncodedFrame(byte[] Data, bool Keyframe, long TimestampMicros, long EncodeMicros = 0);
 
 /// <summary>
 /// H.264 encoding with a Media Foundation transform: the GPU vendor's hardware encoder when one is registered
 /// (AMD, Intel, NVIDIA all ship one), otherwise Microsoft's software encoder. Takes BGRA frames, converts them to
-/// NV12 straight into the sample buffer and emits Annex B frames. Hardware encoders are asynchronous MFTs, so the
+/// NV12 in the sample buffer and emits Annex B frames. Hardware encoders are asynchronous MFTs, so the
 /// caller checks <see cref="WantsInput"/> before <see cref="Encode"/> and calls <see cref="Pump"/> regularly to
 /// collect output; the software encoder fits the same protocol with <see cref="WantsInput"/> always true.
+/// The input sample and its buffer are reused from frame to frame, so a caller that says which parts of the picture
+/// changed gets only those converted; a buffer the encoder may still be reading is never written.
 /// All methods must be called from one thread.
 /// </summary>
 public sealed unsafe class H264Encoder : IDisposable
 {
+    /// <summary>A reusable input sample. <see cref="Stale"/>: what changed in the picture since this buffer last got it.</summary>
+    private sealed class InputSlot
+    {
+        public required IMFSample Sample;
+        public required IMFMediaBuffer Buffer;
+        public required DirtyRegion Stale;
+        /// <summary>Sequence number of the last frame submitted from this slot; free once that many frames have come out.</summary>
+        public long LastSequence;
+    }
+
+    /// <summary>More slots than this means the encoder holds frames it will never return; the oldest is then reused.</summary>
+    private const int MaxInputSlots = 4;
+
     private IMFActivate? _activate;
     private IMFTransform _mft = null!;
     private ICodecAPI? _codec;
     private IMFMediaEventGenerator? _events;
     private IMFSample? _outputSample;
+    private readonly List<InputSlot> _inputs = new();
+    private readonly Queue<long> _submitTicks = new();
+    private long _submitted, _completed;
     private bool _providesSamples;
     private bool _async;
     private int _needInput;
@@ -35,6 +57,16 @@ public sealed unsafe class H264Encoder : IDisposable
     /// <summary>True when the encoder honours key-frame requests; otherwise the caller recreates the encoder to get one.</summary>
     public bool CanForceKeyframe { get; private set; }
     public bool WantsInput => !_async || _needInput > 0;
+    /// <summary>Asynchronous (hardware) encoders work on their own threads; synchronous ones inside <see cref="Encode"/> and <see cref="Pump"/>.</summary>
+    public bool IsAsync => _async;
+    /// <summary>Frames submitted whose output has not come out yet.</summary>
+    public int InFlight => (int)(_submitted - _completed);
+    /// <summary>Threads the BGRA→NV12 conversion may use.</summary>
+    public int ConvertThreads { get; set; } = PixelConvert.DefaultThreads;
+    /// <summary>The software encoder's worker-thread cap, when it accepted one; null for hardware encoders or when refused.</summary>
+    public int? WorkerThreads { get; private set; }
+    /// <summary>Time the last <see cref="Encode"/> spent converting BGRA to NV12.</summary>
+    public long LastConvertMicros { get; private set; }
 
     /// <summary>Diagnostic hook: receives one line per initialization step.</summary>
     public static Action<string>? Trace { get; set; }
@@ -129,6 +161,11 @@ public sealed unsafe class H264Encoder : IDisposable
             SetCodecValue(MFGuids.CODECAPI_AVEncMPVDefaultBPictureCount, Variant.UInt32(0));
             SetCodecValue(MFGuids.CODECAPI_AVLowLatencyMode, Variant.Bool(true));
             SetCodecValue(MFGuids.CODECAPI_AVEncCommonQualityVsSpeed, Variant.UInt32(hardware ? 50u : 33u));
+            // The software encoder would use every core; leave one to the machine whose screen this is (a VM's few
+            // vCPUs). Microsoft's encoder takes at most 16.
+            int threads = Math.Min(PixelConvert.DefaultThreads, 16);
+            if (!hardware && SetCodecValue(MFGuids.CODECAPI_AVEncNumWorkerThreads, Variant.UInt32((uint)threads)))
+                WorkerThreads = threads;
         }
 
         // Output type first (what hardware encoders expect), then the matching NV12 input.
@@ -235,44 +272,56 @@ public sealed unsafe class H264Encoder : IDisposable
     /// Submits one BGRA frame (<paramref name="stride"/> bytes per row, at least Width×Height pixels). The caller must
     /// have seen <see cref="WantsInput"/> true. Output appears through <see cref="Pump"/>.
     /// </summary>
-    public void Encode(byte* bgra, int stride, long timestampMicros)
+    public void Encode(byte* bgra, int stride, long timestampMicros) => Encode(bgra, stride, null, timestampMicros);
+
+    /// <summary>
+    /// Submits one BGRA frame of which only <paramref name="changed"/> differs from the frame submitted before (null:
+    /// anything may have changed). Only those parts, plus whatever the reused input buffer missed while the encoder
+    /// held it, are converted; <paramref name="bgra"/> must hold the whole current picture all the same.
+    /// </summary>
+    public void Encode(byte* bgra, int stride, DirtyRegion? changed, long timestampMicros)
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
         if (!WantsInput) throw new InvalidOperationException("The encoder is not ready for input.");
-        uint size = (uint)(Width * Height * 3 / 2);
-        MF.Check(MF.MFCreateAlignedMemoryBuffer(size, MF.MF_64_BYTE_ALIGNMENT, out var buffer), "MFCreateAlignedMemoryBuffer");
-        IMFSample? sample = null;
-        try
+        foreach (var s in _inputs)
         {
-            MF.Check(buffer.Lock(out var p, out _, out _), "lock input buffer");
+            if (changed == null) s.Stale.AddAll();
+            else s.Stale.Add(changed);
+        }
+        var slot = FreeInputSlot();
+        uint size = (uint)(Width * Height * 3 / 2);
+        long start = Stopwatch.GetTimestamp();
+        if (!slot.Stale.IsEmpty)
+        {
+            MF.Check(slot.Buffer.Lock(out var p, out _, out _), "lock input buffer");
             try
             {
                 byte* d = (byte*)p;
-                PixelConvert.BgraToNv12(bgra, stride, Width, Height, d, Width, d + Width * Height, Width);
+                PixelConvert.BgraToNv12(bgra, stride, Width, Height, d, Width, d + Width * Height, Width,
+                    slot.Stale.IsFull ? null : slot.Stale.GetRects(), ConvertThreads);
             }
-            finally { buffer.Unlock(); }
-            buffer.SetCurrentLength(size);
-            MF.Check(MF.MFCreateSample(out sample), "MFCreateSample");
-            sample.AddBuffer(buffer);
-            sample.SetSampleTime(timestampMicros * 10);
-            sample.SetSampleDuration(10_000_000L / Fps);
-            int hr = _mft.ProcessInput(0, sample, 0);
-            if (hr == MF.MF_E_NOTACCEPTING && !_async)
-            {
-                // The software encoder holds output we have not collected yet.
-                var pending = new List<EncodedFrame>();
-                Pump(pending);
-                _pendingOutput.AddRange(pending);
-                hr = _mft.ProcessInput(0, sample, 0);
-            }
-            MF.Check(hr, "ProcessInput");
-            if (_async) _needInput--;
+            finally { slot.Buffer.Unlock(); }
+            slot.Stale.Clear();
         }
-        finally
+        LastConvertMicros = Micros(Stopwatch.GetTimestamp() - start);
+        slot.Buffer.SetCurrentLength(size);
+        var sample = slot.Sample;
+        sample.SetSampleTime(timestampMicros * 10);
+        sample.SetSampleDuration(10_000_000L / Fps);
+        long submitted = Stopwatch.GetTimestamp();
+        int hr = _mft.ProcessInput(0, sample, 0);
+        if (hr == MF.MF_E_NOTACCEPTING && !_async)
         {
-            MF.Release(sample);
-            MF.Release(buffer);
+            // The software encoder holds output we have not collected yet.
+            var pending = new List<EncodedFrame>();
+            Pump(pending);
+            _pendingOutput.AddRange(pending);
+            hr = _mft.ProcessInput(0, sample, 0);
         }
+        MF.Check(hr, "ProcessInput");
+        slot.LastSequence = ++_submitted;
+        _submitTicks.Enqueue(submitted);
+        if (_async) _needInput--;
     }
 
     /// <summary>Convenience for tests: encodes a packed BGRA image.</summary>
@@ -280,6 +329,35 @@ public sealed unsafe class H264Encoder : IDisposable
     {
         fixed (byte* p = bgra) Encode(p, stride, timestampMicros);
     }
+
+    /// <summary>
+    /// An input sample the encoder is done with: every frame submitted from it has come out. Encoders here return each
+    /// frame before asking for the next, so one slot is all that is normally used.
+    /// </summary>
+    private InputSlot FreeInputSlot()
+    {
+        foreach (var s in _inputs) if (s.LastSequence <= _completed) return s;
+        if (_inputs.Count >= MaxInputSlots)
+        {
+            // Frames went in that will not come out (the encoder dropped them): the oldest slot has been let go of.
+            return _inputs.MinBy(s => s.LastSequence)!;
+        }
+        uint size = (uint)(Width * Height * 3 / 2);
+        MF.Check(MF.MFCreateAlignedMemoryBuffer(size, MF.MF_64_BYTE_ALIGNMENT, out var buffer), "MFCreateAlignedMemoryBuffer");
+        IMFSample sample;
+        try
+        {
+            MF.Check(MF.MFCreateSample(out sample), "MFCreateSample");
+            MF.Check(sample.AddBuffer(buffer), "add input buffer");
+        }
+        catch { MF.Release(buffer); throw; }
+        var slot = new InputSlot { Sample = sample, Buffer = buffer, Stale = new DirtyRegion(Width, Height) };
+        slot.Stale.AddAll();
+        _inputs.Add(slot);
+        return slot;
+    }
+
+    private static long Micros(long ticks) => ticks * 1_000_000 / Stopwatch.Frequency;
 
     private readonly List<EncodedFrame> _pendingOutput = new();
 
@@ -364,8 +442,13 @@ public sealed unsafe class H264Encoder : IDisposable
             release = true;
         }
         else sample = _outputSample!;
-        try { output.Add(ReadFrame(sample)); }
+        EncodedFrame frame;
+        try { frame = ReadFrame(sample); }
         finally { if (release) MF.Release(sample); }
+        // No B-frames, so frames come out in the order they went in.
+        long encodeMicros = _submitTicks.TryDequeue(out var submitted) ? Micros(Stopwatch.GetTimestamp() - submitted) : 0;
+        if (_completed < _submitted) _completed++;
+        output.Add(frame with { EncodeMicros = encodeMicros });
         return true;
     }
 
@@ -434,6 +517,14 @@ public sealed unsafe class H264Encoder : IDisposable
         try { _mft?.ProcessMessage(MF.MFT_MESSAGE_NOTIFY_END_STREAMING, UIntPtr.Zero); } catch { }
         MF.Release(_outputSample);
         _outputSample = null;
+        foreach (var s in _inputs)
+        {
+            MF.Release(s.Sample);
+            MF.Release(s.Buffer);
+        }
+        _inputs.Clear();
+        _submitTicks.Clear();
+        _submitted = _completed = 0;
         _events = null;
         _codec = null;
         MF.Release(_mft);

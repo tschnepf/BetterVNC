@@ -15,4 +15,9 @@
     <LangVersion>latest</LangVersion>
   </PropertyGroup>
 
+  <ItemGroup>
+    <!-- The tests run each SIMD path of the BGRA to NV12 conversion against the scalar one. -->
+    <InternalsVisibleTo Include="BetterVnc.Media.Tests" />
+  </ItemGroup>
+
 </Project>
