@@ -146,6 +146,52 @@ public class CaptureHelperSessionTests
     }
 
     [Fact]
+    public async Task A_new_viewer_area_goes_to_the_helper_as_a_size_command_once()
+    {
+        using var helper = new FakeHelper();
+        // The helper was started for a 1600x1000 viewer area (--max-width/--max-height).
+        var (session, recorder) = Create(helper, new VideoRequest { Codec = AgentVideoCodec.H264, MaxWidth = 1600, MaxHeight = 1000 });
+        var start = Task.Run(() => session.Start(TimeSpan.FromSeconds(5)));
+        helper.Info("width=1600\nheight=1000\nencoder=hardware\n");
+        await start;
+
+        session.SetMaxSize(1600, 1000); // what the helper already has: nothing to say
+        session.SetMaxSize(1280, 800);  // the viewer's window got smaller
+        session.SetMaxSize(1280, 800);  // the same area again (another resize event that changed nothing)
+        session.SetMaxSize(0, 0);       // no limit: the display's own size
+        session.SetMaxSize(-5, 720);    // nonsense is no limit
+        session.RequestKeyframe();      // a marker: everything before it has been written
+        Assert.Equal("size 1280 800", await helper.NextCommand());
+        Assert.Equal("size 0 0", await helper.NextCommand());
+        Assert.Equal("size 0 720", await helper.NextCommand());
+        Assert.Equal("keyframe", await helper.NextCommand());
+
+        // The helper rescales: its next info and frames carry the new size, which is what the viewer is told.
+        helper.Info("width=1152\nheight=720\nencoder=hardware\n");
+        helper.Send(CaptureHelperSession.KindFrame, new byte[] { 1 }, keyframe: true, width: 1152, height: 720);
+        var frame = (await recorder.NextFrame()).Frame;
+        Assert.Equal((1152, 720), (frame.Width, frame.Height));
+        Assert.Equal((1152, 720), (session.Width, session.Height));
+        session.Dispose();
+    }
+
+    [Fact]
+    public void The_helper_gets_the_viewer_area_on_its_command_line_only_when_there_is_one()
+    {
+        var request = new VideoRequest { Codec = AgentVideoCodec.Hevc, BitrateKbps = 6000, MaxFps = 200, MaxWidth = 2560, MaxHeight = 1440 };
+        Assert.Equal(new[] { "--codec", "hevc", "--bitrate", "6000", "--fps", "120", "--max-width", "2560", "--max-height", "1440" },
+            MacScreenSource.HelperArguments("hevc", request));
+
+        // An older viewer sends no area: the helper streams at the display's own size, as before.
+        Assert.Equal(new[] { "--codec", "h264", "--bitrate", "8000", "--fps", "60" },
+            MacScreenSource.HelperArguments("h264", new VideoRequest { Codec = AgentVideoCodec.H264 }));
+
+        // A limit in one direction only.
+        Assert.Equal(new[] { "--codec", "h264", "--bitrate", "8000", "--fps", "60", "--max-height", "900" },
+            MacScreenSource.HelperArguments("h264", new VideoRequest { Codec = AgentVideoCodec.H264, MaxHeight = 900 }));
+    }
+
+    [Fact]
     public async Task Info_with_an_offset_places_frames_in_the_desktop_and_later_info_updates_it()
     {
         using var helper = new FakeHelper();

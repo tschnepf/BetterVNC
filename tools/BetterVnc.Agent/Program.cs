@@ -119,13 +119,23 @@ public static class Program
               bettervnc-agent probe <host[:port]> <token or 'pair'> info | watch | get <text|html|png|files> [out]
                                                             | set text <string> | set png <file> | set files <path>...
                                                             | scroll <dx px> <dy px> [steps]   (dy > 0 scrolls up)
-                                                            | video [kbit/s] [fps] [seconds] [first-frame.jpg|.h264] [codec]
+                                                            | video [kbit/s] [fps] [seconds] [first-frame.jpg|.h264|-] [codec|-]
+                                                                    [WxH [WxH]]   (viewer area at start, and halfway)
 
             Without a command the agent starts serving and creates bettervnc-agent.json next to the executable on first
             start. Viewers get in by pairing (you click Allow in a dialog on this screen) or with the token. The file also
             holds port, listen, maxPayloadMb, enableVideo (screen streaming for the viewer's Stream picture modes) and the
             scroll settings (enableScroll, scrollScale, scrollInvert, scrollPhases).
             """);
+    }
+
+    /// <summary>"1600x1000" as a viewer's picture area for the probe's video command.</summary>
+    private static (int Width, int Height) ParseArea(string text)
+    {
+        var parts = text.Split('x', 'X');
+        if (parts.Length == 2 && int.TryParse(parts[0], out int width) && int.TryParse(parts[1], out int height) && width >= 0 && height >= 0)
+            return (width, height);
+        throw new FormatException($"'{text}' is not a size such as 1600x1000.");
     }
 
     private static AgentConfig LoadOrCreate(string configPath, out bool created)
@@ -404,11 +414,14 @@ public static class Program
                     int bitrate = args.Count > 0 ? int.Parse(args[0]) : 8000;
                     int fps = args.Count > 1 ? int.Parse(args[1]) : 30;
                     int seconds = args.Count > 2 ? int.Parse(args[2]) : 5;
-                    string? saveTo = args.Count > 3 ? args[3] : null;
+                    string? saveTo = args.Count > 3 && args[3] != "-" ? args[3] : null;
+                    (int Width, int Height)? area = args.Count > 5 ? ParseArea(args[5]) : null;
+                    (int Width, int Height)? laterArea = args.Count > 6 ? ParseArea(args[6]) : null;
                     long frames = 0, bytes = 0, keyframes = 0;
                     int w = 0, h = 0;
                     string at = "";
                     byte[]? first = null;
+                    var sizes = new List<string>(); // every frame size seen, in order
                     conn.VideoFrameReceived += f =>
                     {
                         Interlocked.Increment(ref frames);
@@ -417,16 +430,25 @@ public static class Program
                         w = f.Header.Width ?? w;
                         h = f.Header.Height ?? h;
                         at = f.Header.OffsetX is { } ox ? $" at {ox},{f.Header.OffsetY ?? 0}" : "";
+                        lock (sizes) { if (sizes.Count == 0 || sizes[^1] != $"{w}x{h}") sizes.Add($"{w}x{h}"); }
                         first ??= f.Payload.ToArray();
                     };
                     conn.VideoStopped += r => Console.WriteLine("Stream stopped by the agent: " + (r ?? "no reason given"));
-                    var codecs = args.Count > 4 ? new[] { args[4] } : new[] { AgentVideoCodec.H264, AgentVideoCodec.Jpeg };
-                    var info = await conn.StartVideoAsync(codecs, bitrate, fps, cts.Token);
-                    Console.WriteLine($"Streaming {info.Codec} {info.Width}x{info.Height}{(info.OffsetX is { } iox ? $" at {iox},{info.OffsetY ?? 0} of the desktop (part of it)" : "")}, {info.BitrateKbps} kbit/s, {info.MaxFps} fps max, {info.EncoderKind} encoder.");
+                    var codecs = args.Count > 4 && args[4] != "-" ? new[] { args[4] } : new[] { AgentVideoCodec.H264, AgentVideoCodec.Jpeg };
+                    var info = await conn.StartVideoAsync(codecs, bitrate, fps, area, cts.Token);
+                    Console.WriteLine($"Streaming {info.Codec} {info.Width}x{info.Height}{(info.OffsetX is { } iox ? $" at {iox},{info.OffsetY ?? 0} of the desktop (part of it)" : "")}, {info.BitrateKbps} kbit/s, {info.MaxFps} fps max, {info.EncoderKind} encoder{(area is { } a ? $", viewer area {a.Width}x{a.Height}" : "")}.");
                     Console.WriteLine("Move something on the agent's screen: unchanged frames are not sent.");
                     long lastFrames = 0, lastBytes = 0;
                     for (int i = 0; i < seconds && !cts.IsCancellationRequested; i++)
                     {
+                        if (laterArea is { } later && i == seconds / 2)
+                        {
+                            // As a viewer whose window was resized: the agent rescales, and a key frame shows the new size
+                            // even when nothing on the screen moves.
+                            await conn.SetVideoAreaAsync(later.Width, later.Height, cts.Token);
+                            await conn.SetVideoAsync(null, null, keyframe: true, cts.Token);
+                            Console.WriteLine($"Viewer area now {later.Width}x{later.Height}.");
+                        }
                         try { await Task.Delay(1000, cts.Token); } catch (OperationCanceledException) { break; }
                         long f = Interlocked.Read(ref frames), b = Interlocked.Read(ref bytes);
                         Console.WriteLine($"  {i + 1,3} s  {f - lastFrames,4} frames  {(b - lastBytes) * 8 / 1000.0,8:0} kbit/s  {w}x{h}{at}");
@@ -435,6 +457,7 @@ public static class Program
                     }
                     await conn.StopVideoAsync(CancellationToken.None);
                     Console.WriteLine($"Total: {frames} frames ({keyframes} key frames), {bytes / 1024} KB.");
+                    lock (sizes) Console.WriteLine($"Frame sizes: {(sizes.Count == 0 ? "none" : string.Join(" then ", sizes))}.");
                     if (saveTo != null && first != null)
                     {
                         await File.WriteAllBytesAsync(saveTo, first);

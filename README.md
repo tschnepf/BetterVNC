@@ -215,13 +215,20 @@ to it (source in `tools/BetterVnc.Agent.MacCapture`), for each stream. It captur
 with ScreenCaptureKit, which hands over a frame only when something changed and scales it on the GPU,
 and encodes it with VideoToolbox in hardware: real-time mode with low-latency rate control where the
 Mac has it, no frame reordering, the requested bitrate with bursts capped at 1.5 times the average
-over any second, key frames only at the start and on request. Streams are sent at the display's
-pixel size (a Retina display's full resolution), scaled down to fit 4096×2304 when larger, and the
-viewer scales them into the window as it does the VNC picture. The pointer is left out of the
-stream; the viewer draws it from the VNC cursor shape. On a Mac with more than one display the main
-display is streamed at its full size together with its position in the desktop (`offsetX`/`offsetY`),
-so the viewer paints it onto its part of the VNC picture and the other displays stay on VNC. The
-helper also takes a largest picture size, ready for when the viewer sends its window size.
+over any second, key frames only at the start and on request. The stream comes at the size the
+viewer shows the picture at, as Jump Desktop does: the viewer sends that size with `startVideo`, in
+device pixels (the session window's picture area when the picture is fitted, the VNC framebuffer's
+size at 1:1), and again 0.3 s after the window stops changing size, moves to a screen with another
+DPI or switches between fit and 1:1. ScreenCaptureKit scales the display down to fit it on the Mac's
+GPU, keeping its shape, and the viewer shows the stream pixel for pixel: no pixels are encoded only
+to be scaled away, so the same bitrate buys a sharper picture. A resize costs one key frame. Without
+a size (older viewers) streams are sent at the display's pixel size (a Retina display's full
+resolution), scaled down to fit 4096×2304 when larger, and the viewer scales them into the window as
+it does the VNC picture. The pointer is left out of the stream; the viewer draws it from the VNC
+cursor shape. On a Mac with more than one display the main display is streamed at its full size
+together with its position in the desktop (`offsetX`/`offsetY`), so the viewer paints it onto its
+part of the VNC picture and the other displays stay on VNC. The Windows agent takes the size too but
+does not scale yet: it streams at the desktop's size and the viewer scales.
 
 **Screen Recording permission (macOS).** Capturing the screen needs the Screen Recording permission
 (called Screen & System Audio Recording on macOS 15). The first time a viewer starts a stream, macOS
@@ -249,7 +256,11 @@ To check a stream from the command line:
 ```bash
 bettervnc-agent probe <guest-ip> <token or pair> video 8000 60 5 first-frame.h264
 bettervnc-agent probe <guest-ip> <token or pair> video 8000 30 5 first-frame.jpg jpeg
+bettervnc-agent probe <guest-ip> <token or pair> video 8000 60 6 - h264 1600x1000 800x500
 ```
+
+The last one acts as a viewer whose picture area is 1600×1000 and shrinks to 800×500 halfway; the
+per-second lines and the closing `Frame sizes:` line show what the agent sent.
 
 ### How it works
 
@@ -261,10 +272,14 @@ the relative names and sizes in the header), and `scroll` (viewer to agent, no r
 `phase` begin/continue/end, optional pointer position and the raw Windows wheel delta). The `welcome` lists
 the agent's optional `features` (`scroll`, `video`), so an old agent is simply never sent scroll events or
 asked for a stream. Streaming uses `startVideo` (viewer lists the `codecs` it decodes, wanted `bitrate` in kbit/s
-and `maxFps`) answered by `videoStarted` (negotiated codec, bitrate, fps, size, `encoder` hardware/software),
-`setVideo`/`ok` to re-tune or ask for a key frame, `stopVideo`/`ok`, `videoFrame` (agent to viewer, one encoded
-frame per payload with `sequence`, `timestamp`, `keyframe`, `width`, `height`) and `videoStopped` (agent to
-viewer when its capture ends).
+and `maxFps`, and optionally `width`/`height`: the area it shows the picture in, in device pixels) answered by
+`videoStarted` (negotiated codec, bitrate, fps, size, `encoder` hardware/software), `setVideo`/`ok` to re-tune,
+send a new `width`/`height` area or ask for a key frame, `stopVideo`/`ok`, `videoFrame` (agent to viewer, one
+encoded frame per payload with `sequence`, `timestamp`, `keyframe`, `width`, `height`) and `videoStopped` (agent
+to viewer when its capture ends). In `startVideo` and `setVideo`, `width`/`height` are a limit, not an order: an
+agent that can scale before encoding sends a picture that fits in them, keeping the desktop's shape, and frames
+say the size they have; an absent or 0 side means no limit, and a `setVideo` without either keeps the area. Old
+agents ignore the fields and old viewers do not send them, so both keep streaming at the desktop's size.
 
 **Who may connect.** Two ways, both usable at the same time:
 
@@ -420,7 +435,8 @@ the window under the mouse, as it does locally.
 the remote clipboard (`pair` instead of the token pairs the probe the way the viewer does); `probe … watch` prints change notifications; `probe … get png out.png`,
 `probe … set png in.png`, `probe … set files <paths>` and `probe … get files <dir>` move data by hand;
 `probe … scroll <dx> <dy> [steps]` injects a scroll gesture (pixels, `dy > 0` is up);
-`probe … video [kbit/s] [fps] [seconds] [first-frame.jpg]` starts a screen stream and prints frames and bandwidth per second.
+`probe … video [kbit/s] [fps] [seconds] [first-frame.jpg|-] [codec|-] [WxH [WxH]]` starts a screen stream and
+prints frames, bandwidth and frame size per second (the sizes act as a viewer's picture area at the start and halfway).
 The agent framing, authentication and request handling are covered by `tests/BetterVnc.Agent.Tests`
 (an executable like the protocol tests; `dotnet tests/BetterVnc.Agent.Tests/bin/Debug/net10.0/BetterVnc.Agent.Tests.dll`
 also runs it).

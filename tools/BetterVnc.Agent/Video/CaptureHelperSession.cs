@@ -43,6 +43,7 @@ internal sealed class CaptureHelperSession : IVideoSession
     private readonly TaskCompletionSource _started = new(TaskCreationOptions.RunContinuationsAsynchronously);
     private volatile Info _info = new(0, 0, false, null, "");
     private volatile int _bitrateKbps, _maxFps;
+    private (int Width, int Height) _maxSize; // under _writeLock
     private volatile bool _disposed;
     private string? _error;
 
@@ -55,6 +56,7 @@ internal sealed class CaptureHelperSession : IVideoSession
         Codec = request.Codec;
         _bitrateKbps = request.BitrateKbps;
         _maxFps = Math.Clamp(request.MaxFps, 1, 120);
+        _maxSize = (Math.Max(request.MaxWidth, 0), Math.Max(request.MaxHeight, 0)); // the helper got these as arguments
         _fromHelper = fromHelper;
         _toHelper = toHelper;
         _process = process;
@@ -111,6 +113,18 @@ internal sealed class CaptureHelperSession : IVideoSession
     }
 
     public void RequestKeyframe() => Send("keyframe");
+
+    /// <summary>Sends <c>size &lt;w&gt; &lt;h&gt;</c> when the area differs from the last one; the helper rescales on the GPU and its frames say the new size.</summary>
+    public void SetMaxSize(int maxWidth, int maxHeight)
+    {
+        var size = (Math.Max(maxWidth, 0), Math.Max(maxHeight, 0));
+        lock (_writeLock)
+        {
+            if (size == _maxSize) return;
+            _maxSize = size;
+            Send(FormattableString.Invariant($"size {size.Item1} {size.Item2}"));
+        }
+    }
 
     public void Dispose()
     {

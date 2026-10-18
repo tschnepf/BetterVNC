@@ -61,13 +61,20 @@ jobs:
           sleep 8
           out/agent/bettervnc-agent probe 127.0.0.1:5970 ci-smoke-test video 4000 30 4 out/first-frame.h264 h264 > "$RUNNER_TEMP/probe.log" 2>&1
           status=$?
+          # As a viewer whose picture area is 800x600 at the start and 400x300 halfway: ScreenCaptureKit should scale the
+          # display to fit each (the agent passes --max-width/--max-height, then sends "size 400 300").
+          out/agent/bettervnc-agent probe 127.0.0.1:5970 ci-smoke-test video 4000 30 4 - h264 800x600 400x300 > "$RUNNER_TEMP/probe-area.log" 2>&1
+          area_status=$?
           kill "$agent"
-          cat "$RUNNER_TEMP/agent.log" "$RUNNER_TEMP/probe.log"
+          cat "$RUNNER_TEMP/agent.log" "$RUNNER_TEMP/probe.log" "$RUNNER_TEMP/probe-area.log"
           summary="$(grep -hE 'Streaming|Total|stopped|Cannot|failed|unavailable|Screen streaming|Screen capture|stream:' "$RUNNER_TEMP/agent.log" "$RUNNER_TEMP/probe.log" | tr '\n' ' ')"
           if [ "$status" = 0 ]; then echo "::notice title=Stream::$summary"; else echo "::warning title=Stream (exit $status)::$summary"; fi
           if [ -f out/first-frame.h264 ]; then
             echo "::notice title=First frame::$(wc -c < out/first-frame.h264) bytes, starting $(head -c 48 out/first-frame.h264 | xxd -p | tr -d '\n')"
           fi
+          area="$(grep -hE 'Streaming|Viewer area|Frame sizes|stopped|failed' "$RUNNER_TEMP/probe-area.log" | tr '\n' ' ') $(grep -hE 'viewer area|Capture size' "$RUNNER_TEMP/agent.log" | tr '\n' ' ')"
+          if [ "$area_status" = 0 ]; then echo "::notice title=Stream at the viewer's size::$area"; else echo "::warning title=Stream at the viewer's size (exit $area_status)::$area"; fi
+          [ "$status" = 0 ] && status=$area_status
           exit $status
       - uses: actions/upload-artifact@v4
         if: always()

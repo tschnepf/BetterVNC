@@ -81,20 +81,34 @@ public sealed class AgentClient : IDisposable, IScrollInjector
         }
     }
 
-    /// <summary>Parameters of the running stream; null when none runs.</summary>
-    public AgentConnection.VideoStartInfo? StreamInfo { get; private set; }
+    /// <summary>Parameters of the running stream, its size following the frames; null when none runs.</summary>
+    public AgentConnection.VideoStartInfo? StreamInfo
+    {
+        get => Volatile.Read(ref _streamInfo);
+        private set => Volatile.Write(ref _streamInfo, value);
+    }
+    private AgentConnection.VideoStartInfo? _streamInfo;
 
     /// <summary>An encoded frame arrived; raised on the agent's receive thread, so decode elsewhere and return quickly.</summary>
     public event Action<AgentFrame>? StreamFrame;
     /// <summary>The stream ended without this side asking (agent stopped it, or disconnected); on the dispatcher.</summary>
     public event Action<string?>? StreamStopped;
 
-    public async Task<AgentConnection.VideoStartInfo> StartStreamAsync(int bitrateKbps, int maxFps)
+    /// <param name="area">Where the picture is shown, in device pixels (see <see cref="AgentMessage.Width"/>); null for no limit.</param>
+    public async Task<AgentConnection.VideoStartInfo> StartStreamAsync(int bitrateKbps, int maxFps, (int Width, int Height)? area = null)
     {
         var conn = _connection ?? throw new InvalidOperationException("The guest agent is not connected.");
-        var info = await conn.StartVideoAsync(StreamCodecs, bitrateKbps, maxFps, _cts.Token).ConfigureAwait(false);
+        var info = await conn.StartVideoAsync(StreamCodecs, bitrateKbps, maxFps, area, _cts.Token).ConfigureAwait(false);
         StreamInfo = info;
         return info;
+    }
+
+    /// <summary>The area the picture is shown in changed (device pixels); an agent that can scale encodes no larger than that.</summary>
+    public async Task SetStreamAreaAsync(int width, int height)
+    {
+        var conn = _connection;
+        if (conn == null || StreamInfo == null) return;
+        await conn.SetVideoAreaAsync(width, height, _cts.Token).ConfigureAwait(false);
     }
 
     public async Task SetStreamAsync(int? bitrateKbps, int? maxFps, bool keyframe = false)
@@ -155,7 +169,15 @@ public sealed class AgentClient : IDisposable, IScrollInjector
             var closed = new TaskCompletionSource<Exception?>(TaskCreationOptions.RunContinuationsAsynchronously);
             conn.Disconnected += ex => closed.TrySetResult(ex);
             conn.ClipboardChanged += msg => _ = OnGuestClipboardChangedAsync(conn, msg);
-            conn.VideoFrameReceived += frame => { if (StreamInfo != null) StreamFrame?.Invoke(frame); };
+            conn.VideoFrameReceived += frame =>
+            {
+                if (StreamInfo is not { } info) return;
+                // The size changes when the guest's resolution does, or when the agent rescales to a new viewer area.
+                // Only over the info it read, so a stream stopped meanwhile stays stopped.
+                if (frame.Header is { Width: { } w, Height: { } h } && (w != info.Width || h != info.Height))
+                    Interlocked.CompareExchange(ref _streamInfo, info with { Width = w, Height = h }, info);
+                StreamFrame?.Invoke(frame);
+            };
             conn.VideoStopped += reason =>
             {
                 if (StreamInfo == null) return;

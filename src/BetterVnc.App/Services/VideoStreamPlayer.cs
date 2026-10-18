@@ -24,6 +24,11 @@ public sealed class VideoStreamPlayer : IDisposable
     public static readonly TimeSpan IdleAfter = TimeSpan.FromMilliseconds(700);
     /// <summary>RFB update pacing while the stream carries the picture: enough for cursor shapes and resizes, little pixel traffic.</summary>
     public static readonly TimeSpan RfbIntervalWhileStreaming = TimeSpan.FromSeconds(1);
+    /// <summary>
+    /// The picture area is sent to the agent once it has not changed for this long, so dragging a window edge costs one
+    /// rescale (and one key frame) on the agent rather than one per mouse move.
+    /// </summary>
+    public static readonly TimeSpan AreaSettleTime = TimeSpan.FromMilliseconds(300);
 
     private readonly AgentClient _agent;
     private readonly VncClient _client;
@@ -32,6 +37,8 @@ public sealed class VideoStreamPlayer : IDisposable
     private readonly Channel<AgentFrame> _frames;
     private readonly CancellationTokenSource _cts = new();
     private readonly DispatcherTimer _idleTimer;
+    private readonly DispatcherTimer _areaTimer;
+    private (int Width, int Height)? _sentArea; // the picture area the agent last heard of; dispatcher only
     private readonly WicJpegDecoder _jpeg = new();
     private readonly ConcurrentBag<byte[]> _pool = new();
     private Task? _decodeLoop;
@@ -56,8 +63,11 @@ public sealed class VideoStreamPlayer : IDisposable
             _ => { Interlocked.Increment(ref _framesSkipped); _lostFrames = true; });
         _idleTimer = new DispatcherTimer(DispatcherPriority.Background, dispatcher) { Interval = IdleAfter };
         _idleTimer.Tick += (_, _) => OnIdle();
+        _areaTimer = new DispatcherTimer(DispatcherPriority.Background, dispatcher) { Interval = AreaSettleTime };
+        _areaTimer.Tick += (_, _) => _ = SendAreaAsync();
         _agent.StreamFrame += OnFrame;
         _agent.StreamStopped += OnAgentStopped;
+        _view.PictureAreaChanged += OnPictureAreaChanged;
     }
 
     /// <summary>The stream mode in effect; null while the picture comes from RFB alone.</summary>
@@ -99,7 +109,10 @@ public sealed class VideoStreamPlayer : IDisposable
             Message?.Invoke($"Stream re-tuned to {mode.BitrateKbps / 1000.0:0.#} Mbit/s, {mode.MaxFps} fps max");
             return;
         }
-        var info = await _agent.StartStreamAsync(mode.BitrateKbps, mode.MaxFps).ConfigureAwait(true);
+        // The agent encodes at most the size the picture is shown at (a Mac scales on its GPU), so it lands here 1:1.
+        var area = _view.PictureArea;
+        var info = await _agent.StartStreamAsync(mode.BitrateKbps, mode.MaxFps, area).ConfigureAwait(true);
+        _sentArea = area;
         Mode = mode;
         Interlocked.Increment(ref _generation);
         Interlocked.Exchange(ref _bytesReceived, 0);
@@ -112,6 +125,7 @@ public sealed class VideoStreamPlayer : IDisposable
         _client.UpdateInterval = RfbIntervalWhileStreaming;
         IdleFallbackActive = false;
         _idleTimer.Start();
+        if (_view.PictureArea != area) _areaTimer.Start(); // resized while the agent was starting
         string where = info.OffsetX is { } ox ? $" (the primary display, at {ox},{info.OffsetY ?? 0} of the desktop; the other displays stay on VNC)" : "";
         Message?.Invoke($"Streaming {info.Codec} {info.Width}×{info.Height}{where} from the guest agent ({info.EncoderKind} encoder, {info.BitrateKbps / 1000.0:0.#} Mbit/s, {info.MaxFps} fps max)");
     }
@@ -122,6 +136,7 @@ public sealed class VideoStreamPlayer : IDisposable
         if (!IsStreaming) return;
         Mode = null;
         _idleTimer.Stop();
+        _areaTimer.Stop();
         try { await _agent.StopStreamAsync().ConfigureAwait(true); }
         catch (Exception ex) { Message?.Invoke("Stop stream: " + ex.Message); }
         BackToRfb();
@@ -140,9 +155,32 @@ public sealed class VideoStreamPlayer : IDisposable
         if (!IsStreaming) return;
         Mode = null;
         _idleTimer.Stop();
+        _areaTimer.Stop();
         BackToRfb();
         Message?.Invoke($"Stream ended: {reason ?? "stopped by the agent"}; back to VNC");
         Ended?.Invoke(reason);
+    }
+
+    private void OnPictureAreaChanged()
+    {
+        if (!IsStreaming) return;
+        // Restarted on every change: the area goes out once the window has settled.
+        _areaTimer.Stop();
+        _areaTimer.Start();
+    }
+
+    /// <summary>Tells the agent the picture area, when it differs from what the agent last heard.</summary>
+    private async Task SendAreaAsync()
+    {
+        _areaTimer.Stop();
+        if (!IsStreaming || _view.PictureArea is not { } area || area == _sentArea) return;
+        _sentArea = area;
+        try { await _agent.SetStreamAreaAsync(area.Width, area.Height).ConfigureAwait(true); }
+        catch (Exception ex)
+        {
+            _sentArea = null; // try again with the next change
+            Message?.Invoke("Stream size change failed: " + ex.Message);
+        }
     }
 
     private void OnFrame(AgentFrame frame)
@@ -301,7 +339,9 @@ public sealed class VideoStreamPlayer : IDisposable
         _disposed = true;
         _agent.StreamFrame -= OnFrame;
         _agent.StreamStopped -= OnAgentStopped;
+        _view.PictureAreaChanged -= OnPictureAreaChanged;
         _idleTimer.Stop();
+        _areaTimer.Stop();
         _cts.Cancel();
         _frames.Writer.TryComplete();
         if (IsStreaming)

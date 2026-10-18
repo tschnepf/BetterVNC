@@ -39,6 +39,7 @@ public sealed class FakeVideoSource : IGuestVideoSource
 
         public FakeSession(VideoRequest request, Action<VideoFrame> onFrame, Action<string?> onEnded)
         {
+            Request = request;
             Codec = request.Codec;
             BitrateKbps = request.BitrateKbps;
             MaxFps = request.MaxFps;
@@ -46,6 +47,10 @@ public sealed class FakeVideoSource : IGuestVideoSource
             _onEnded = onEnded;
         }
 
+        /// <summary>What the server passed to <see cref="FakeVideoSource.Start"/>.</summary>
+        public VideoRequest Request { get; }
+        /// <summary>Every <see cref="SetMaxSize"/> call, in order.</summary>
+        public List<(int Width, int Height)> MaxSizes { get; } = new();
         public string Codec { get; }
         public int BitrateKbps { get; private set; }
         public int MaxFps { get; private set; }
@@ -64,6 +69,8 @@ public sealed class FakeVideoSource : IGuestVideoSource
         }
 
         public void RequestKeyframe() => KeyframeRequests++;
+
+        public void SetMaxSize(int maxWidth, int maxHeight) => MaxSizes.Add((maxWidth, maxHeight));
 
         /// <summary>Pushes one frame as the capture thread would.</summary>
         public void Emit(byte[] data) => _onFrame(new VideoFrame(data, true, ++_n * 16_667L, Width, Height, Offset?.X, Offset?.Y));
@@ -85,6 +92,21 @@ public class VideoFramingTests
             Type = AgentMessageType.StartVideo, Id = 1, Codecs = new[] { AgentVideoCodec.H264, AgentVideoCodec.Jpeg }, Bitrate = 8000, MaxFps = 60,
         }));
         Assert.Equal("{\"type\":\"startVideo\",\"id\":1,\"codecs\":[\"h264\",\"jpeg\"],\"bitrate\":8000,\"maxFps\":60}", json);
+    }
+
+    [Fact]
+    public void Viewer_area_travels_as_width_and_height_and_is_absent_without_one()
+    {
+        var start = Encoding.UTF8.GetString(AgentFraming.EncodeHeader(new AgentMessage
+        {
+            Type = AgentMessageType.StartVideo, Id = 1, Codecs = new[] { AgentVideoCodec.H264 }, Bitrate = 8000, MaxFps = 60, Width = 1600, Height = 1000,
+        }));
+        Assert.Equal("{\"type\":\"startVideo\",\"id\":1,\"codecs\":[\"h264\"],\"bitrate\":8000,\"maxFps\":60,\"width\":1600,\"height\":1000}", start);
+        var set = Encoding.UTF8.GetString(AgentFraming.EncodeHeader(new AgentMessage { Type = AgentMessageType.SetVideo, Id = 2, Width = 1280, Height = 800 }));
+        Assert.Equal("{\"type\":\"setVideo\",\"id\":2,\"width\":1280,\"height\":800}", set);
+        // Re-tuning the bitrate says nothing about the area, so the agent keeps the one it has.
+        var retune = Encoding.UTF8.GetString(AgentFraming.EncodeHeader(new AgentMessage { Type = AgentMessageType.SetVideo, Id = 3, Bitrate = 4000 }));
+        Assert.DoesNotContain("width", retune);
     }
 
     [Fact]
@@ -250,6 +272,82 @@ public class VideoServerTests : IAsyncDisposable
         await session.Disposed;
         Assert.Equal(0, _server.StreamingSessions);
         Assert.True(client.IsConnected); // the clipboard side of the session is untouched
+    }
+
+    [Fact]
+    public async Task Viewer_area_reaches_the_source_at_start_and_when_it_changes()
+    {
+        using var client = NewClient();
+        await client.ConnectAsync(default);
+        await client.StartVideoAsync(new[] { AgentVideoCodec.Jpeg }, 8000, 60, (1600, 1000), default);
+        var session = await _video.NextSession();
+        Assert.Equal(1600, session.Request.MaxWidth);
+        Assert.Equal(1000, session.Request.MaxHeight);
+        Assert.Empty(session.MaxSizes);
+
+        await client.SetVideoAreaAsync(1280, 800, default); // the window got smaller
+        await client.SetVideoAsync(4000, null, keyframe: false, default); // a re-tune leaves the area alone
+        await client.SetVideoAreaAsync(0, 0, default);      // no limit
+        await client.SetVideoAreaAsync(-1, 100_000, default); // clamped
+        Assert.Equal(new[] { (1280, 800), (0, 0), (0, 16_384) }, session.MaxSizes);
+        Assert.Equal(4000, session.BitrateKbps);
+
+        await client.StopVideoAsync(default);
+        await session.Disposed;
+    }
+
+    [Fact]
+    public async Task A_viewer_that_sends_no_area_gets_no_limit()
+    {
+        using var client = NewClient();
+        await client.ConnectAsync(default);
+        await client.StartVideoAsync(new[] { AgentVideoCodec.Jpeg }, 8000, 60, default);
+        var session = await _video.NextSession();
+        Assert.Equal(0, session.Request.MaxWidth);
+        Assert.Equal(0, session.Request.MaxHeight);
+        await client.SetVideoAsync(null, null, keyframe: true, default);
+        Assert.Empty(session.MaxSizes);
+    }
+
+    /// <summary>A capture that cannot scale (the Windows agent's): it leaves <see cref="IVideoSession.SetMaxSize"/> to the default.</summary>
+    private sealed class FixedSizeSource : IGuestVideoSource
+    {
+        public IReadOnlyList<string> Codecs { get; } = new[] { AgentVideoCodec.H264 };
+        public VideoRequest? Request { get; private set; }
+
+        public IVideoSession Start(VideoRequest request, Action<VideoFrame> onFrame, Action<string?> onEnded)
+        {
+            Request = request;
+            return new Session();
+        }
+
+        private sealed class Session : IVideoSession
+        {
+            public string Codec => AgentVideoCodec.H264;
+            public int BitrateKbps => 8000;
+            public int MaxFps => 60;
+            public int Width => 2560;
+            public int Height => 1440;
+            public string EncoderKind => AgentVideoEncoder.Hardware;
+            public void Set(int? bitrateKbps, int? maxFps) { }
+            public void RequestKeyframe() { }
+            public void Dispose() { }
+        }
+    }
+
+    [Fact]
+    public async Task A_source_that_cannot_scale_takes_the_area_and_streams_at_its_own_size()
+    {
+        var source = new FixedSizeSource();
+        await using var server = new AgentServer(new FakeClipboard(), new AgentServerOptions { Token = Token, ListenAddress = IPAddress.Loopback, Port = 0 }, null, source);
+        server.Start();
+        using var client = new AgentConnection(new AgentConnectionOptions { Host = "127.0.0.1", Port = server.Port, Token = Token });
+        await client.ConnectAsync(default);
+        var info = await client.StartVideoAsync(new[] { AgentVideoCodec.H264 }, 8000, 60, (1280, 720), default);
+        Assert.Equal((1280, 720), (source.Request!.MaxWidth, source.Request.MaxHeight));
+        Assert.Equal((2560, 1440), (info.Width, info.Height)); // the viewer scales, as before
+        await client.SetVideoAreaAsync(800, 600, default); // accepted; nothing changes
+        Assert.True(client.IsConnected);
     }
 
     [Fact]

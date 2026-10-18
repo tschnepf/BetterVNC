@@ -82,7 +82,7 @@ public sealed class MacScreenSource : IGuestVideoSource
             RedirectStandardOutput = true,
             RedirectStandardError = true,
         };
-        foreach (var arg in new[] { "--codec", codec, "--bitrate", Invariant(request.BitrateKbps), "--fps", Invariant(Math.Clamp(request.MaxFps, 1, 120)) })
+        foreach (var arg in HelperArguments(codec, request))
             psi.ArgumentList.Add(arg);
         var process = Process.Start(psi) ?? throw new InvalidOperationException($"{HelperName} did not start.");
         var log = Log;
@@ -93,6 +93,17 @@ public sealed class MacScreenSource : IGuestVideoSource
         session.Start(StartTimeout);
         Log?.Invoke($"{(codec == "hevc" ? "HEVC" : "H.264")} stream: {session.Description}");
         return session;
+    }
+
+    /// <summary>The helper's command line for one stream (options in tools/BetterVnc.Agent.MacCapture/Sources/main.swift).</summary>
+    internal static List<string> HelperArguments(string codec, VideoRequest request)
+    {
+        var args = new List<string> { "--codec", codec, "--bitrate", Invariant(request.BitrateKbps), "--fps", Invariant(Math.Clamp(request.MaxFps, 1, 120)) };
+        // The viewer's picture area: ScreenCaptureKit scales the display down to fit it, on the GPU, so the viewer shows
+        // the stream 1:1. Later changes reach the running helper as "size" commands (CaptureHelperSession.SetMaxSize).
+        if (request.MaxWidth > 0) args.AddRange(new[] { "--max-width", Invariant(request.MaxWidth) });
+        if (request.MaxHeight > 0) args.AddRange(new[] { "--max-height", Invariant(request.MaxHeight) });
+        return args;
     }
 
     private bool HasEncoder(string codec) => _probe.GetValueOrDefault(codec) is "hardware" or "software";

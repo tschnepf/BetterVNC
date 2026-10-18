@@ -445,6 +445,8 @@ public sealed class AgentServer : IAsyncDisposable
                 Codec = codec,
                 BitrateKbps = Math.Clamp(req.Bitrate ?? 8_000, 250, 200_000),
                 MaxFps = Math.Clamp(req.MaxFps ?? 60, 1, 120),
+                MaxWidth = PictureSide(req.Width),
+                MaxHeight = PictureSide(req.Height),
             };
 
             lock (_videoLock)
@@ -480,7 +482,7 @@ public sealed class AgentServer : IAsyncDisposable
                 _videoSession = session;
                 started = session;
                 _framePump = Task.Run(() => PumpFramesAsync(frames));
-                _server.Log?.Invoke($"{Peer}: video started ({session.Codec}, {session.BitrateKbps} kbit/s, {session.MaxFps} fps max, {session.Width}x{session.Height}{(session.Offset is { } at ? $" at {at.X},{at.Y}" : "")}, {session.EncoderKind})");
+                _server.Log?.Invoke($"{Peer}: video started ({session.Codec}, {session.BitrateKbps} kbit/s, {session.MaxFps} fps max, {session.Width}x{session.Height}{(session.Offset is { } at ? $" at {at.X},{at.Y}" : "")}, {session.EncoderKind}{(request.MaxWidth > 0 || request.MaxHeight > 0 ? ", viewer area " + Area(request.MaxWidth, request.MaxHeight) : "")})");
                 return new AgentFrame(new AgentMessage
                 {
                     Type = AgentMessageType.VideoStarted,
@@ -553,6 +555,12 @@ public sealed class AgentServer : IAsyncDisposable
                 {
                     if (req.Bitrate != null || req.MaxFps != null)
                         session.Set(req.Bitrate is { } b ? Math.Clamp(b, 250, 200_000) : null, req.MaxFps is { } f ? Math.Clamp(f, 1, 120) : null);
+                    if (req.Width != null || req.Height != null)
+                    {
+                        int width = PictureSide(req.Width), height = PictureSide(req.Height);
+                        session.SetMaxSize(width, height);
+                        _server.Log?.Invoke($"{Peer}: viewer area now {Area(width, height)}");
+                    }
                     if (req.KeyframeRequest == true) session.RequestKeyframe();
                 }
                 catch (Exception ex)
@@ -562,6 +570,11 @@ public sealed class AgentServer : IAsyncDisposable
                 return new AgentFrame(new AgentMessage { Type = AgentMessageType.Ok, Id = req.Id, Bitrate = session.BitrateKbps, MaxFps = session.MaxFps });
             }
         }
+
+        /// <summary>One side of the viewer's picture area (startVideo/setVideo width or height): 0 = no limit, at most 16384.</summary>
+        private static int PictureSide(int? pixels) => Math.Clamp(pixels ?? 0, 0, 16_384);
+
+        private static string Area(int width, int height) => $"{(width > 0 ? $"{width}" : "any")}x{(height > 0 ? $"{height}" : "any")}";
 
         private AgentFrame HandleStopVideo(AgentMessage req)
         {
