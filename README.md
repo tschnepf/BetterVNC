@@ -96,6 +96,11 @@ dotnet run --project tools/BetterVnc.DemoServer -- 5999
 
 Then `BetterVNC.exe 127.0.0.1:5999`.
 
+To try the agent's stream against it on the same PC, give it the size of the desktop the agent assumes,
+`--size <width>x<height>` (default 800x500). On a multi-monitor desktop too large for H.264 the agent streams
+the primary display and says where it sits ("2256x1504 at 0,2160" in its log), so the demo desktop must reach at
+least that far (`--size 2256x3664` there); keep the viewer window off the primary display, or it streams itself.
+
 ## Setting up the servers
 
 ### Unraid VM: clipboard

@@ -6,23 +6,30 @@ using BetterVnc.Protocol;
 
 // A tiny RFB 3.8 server for development: animated test pattern, echoes pointer position and
 // typed keys, supports None or VNC-password auth, Raw encoding, legacy clipboard and bell.
-// Usage: BetterVnc.DemoServer [port] [password]
+// Usage: BetterVnc.DemoServer [port] [password] [--size <width>x<height>]
+// --size replaces the 800x500 desktop, e.g. with the size of a multi-monitor desktop that a guest agent streams part of.
 
-int port = args.Length > 0 ? int.Parse(args[0]) : 5999;
-string? password = args.Length > 1 ? args[1] : null;
+var size = (W: 800, H: 500);
+var positional = new List<string>();
+for (int i = 0; i < args.Length; i++)
+{
+    if (args[i] == "--size" && i + 1 < args.Length && args[++i].Split('x') is [var sw, var sh]) size = (int.Parse(sw), int.Parse(sh));
+    else positional.Add(args[i]);
+}
+int port = positional.Count > 0 ? int.Parse(positional[0]) : 5999;
+string? password = positional.Count > 1 ? positional[1] : null;
 var listener = new TcpListener(IPAddress.Loopback, port);
 listener.Start();
-Console.WriteLine($"Demo VNC server listening on 127.0.0.1:{port}{(password != null ? " (password protected)" : "")}");
+Console.WriteLine($"Demo VNC server listening on 127.0.0.1:{port}, {size.W}x{size.H}{(password != null ? " (password protected)" : "")}");
 
 while (true)
 {
     var client = await listener.AcceptTcpClientAsync();
-    _ = Task.Run(() => Serve(client, password));
+    _ = Task.Run(() => Serve(client, password, size.W, size.H));
 }
 
-static void Serve(TcpClient tcp, string? password)
+static void Serve(TcpClient tcp, string? password, int W, int H)
 {
-    const int W = 800, H = 500;
     try
     {
         tcp.NoDelay = true;
