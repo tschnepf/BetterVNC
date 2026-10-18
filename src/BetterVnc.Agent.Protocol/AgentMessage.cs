@@ -63,6 +63,8 @@ public static class AgentVideoCodec
     public const string Jpeg = "jpeg";
     /// <summary>H.264 Annex B elementary stream; the first frame and every frame flagged as key frame carry SPS/PPS.</summary>
     public const string H264 = "h264";
+    /// <summary>HEVC (H.265) Annex B elementary stream; the first frame and every key frame carry VPS/SPS/PPS. The macOS agent offers it after H.264.</summary>
+    public const string Hevc = "hevc";
 }
 
 /// <summary>Values of <see cref="AgentMessage.Encoder"/> in a <see cref="AgentMessageType.VideoStarted"/> reply.</summary>

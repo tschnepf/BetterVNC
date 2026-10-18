@@ -62,7 +62,11 @@ public static class Installer
             if (!OperatingSystem.IsWindows())
                 File.SetUnixFileMode(layout.Exe, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute | UnixFileMode.GroupRead | UnixFileMode.GroupExecute | UnixFileMode.OtherRead | UnixFileMode.OtherExecute);
         }
-        if (OperatingSystem.IsMacOS()) Quiet("xattr", "-d", "com.apple.quarantine", layout.Exe);
+        if (OperatingSystem.IsMacOS())
+        {
+            Quiet("xattr", "-d", "com.apple.quarantine", layout.Exe);
+            InstallCaptureHelper(layout);
+        }
         cfg.Save(layout.Config);
 
         try
@@ -113,7 +117,7 @@ public static class Installer
         if (OperatingSystem.IsWindows()) Quiet("netsh", "advfirewall", "firewall", "delete", "rule", $"name={TaskName}");
         if (OperatingSystem.IsLinux()) TryDelete(Path.Combine(Home, ".config", "autostart", "bettervnc-agent.desktop"));
         TryDelete(layout.Config);
-        foreach (var f in new[] { "bettervnc-agent.log", "bettervnc-agent.log.1", "run-hidden.vbs" }) TryDelete(Path.Combine(layout.Dir, f));
+        foreach (var f in new[] { "bettervnc-agent.log", "bettervnc-agent.log.1", "run-hidden.vbs", Video.MacScreenSource.HelperName }) TryDelete(Path.Combine(layout.Dir, f));
         TryDelete(Path.Combine(Home, "Library", "Logs", "bettervnc-agent.log"));
         var self = Environment.ProcessPath;
         if (self != null && PathsEqual(self, layout.Exe) && OperatingSystem.IsWindows())
@@ -127,6 +131,29 @@ public static class Installer
         }
         Console.WriteLine("Removed.");
         return 0;
+    }
+
+    /// <summary>
+    /// macOS: the screen capture helper goes next to the installed agent, where <see cref="Video.MacScreenSource"/> looks
+    /// for it. The old copy is deleted first rather than overwritten, because macOS kills a program whose signed file
+    /// changed in place.
+    /// </summary>
+    [System.Runtime.Versioning.SupportedOSPlatform("macos")]
+    private static void InstallCaptureHelper(Layout layout)
+    {
+        var name = Video.MacScreenSource.HelperName;
+        var from = Video.MacScreenSource.FindHelper();
+        var to = Path.Combine(layout.Dir, name);
+        if (from == null)
+        {
+            Console.WriteLine($"  warning  : {name} is not next to this agent, so screen streaming will not be available.");
+            return;
+        }
+        if (PathsEqual(from, to)) return;
+        TryDelete(to);
+        File.Copy(from, to);
+        File.SetUnixFileMode(to, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute | UnixFileMode.GroupRead | UnixFileMode.GroupExecute | UnixFileMode.OtherRead | UnixFileMode.OtherExecute);
+        Quiet("xattr", "-d", "com.apple.quarantine", to);
     }
 
     // ------------------------------------------------------------------ autostart

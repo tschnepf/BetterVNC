@@ -4,6 +4,6 @@ Two macOS permissions make everything work:
 
   Accessibility (System Settings, Privacy & Security): needed for smooth scrolling. The agent asks on the first scroll; if no prompt appears, add bettervnc-agent there by hand (press Command-Shift-G in the file dialog and enter /usr/local/bin/bettervnc-agent).
 
-  Screen Recording (same place): needed for the "Stream" picture modes once they are available on macOS.
+  Screen Recording (same place, called Screen & System Audio Recording on macOS 15): needed for the "Stream" picture modes. macOS asks the first time a viewer starts a stream; allow bettervnc-agent, then pick the Stream mode again. If no prompt appears, click + in that list, press Command-Shift-G and enter ~/Library/Application Support/BetterVNC/bettervnc-agent.
 
 In BetterVNC on your PC, edit the connection, tick "Use the guest agent", connect, and click Allow in the dialog that appears on this screen.

@@ -398,7 +398,7 @@ public static class Program
                 {
                     if (!conn.SupportsVideo)
                     {
-                        Console.Error.WriteLine($"This agent does not stream its screen (features: {(conn.RemoteFeatures.Length == 0 ? "none" : string.Join(", ", conn.RemoteFeatures))}; old version, not Windows, or enableVideo is false).");
+                        Console.Error.WriteLine($"This agent does not stream its screen (features: {(conn.RemoteFeatures.Length == 0 ? "none" : string.Join(", ", conn.RemoteFeatures))}; old version, Linux, macOS before 12.3, or enableVideo is false; the agent's log says why).");
                         return 1;
                     }
                     int bitrate = args.Count > 0 ? int.Parse(args[0]) : 8000;

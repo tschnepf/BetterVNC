@@ -17,6 +17,7 @@ public sealed class AgentHost : IAsyncDisposable
     private readonly LinkedList<string> _recentLog = new();
     private AgentServer? _server;
     private int _connected;
+    private readonly string? _videoUnavailable;
 
     public AgentHost(string configPath, AgentConfig config, bool verbose)
     {
@@ -34,7 +35,11 @@ public sealed class AgentHost : IAsyncDisposable
         if (config.EnableVideo)
         {
             try { Video = CreateVideo(); }
-            catch (Exception ex) { Log("Screen streaming unavailable: " + ex.Message); }
+            catch (Exception ex)
+            {
+                _videoUnavailable = ex.Message;
+                Log("Screen streaming unavailable: " + ex.Message);
+            }
         }
         Approver = CreateApprover();
     }
@@ -221,7 +226,8 @@ public sealed class AgentHost : IAsyncDisposable
 #if WINDOWS
         return new Video.WindowsScreenSource { Log = Log };
 #else
-        return null; // macOS (ScreenCaptureKit) and Linux (PipeWire) sources are still to come
+        if (OperatingSystem.IsMacOS()) return new Video.MacScreenSource { Log = Log };
+        return null; // a Linux (PipeWire) source is still to come
 #endif
     }
 
@@ -229,8 +235,10 @@ public sealed class AgentHost : IAsyncDisposable
     {
 #if WINDOWS
         Video.WindowsScreenSource w => w.Description,
+#else
+        Video.MacScreenSource m => m.Description,
 #endif
-        null => Config.EnableVideo ? "not available on this OS yet" : "off",
+        null => !Config.EnableVideo ? "off" : _videoUnavailable != null ? "unavailable: " + _videoUnavailable : "not available on this OS yet",
         _ => Video.GetType().Name,
     };
 

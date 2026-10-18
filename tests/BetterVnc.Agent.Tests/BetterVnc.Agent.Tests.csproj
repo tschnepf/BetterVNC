@@ -19,4 +19,9 @@
     <ProjectReference Include="..\..\src\BetterVnc.Agent.Protocol\BetterVnc.Agent.Protocol.csproj" />
   </ItemGroup>
 
+  <ItemGroup>
+    <!-- The reader of the macOS capture helper's pipe; compiled in here because the agent itself is an executable. -->
+    <Compile Include="..\..\tools\BetterVnc.Agent\Video\CaptureHelperSession.cs" Link="Linked\CaptureHelperSession.cs" />
+  </ItemGroup>
+
 </Project>

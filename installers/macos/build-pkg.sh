@@ -7,6 +7,9 @@
 # and the postinstall script links the right one to /usr/local/bin/bettervnc-agent and runs "bettervnc-agent install"
 # as the signed-in user, which copies it into ~/Library/Application Support/BetterVNC, writes the LaunchAgent and
 # starts the menu bar item, exactly as the command-line install does.
+#
+# Each published directory must also hold bettervnc-capture, the screen capture helper (one universal binary, built
+# by tools/BetterVnc.Agent.MacCapture/build.sh); it goes next to each build, where the agent looks for it.
 set -eu
 
 version="$1"; arm64="$2"; x64="$3"; out="$4"
@@ -16,10 +19,13 @@ trap 'rm -rf "$work"' EXIT
 
 root="$work/root/usr/local/libexec/bettervnc-agent"
 mkdir -p "$root/arm64" "$root/x64" "$work/root/usr/local/bin" "$out"
-cp "$arm64/bettervnc-agent" "$root/arm64/bettervnc-agent"
-cp "$x64/bettervnc-agent" "$root/x64/bettervnc-agent"
+for arch in arm64 x64; do
+  if [ "$arch" = arm64 ]; then from="$arm64"; else from="$x64"; fi
+  cp "$from/bettervnc-agent" "$from/bettervnc-capture" "$root/$arch/"
+  chmod 755 "$root/$arch/bettervnc-agent" "$root/$arch/bettervnc-capture"
+done
 cp "$here/uninstall.sh" "$root/uninstall.sh"
-chmod 755 "$root/arm64/bettervnc-agent" "$root/x64/bettervnc-agent" "$root/uninstall.sh"
+chmod 755 "$root/uninstall.sh"
 
 mkdir -p "$work/scripts"
 cp "$here/scripts/postinstall" "$work/scripts/postinstall"
