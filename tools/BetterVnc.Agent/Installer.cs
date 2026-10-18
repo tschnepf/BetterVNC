@@ -117,7 +117,8 @@ public static class Installer
         if (OperatingSystem.IsWindows()) Quiet("netsh", "advfirewall", "firewall", "delete", "rule", $"name={TaskName}");
         if (OperatingSystem.IsLinux()) TryDelete(Path.Combine(Home, ".config", "autostart", "bettervnc-agent.desktop"));
         TryDelete(layout.Config);
-        foreach (var f in new[] { "bettervnc-agent.log", "bettervnc-agent.log.1", "run-hidden.vbs", Video.MacScreenSource.HelperName }) TryDelete(Path.Combine(layout.Dir, f));
+        foreach (var f in new[] { "bettervnc-agent.log", "bettervnc-agent.log.1", "run-hidden.vbs" }) TryDelete(Path.Combine(layout.Dir, f));
+        if (OperatingSystem.IsMacOS()) TryDelete(Path.Combine(layout.Dir, Video.MacScreenSource.HelperName));
         TryDelete(Path.Combine(Home, "Library", "Logs", "bettervnc-agent.log"));
         var self = Environment.ProcessPath;
         if (self != null && PathsEqual(self, layout.Exe) && OperatingSystem.IsWindows())

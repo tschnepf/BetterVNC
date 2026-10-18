@@ -65,7 +65,6 @@ final class VideoEncoder {
 
         set(kVTCompressionPropertyKey_RealTime, kCFBooleanTrue)
         set(kVTCompressionPropertyKey_AllowFrameReordering, kCFBooleanFalse)
-        if !lowLatency { set(kVTCompressionPropertyKey_MaxFrameDelayCount, NSNumber(value: 0)) } // implied by low latency
         switch codec {
         case .hevc: set(kVTCompressionPropertyKey_ProfileLevel, kVTProfileLevel_HEVC_Main_AutoLevel)
         case .h264: set(kVTCompressionPropertyKey_ProfileLevel,
