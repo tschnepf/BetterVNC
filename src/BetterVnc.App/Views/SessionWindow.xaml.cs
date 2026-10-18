@@ -79,6 +79,8 @@ public partial class SessionWindow : Window
         View.Translator.MacMode = profile.Kind == ConnectionKind.Mac;
         View.Translator.MacModifiers = profile.MacModifiers;
         View.RenderedFrame += OnRenderedFrame;
+        // The stream's GPU surface is a child window that WPF cannot draw over: it steps aside while the overlay shows.
+        Overlay.IsVisibleChanged += (_, _) => View.VideoSurfaceBlocked = Overlay.IsVisible;
         SendFilesButton.IsEnabled = PasteButton.IsEnabled = true;
 
         _wantedPicture = PictureModes.Get(profile.PictureMode);
@@ -824,7 +826,7 @@ public partial class SessionWindow : Window
             double streamRate = player.TakeRate();
             picture = player.IdleFallbackActive
                 ? $"stream idle, {enc} lossless"
-                : $"stream {info?.Codec} {info?.Width}×{info?.Height}" + (player.FramesSkipped > 0 ? $" ({player.FramesSkipped} skipped)" : "");
+                : $"stream {info?.Codec} {info?.Width}×{info?.Height}" + (player.DecodePath is { } path ? $" ({path})" : "") + (player.FramesSkipped > 0 ? $" ({player.FramesSkipped} skipped)" : "");
             traffic = $"{FormatRate(streamRate)} stream + {FormatRate(rate)} VNC";
         }
         else

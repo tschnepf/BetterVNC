@@ -186,10 +186,16 @@ The stream is CBR at the requested bitrate with no B-frames and low-latency mode
 re-tuned in place when the picture mode changes; key frames are sent only when needed (stream start,
 a dropped frame, a resolution change, a viewer's request) and every key frame carries SPS and PPS;
 the padding hardware encoders add to hold CBR is stripped before sending. The viewer decodes with
-Microsoft's Media Foundation H.264 decoder in low-latency mode on a worker thread, converts NV12 to
-BGRX and shows the newest picture when it falls behind (older ones are still decoded, they are the
-references); a gap in the frame sequence, on either side, makes it ask for a key frame and wait for
-it. A desktop wider or taller than H.264 allows (4096×2304, i.e. several monitors side by side) is
+Microsoft's Media Foundation H.264 decoder in low-latency mode on a worker thread and, where the GPU
+allows, keeps the picture on the GPU from decode to screen: the decoder gets a Direct3D 11 device
+(video support, multithread-protected, frame latency 1) and decodes with DXVA, each picture is copied
+GPU-to-GPU out of the decoder's surface pool, and a shader converts NV12 to RGB and scales it (fit or
+1:1) into a flip-model swap chain in a child window over the session view, presented at once. Without
+hardware decode the decoder runs in software and the same shader converts its NV12; without Direct3D 11
+the viewer converts NV12 to BGRX on the CPU and draws it through WPF. The status bar says which
+(`DXVA → GPU`, `software → GPU`, `software → WPF`). Either way only the newest picture is shown when
+the viewer falls behind (older ones are still decoded, they are the references); a gap in the frame
+sequence, on either side, makes it ask for a key frame and wait for it. A desktop wider or taller than H.264 allows (4096×2304, i.e. several monitors side by side) is
 streamed as its primary display only, and the agent says where that display sits in the desktop
 (`offsetX`/`offsetY` in `videoStarted` and on every frame), so the viewer paints the stream onto
 exactly that part of the picture while the other monitors stay on the lossless VNC picture instead
@@ -207,6 +213,16 @@ With every pixel of the display changing every frame the encoder still delivered
 60 fps presets; the capture thread spends about 9 ms per frame on the BGRA to NV12 conversion and
 the upload, the encoding itself runs on the GPU in parallel. Motion JPEG on the same display managed
 about 7 fps at 8 Mbit/s.
+
+On the viewer side, `tools/BetterVnc.StreamBench` plays a pre-encoded 1920×1080, 60 fps, 20 Mbit/s
+stream of scrolling text-like detail into the real session view and measures the viewer process
+(Radeon 890M, median of three 20 s runs, CPU as a share of one core):
+
+| Viewer path | Process CPU | Frames shown |
+|---|---|---|
+| DXVA decode → GPU (copy, shader, swap chain) | 7 % | 60 fps |
+| Software decode → GPU (NV12 upload, shader) | 119 % | 60 fps |
+| Software decode → CPU NV12 to BGRX → WPF (the path before GPU presentation) | 301 % | 19 fps |
 
 **Motion JPEG** is the fallback that needs no codec on either side: every changed frame is a complete
 JPEG, captured with GDI. The bitrate is held by pacing (each frame earns a pause proportional to its
@@ -400,6 +416,7 @@ src/BetterVnc.App             WPF viewer
 tests/                        Protocol tests with a fake RFB server; agent tests with a fake clipboard
 tools/BetterVnc.Agent         Guest agent executable (Windows, Linux, macOS clipboard back ends)
 tools/BetterVnc.DemoServer    Development VNC server
+tools/BetterVnc.StreamBench   Plays a 1080p60 H.264 stream into the real session view and measures the viewer's CPU per path
 tools/BetterVnc.IconGen       Renders the app icon (src/BetterVnc.App/Assets/BetterVNC.ico and icon.svg) from code
 docs/ANALYSIS.md              Server analysis and design notes
 ```
