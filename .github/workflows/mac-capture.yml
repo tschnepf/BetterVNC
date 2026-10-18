@@ -1,0 +1,86 @@
+# Builds the Mac agent's screen capture helper (Swift) whenever it or the agent's streaming code changes, then streams
+# for a few seconds on the runner: agent, helper and the agent's probe client, end to end. Compiler errors and the
+# results show up as annotations on the run. The stream needs the Screen Recording permission, which a hosted runner
+# may not give, so that step reports and does not fail the job.
+name: macOS capture
+
+on:
+  # Every branch, so a pull request shows the result on its commits.
+  push:
+    paths:
+      - 'tools/BetterVnc.Agent.MacCapture/**'
+      - 'tools/BetterVnc.Agent/**'
+      - 'src/BetterVnc.Agent.Protocol/**'
+      - '.github/workflows/mac-capture.yml'
+  workflow_dispatch:
+
+env:
+  DOTNET_NOLOGO: true
+  DOTNET_CLI_TELEMETRY_OPTOUT: true
+
+jobs:
+  helper:
+    name: Build and stream on macOS
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build the helper (universal)
+        run: |
+          set -o pipefail
+          swiftc --version
+          sh tools/BetterVnc.Agent.MacCapture/build.sh 2>&1 | tee build.log
+      - name: Report compiler messages
+        if: always()
+        run: |
+          [ -f build.log ] || exit 0
+          # file:line:col: error|warning: text  ->  workflow annotations
+          messages="$(sed -nE 's#^.*/(tools/BetterVnc\.Agent\.MacCapture/[^:]+):([0-9]+):([0-9]+): (error|warning): (.*)$#::\4 file=\1,line=\2,col=\3::\5#p' build.log | sort -u)"
+          if [ -n "$messages" ]; then echo "$messages"; fi
+          if ! grep -q 'Architectures in the fat file' build.log; then
+            echo "::error title=Build failed::$(tail -n 8 build.log | tr '\n' ' ')"
+          fi
+      - name: Probe
+        run: |
+          out="$(tools/BetterVnc.Agent.MacCapture/build/bettervnc-capture --probe)"
+          echo "$out"
+          echo "::notice title=bettervnc-capture --probe::$(echo "$out" | tr '\n' ' ')"
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+      - name: Publish the agent (picks up the helper)
+        run: |
+          case "$(uname -m)" in arm64) rid=osx-arm64 ;; *) rid=osx-x64 ;; esac
+          dotnet publish tools/BetterVnc.Agent -c Release -f net10.0 -r "$rid" -p:TargetFrameworks=net10.0 -o out/agent
+          test -x out/agent/bettervnc-capture
+      - name: Stream for a few seconds
+        continue-on-error: true
+        run: |
+          set +e
+          out/agent/bettervnc-agent --console --token ci-smoke-test --port 5970 --config "$RUNNER_TEMP/agent.json" > "$RUNNER_TEMP/agent.log" 2>&1 &
+          agent=$!
+          sleep 8
+          out/agent/bettervnc-agent probe 127.0.0.1:5970 ci-smoke-test video 4000 30 4 out/first-frame.h264 h264 > "$RUNNER_TEMP/probe.log" 2>&1
+          status=$?
+          # As a viewer whose picture area is 800x600 at the start and 400x300 halfway: ScreenCaptureKit should scale the
+          # display to fit each (the agent passes --max-width/--max-height, then sends "size 400 300").
+          out/agent/bettervnc-agent probe 127.0.0.1:5970 ci-smoke-test video 4000 30 4 - h264 800x600 400x300 > "$RUNNER_TEMP/probe-area.log" 2>&1
+          area_status=$?
+          kill "$agent"
+          cat "$RUNNER_TEMP/agent.log" "$RUNNER_TEMP/probe.log" "$RUNNER_TEMP/probe-area.log"
+          summary="$(grep -hE 'Streaming|Total|stopped|Cannot|failed|unavailable|Screen streaming|Screen capture|stream:' "$RUNNER_TEMP/agent.log" "$RUNNER_TEMP/probe.log" | tr '\n' ' ')"
+          if [ "$status" = 0 ]; then echo "::notice title=Stream::$summary"; else echo "::warning title=Stream (exit $status)::$summary"; fi
+          if [ -f out/first-frame.h264 ]; then
+            echo "::notice title=First frame::$(wc -c < out/first-frame.h264) bytes, starting $(head -c 48 out/first-frame.h264 | xxd -p | tr -d '\n')"
+          fi
+          area="$(grep -hE 'Streaming|Viewer area|Frame sizes|stopped|failed' "$RUNNER_TEMP/probe-area.log" | tr '\n' ' ') $(grep -hE 'viewer area|Capture size' "$RUNNER_TEMP/agent.log" | tr '\n' ' ')"
+          if [ "$area_status" = 0 ]; then echo "::notice title=Stream at the viewer's size::$area"; else echo "::warning title=Stream at the viewer's size (exit $area_status)::$area"; fi
+          [ "$status" = 0 ] && status=$area_status
+          exit $status
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: mac-capture
+          path: |
+            tools/BetterVnc.Agent.MacCapture/build/bettervnc-capture
+            out/first-frame.h264
+          if-no-files-found: ignore

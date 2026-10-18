@@ -72,6 +72,7 @@ public sealed class VncView : Grid
         {
             _scaleMode = value;
             ApplyScaleMode();
+            PictureAreaChanged?.Invoke();
         }
     }
 
@@ -173,9 +174,11 @@ public sealed class VncView : Grid
                     _externalShown = true;
                     _image.Source = _externalBitmap;
                 }
-                else if (frame.Offset != null && !ReferenceEquals(_image.Source, _externalBitmap))
+                else if (!ReferenceEquals(_image.Source, _externalBitmap))
                 {
-                    _image.Source = _externalBitmap; // the framebuffer was resized meanwhile and the bitmap with it
+                    // A new bitmap: the stream changed size (the agent rescaled to a new picture area, or the guest's
+                    // resolution changed), or for a partial frame the framebuffer was resized and the bitmap with it.
+                    _image.Source = _externalBitmap;
                 }
                 CountFrame();
             }
@@ -547,6 +550,7 @@ public sealed class VncView : Grid
             CreateBitmap(w, h);
             lock (_dirtyLock) { _dirty.Clear(); _dirty.Add(new RfbRect(0, 0, w, h)); }
             QueueRender();
+            PictureAreaChanged?.Invoke(); // at 1:1 the picture area is the framebuffer
         });
     }
 
@@ -630,6 +634,48 @@ public sealed class VncView : Grid
             _remoteCursor = CursorFactory.Create(shape, dpi.DpiScaleX);
             if (_mouseInside) Cursor = _remoteCursor;
         });
+    }
+
+    // ------------------------------------------------------------------ picture area (sizes the agent's stream)
+
+    /// <summary>
+    /// The area the picture is shown in, in device pixels: the whole view when the picture is fitted to the window, the
+    /// framebuffer's size at 1:1. A guest agent that can scale before encoding sends a stream no larger than this (keeping
+    /// the desktop's shape), so the stream lands on screen pixel for pixel. Null while the view has no size or, at 1:1,
+    /// no framebuffer. Dispatcher only.
+    /// </summary>
+    public (int Width, int Height)? PictureArea
+    {
+        get
+        {
+            if (_scaleMode == ScaleMode.Fit)
+            {
+                // The view, not the image: the image's size follows the picture it shows, and a stream rescaled to the
+                // image would change the image again.
+                var dpi = VisualTreeHelper.GetDpi(this);
+                int w = (int)Math.Round(ActualWidth * dpi.DpiScaleX), h = (int)Math.Round(ActualHeight * dpi.DpiScaleY);
+                return w > 0 && h > 0 ? (w, h) : null;
+            }
+            return _bitmap is { } fb ? (fb.PixelWidth, fb.PixelHeight) : null;
+        }
+    }
+
+    /// <summary>
+    /// <see cref="PictureArea"/> may have changed: the view was resized or moved to a screen with another DPI, the scale
+    /// mode changed, or the framebuffer did. Raised on the dispatcher, often several times in a row while a window is dragged.
+    /// </summary>
+    public event Action? PictureAreaChanged;
+
+    protected override void OnRenderSizeChanged(SizeChangedInfo sizeInfo)
+    {
+        base.OnRenderSizeChanged(sizeInfo);
+        PictureAreaChanged?.Invoke();
+    }
+
+    protected override void OnDpiChanged(DpiScale oldDpi, DpiScale newDpi)
+    {
+        base.OnDpiChanged(oldDpi, newDpi);
+        PictureAreaChanged?.Invoke();
     }
 
     // ------------------------------------------------------------------ pointer

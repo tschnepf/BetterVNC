@@ -335,7 +335,15 @@ public sealed class AgentConnection : IDisposable
     /// <see cref="NotSupportedException"/> when the agent did not announce video, <see cref="AgentProtocolException"/>
     /// when it refuses (no common codec, capture failed).
     /// </summary>
-    public async Task<VideoStartInfo> StartVideoAsync(IEnumerable<string> codecs, int bitrateKbps, int maxFps, CancellationToken ct)
+    public Task<VideoStartInfo> StartVideoAsync(IEnumerable<string> codecs, int bitrateKbps, int maxFps, CancellationToken ct) =>
+        StartVideoAsync(codecs, bitrateKbps, maxFps, null, ct);
+
+    /// <summary>
+    /// <see cref="StartVideoAsync(IEnumerable{string}, int, int, CancellationToken)"/> with the size of the area this side
+    /// shows the picture in, in device pixels (see <see cref="AgentMessage.Width"/>): an agent that can scale encodes no
+    /// larger than that. Null, or 0 for a side, means no limit.
+    /// </summary>
+    public async Task<VideoStartInfo> StartVideoAsync(IEnumerable<string> codecs, int bitrateKbps, int maxFps, (int Width, int Height)? area, CancellationToken ct)
     {
         if (!SupportsVideo) throw new NotSupportedException("The agent does not stream video.");
         var reply = await RequestAsync(new AgentMessage
@@ -344,6 +352,8 @@ public sealed class AgentConnection : IDisposable
             Codecs = codecs.ToArray(),
             Bitrate = bitrateKbps,
             MaxFps = maxFps,
+            Width = area?.Width,
+            Height = area?.Height,
         }, default, ct).ConfigureAwait(false);
         var h = reply.Header;
         if (h.Type != AgentMessageType.VideoStarted || string.IsNullOrEmpty(h.Codec))
@@ -354,6 +364,13 @@ public sealed class AgentConnection : IDisposable
     /// <summary>Changes the running stream's bitrate and/or frame-rate cap (null keeps a value), optionally asking for a key frame.</summary>
     public Task SetVideoAsync(int? bitrateKbps, int? maxFps, bool keyframe, CancellationToken ct) =>
         RequestAsync(new AgentMessage { Type = AgentMessageType.SetVideo, Bitrate = bitrateKbps, MaxFps = maxFps, KeyframeRequest = keyframe ? true : null }, default, ct);
+
+    /// <summary>
+    /// Tells the agent the area this side shows the picture in changed (window resized, fit and 1:1 switched), in device
+    /// pixels; 0 for a side means no limit. Agents that cannot scale, or predate this, accept it and change nothing.
+    /// </summary>
+    public Task SetVideoAreaAsync(int width, int height, CancellationToken ct) =>
+        RequestAsync(new AgentMessage { Type = AgentMessageType.SetVideo, Width = width, Height = height }, default, ct);
 
     /// <summary>Stops the stream; frames already in flight may still arrive briefly.</summary>
     public Task StopVideoAsync(CancellationToken ct) =>

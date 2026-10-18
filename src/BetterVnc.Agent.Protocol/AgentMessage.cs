@@ -40,13 +40,18 @@ public static class AgentMessageType
     // ---- video (only when the agent advertised AgentFeature.Video)
     /// <summary>
     /// Viewer to agent: start streaming the screen. Carries the <see cref="AgentMessage.Codecs"/> the viewer can decode in
-    /// order of preference, the wanted <see cref="AgentMessage.Bitrate"/> (kbit/s) and <see cref="AgentMessage.MaxFps"/>.
+    /// order of preference, the wanted <see cref="AgentMessage.Bitrate"/> (kbit/s) and <see cref="AgentMessage.MaxFps"/>,
+    /// and optionally the size of the viewer's picture area (<see cref="AgentMessage.Width"/>/<see cref="AgentMessage.Height"/>).
     /// Answered with <see cref="VideoStarted"/> (negotiated values) or an error.
     /// </summary>
     public const string StartVideo = "startVideo";
     /// <summary>Reply to <see cref="StartVideo"/>: the codec, bitrate, frame rate, size and encoder kind actually in use.</summary>
     public const string VideoStarted = "videoStarted";
-    /// <summary>Viewer to agent: change <see cref="AgentMessage.Bitrate"/> and/or <see cref="AgentMessage.MaxFps"/> of the running stream, or ask for a key frame. Answered with <see cref="Ok"/>.</summary>
+    /// <summary>
+    /// Viewer to agent: change <see cref="AgentMessage.Bitrate"/>, <see cref="AgentMessage.MaxFps"/> and/or the picture area
+    /// (<see cref="AgentMessage.Width"/>/<see cref="AgentMessage.Height"/>) of the running stream, or ask for a key frame.
+    /// Answered with <see cref="Ok"/>.
+    /// </summary>
     public const string SetVideo = "setVideo";
     /// <summary>Viewer to agent: stop the stream. Answered with <see cref="Ok"/>.</summary>
     public const string StopVideo = "stopVideo";
@@ -63,6 +68,8 @@ public static class AgentVideoCodec
     public const string Jpeg = "jpeg";
     /// <summary>H.264 Annex B elementary stream; the first frame and every frame flagged as key frame carry SPS/PPS.</summary>
     public const string H264 = "h264";
+    /// <summary>HEVC (H.265) Annex B elementary stream; the first frame and every key frame carry VPS/SPS/PPS. The macOS agent offers it after H.264.</summary>
+    public const string Hevc = "hevc";
 }
 
 /// <summary>Values of <see cref="AgentMessage.Encoder"/> in a <see cref="AgentMessageType.VideoStarted"/> reply.</summary>
@@ -193,7 +200,13 @@ public sealed class AgentMessage
     public int? MaxFps { get; set; }
     /// <summary>Encoder kind in use; see <see cref="AgentVideoEncoder"/>.</summary>
     public string? Encoder { get; set; }
-    /// <summary>Frame size in pixels (videoStarted, and on frames whose size changed).</summary>
+    /// <summary>
+    /// videoStarted and videoFrame: the frame size in pixels. startVideo and setVideo: the size in device pixels of the area
+    /// the viewer shows the picture in (its window at fit, the framebuffer's size at 1:1). An agent that can scale before
+    /// encoding sends a picture no larger than that, keeping the desktop's shape, so the viewer shows it 1:1 and no bits go
+    /// to detail it would scale away. Absent or 0 means no limit in that direction; setVideo without either leaves the
+    /// limit as it is. Agents that cannot scale, and agents older than this field, ignore it.
+    /// </summary>
     public int? Width { get; set; }
     public int? Height { get; set; }
     /// <summary>

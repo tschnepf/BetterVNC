@@ -111,6 +111,9 @@ jobs:
           dotnet-version: 10.0.x
       - name: Version from tag
         run: echo "VERSION=${GITHUB_REF_NAME#v}" >> "$GITHUB_ENV"
+      - name: Screen capture helper (Swift, universal)
+        # Lands in tools/BetterVnc.Agent.MacCapture/build/, from where the agent's project copies it next to each build.
+        run: sh tools/BetterVnc.Agent.MacCapture/build.sh
       - name: Publish and package (Apple silicon and Intel)
         run: |
           mkdir -p dist
@@ -118,7 +121,8 @@ jobs:
             dotnet publish tools/BetterVnc.Agent -c Release -f net10.0 -r "$rid" -p:TargetFrameworks=net10.0 -p:DebugType=none \
               -p:Version="$VERSION" -o "out/bettervnc-agent-$rid"
             cp installers/unix/install.sh "out/bettervnc-agent-$rid/"
-            chmod +x "out/bettervnc-agent-$rid/bettervnc-agent" "out/bettervnc-agent-$rid/install.sh"
+            test -f "out/bettervnc-agent-$rid/bettervnc-capture" || { echo "bettervnc-capture is missing from the $rid build"; exit 1; }
+            chmod +x "out/bettervnc-agent-$rid/bettervnc-agent" "out/bettervnc-agent-$rid/bettervnc-capture" "out/bettervnc-agent-$rid/install.sh"
             tar -C out -czf "dist/bettervnc-agent-$VERSION-$rid.tar.gz" "bettervnc-agent-$rid"
           done
       - name: Installer package (.pkg, both CPUs)

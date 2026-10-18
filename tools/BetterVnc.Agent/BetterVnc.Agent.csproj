@@ -6,6 +6,7 @@
 
     Two target frameworks: net10.0-windows (Windows Forms clipboard, SendInput scrolling) for the Windows build,
     plain net10.0 (xclip / wl-clipboard / pbcopy, pbpaste, osascript; CoreGraphics or xdotool scrolling) for Linux and macOS.
+    The macOS build streams the screen through a separate Swift helper; see the end of this file.
 
     Publish (single file, self-contained):
       dotnet publish tools/BetterVnc.Agent -c Release -f net10.0-windows -r win-x64   -o publish/agent-win-x64
@@ -69,6 +70,19 @@
   <ItemGroup Condition="'$(TargetFramework)' == 'net10.0-windows'">
     <!-- Media Foundation H.264 encoder and Desktop Duplication capture for the screen stream. -->
     <ProjectReference Include="..\..\src\BetterVnc.Media\BetterVnc.Media.csproj" />
+  </ItemGroup>
+
+  <!--
+    macOS screen streaming: bettervnc-capture (Swift; ScreenCaptureKit and VideoToolbox) has to sit next to the agent.
+    It is built on a Mac with tools/BetterVnc.Agent.MacCapture/build.sh; when that has been done, building or publishing
+    for osx-arm64 or osx-x64 copies it next to the single-file agent. Without it the agent works, minus streaming.
+  -->
+  <PropertyGroup>
+    <MacCaptureHelper Condition="'$(MacCaptureHelper)' == ''">$(MSBuildThisFileDirectory)..\BetterVnc.Agent.MacCapture\build\bettervnc-capture</MacCaptureHelper>
+  </PropertyGroup>
+  <ItemGroup Condition="('$(RuntimeIdentifier)' == 'osx-arm64' or '$(RuntimeIdentifier)' == 'osx-x64') and Exists('$(MacCaptureHelper)')">
+    <None Include="$(MacCaptureHelper)" Link="bettervnc-capture" Visible="false"
+          CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" ExcludeFromSingleFile="true" />
   </ItemGroup>
 
 </Project>

@@ -170,7 +170,7 @@ on the box makes the current choice the default.
 |---|---|---|
 | VNC lossless | Exact pixels over RFB (Tight on QEMU, ZRLE on macOS). | Always. |
 | VNC compressed, high / medium / low | Tight JPEG quality 9 / 6 / 3 on the live connection. Switching re-sends the whole screen at the new quality. | The server honours lossy requests. QEMU does so only when the VM's VNC server is started with `lossy=on` (libvirt does not expose it; use a `<qemu:commandline>` override). The status bar says `JPEG n` once JPEG rectangles arrive and `requested (none received yet)` while the server ignores the request. macOS Screen Sharing has no lossy encoding, so these entries are greyed out there. |
-| Stream, quality / balanced / low bandwidth | The guest agent captures the screen and sends it as H.264 video (motion JPEG with old agents) at about 20 / 8 / 2.5 Mbit/s. RFB stays connected underneath for input, cursor shapes and resizes, polled once a second. Whenever the screen is still for 0.7 s the viewer switches back to the lossless RFB picture and asks for a full update, so a quiet desktop is always pixel-exact; the next frame switches back to the stream. | The guest agent is connected, is a build that announces `video`, runs on Windows (macOS and Linux capture are not done yet) and has `enableVideo` on (default; also a checkbox in the tray settings). Greyed out otherwise, with the reason in the tooltip. A plain VNC connection without an agent shows only the VNC entries. |
+| Stream, quality / balanced / low bandwidth | The guest agent captures the screen and sends it as H.264 video (motion JPEG with old agents) at about 20 / 8 / 2.5 Mbit/s. RFB stays connected underneath for input, cursor shapes and resizes, polled once a second. Whenever the screen is still for 0.7 s the viewer switches back to the lossless RFB picture and asks for a full update, so a quiet desktop is always pixel-exact; the next frame switches back to the stream. | The guest agent is connected, is a build that announces `video`, runs on Windows or on macOS 12.3 or later (Linux capture is not done yet) and has `enableVideo` on (default; also a checkbox in the tray settings). Greyed out otherwise, with the reason in the tooltip. A plain VNC connection without an agent shows only the VNC entries. |
 
 Choosing a stream mode before the agent is up is fine: the session starts on lossless VNC and the
 stream takes over the moment the agent connects, the same way the clipboard features light up. If
@@ -178,7 +178,8 @@ the agent goes away the picture falls back to VNC and the stream resumes when it
 
 The codec is negotiated per stream: the viewer lists what it decodes in `startVideo` (`h264`,
 then `jpeg`) and the agent takes the first one it can encode, so an old viewer and a new agent, or
-the other way round, still meet on motion JPEG.
+the other way round, still meet on motion JPEG. A Mac agent offers `h264` and `hevc`; this viewer
+does not decode HEVC yet, so Macs stream H.264.
 
 **H.264** is what a Windows agent and the viewer normally agree on. The agent captures with DXGI
 Desktop Duplication, which hands over a frame only when something was drawn, so an unchanged screen
@@ -236,11 +237,44 @@ stream of scrolling text-like detail into the real session view and measures the
 | Software decode → GPU (NV12 upload, shader) | 119 % | 60 fps |
 | Software decode → CPU NV12 to BGRX → WPF (the path before GPU presentation) | 301 % | 19 fps |
 
+**On a Mac** the stream replaces Apple's lossless Screen Sharing picture while things move, which is
+where the Mac gains most. The agent starts `bettervnc-capture`, a small Swift program installed next
+to it (source in `tools/BetterVnc.Agent.MacCapture`), for each stream. It captures the main display
+with ScreenCaptureKit, which hands over a frame only when something changed and scales it on the GPU,
+and encodes it with VideoToolbox in hardware: real-time mode with low-latency rate control where the
+Mac has it, no frame reordering, the requested bitrate with bursts capped at 1.5 times the average
+over any second, key frames only at the start and on request. The stream comes at the size the
+viewer shows the picture at, as Jump Desktop does: the viewer sends that size with `startVideo`, in
+device pixels (the session window's picture area when the picture is fitted, the VNC framebuffer's
+size at 1:1), and again 0.3 s after the window stops changing size, moves to a screen with another
+DPI or switches between fit and 1:1. ScreenCaptureKit scales the display down to fit it on the Mac's
+GPU, keeping its shape, and the viewer shows the stream pixel for pixel: no pixels are encoded only
+to be scaled away, so the same bitrate buys a sharper picture. A resize costs one key frame. Without
+a size (older viewers) streams are sent at the display's pixel size (a Retina display's full
+resolution), scaled down to fit 4096×2304 when larger, and the viewer scales them into the window as
+it does the VNC picture. The pointer is left out of the stream; the viewer draws it from the VNC
+cursor shape. On a Mac with more than one display the main display is streamed at its full size
+together with its position in the desktop (`offsetX`/`offsetY`), so the viewer paints it onto its
+part of the VNC picture and the other displays stay on VNC. The Windows agent takes the size too but
+does not scale yet: it streams at the desktop's size and the viewer scales.
+
+**Screen Recording permission (macOS).** Capturing the screen needs the Screen Recording permission
+(called Screen & System Audio Recording on macOS 15). The first time a viewer starts a stream, macOS
+shows its prompt on the Mac's screen; you can answer it through the VNC picture. Allow
+`bettervnc-agent` in System Settings, Privacy & Security, then pick the Stream mode again. Until then
+the stream fails with a message saying so and the viewer stays on VNC. If no prompt appears (or the
+entry is there but streaming still fails, as can happen after an upgrade replaced the binary), click
+**+** in that list, press Cmd+Shift+G and enter `~/Library/Application Support/BetterVNC/bettervnc-agent`
+(the copy the LaunchAgent runs), or remove and re-add the entry, then restart the agent with
+`launchctl kickstart -k gui/$(id -u)/com.bettervnc.agent`. macOS 15 and later can ask again from
+time to time whether the agent may keep recording. At startup the agent's log says
+`Screen streaming: … Screen Recording permission not granted yet` while it is missing.
+
 **Motion JPEG** is the fallback that needs no codec on either side: every changed frame is a complete
 JPEG, captured with GDI. The bitrate is held by pacing (each frame earns a pause proportional to its
 size) and the JPEG quality trades frame rate against sharpness. Because every frame is a whole
 picture, the frame rate is what gives: expect single-digit frame rates at a few Mbit/s on a large
-desktop. Linux and macOS agents do not stream yet.
+desktop. Linux agents do not stream yet.
 
 The stream travels over the agent's TCP connection, which is authenticated but not encrypted: keep it
 on the LAN or inside an SSH tunnel.
@@ -250,7 +284,11 @@ To check a stream from the command line:
 ```bash
 bettervnc-agent probe <guest-ip> <token or pair> video 8000 60 5 first-frame.h264
 bettervnc-agent probe <guest-ip> <token or pair> video 8000 30 5 first-frame.jpg jpeg
+bettervnc-agent probe <guest-ip> <token or pair> video 8000 60 6 - h264 1600x1000 800x500
 ```
+
+The last one acts as a viewer whose picture area is 1600×1000 and shrinks to 800×500 halfway; the
+per-second lines and the closing `Frame sizes:` line show what the agent sent.
 
 ### How it works
 
@@ -262,10 +300,14 @@ the relative names and sizes in the header), and `scroll` (viewer to agent, no r
 `phase` begin/continue/end, optional pointer position and the raw Windows wheel delta). The `welcome` lists
 the agent's optional `features` (`scroll`, `video`), so an old agent is simply never sent scroll events or
 asked for a stream. Streaming uses `startVideo` (viewer lists the `codecs` it decodes, wanted `bitrate` in kbit/s
-and `maxFps`) answered by `videoStarted` (negotiated codec, bitrate, fps, size, `encoder` hardware/software),
-`setVideo`/`ok` to re-tune or ask for a key frame, `stopVideo`/`ok`, `videoFrame` (agent to viewer, one encoded
-frame per payload with `sequence`, `timestamp`, `keyframe`, `width`, `height`) and `videoStopped` (agent to
-viewer when its capture ends).
+and `maxFps`, and optionally `width`/`height`: the area it shows the picture in, in device pixels) answered by
+`videoStarted` (negotiated codec, bitrate, fps, size, `encoder` hardware/software), `setVideo`/`ok` to re-tune,
+send a new `width`/`height` area or ask for a key frame, `stopVideo`/`ok`, `videoFrame` (agent to viewer, one
+encoded frame per payload with `sequence`, `timestamp`, `keyframe`, `width`, `height`) and `videoStopped` (agent
+to viewer when its capture ends). In `startVideo` and `setVideo`, `width`/`height` are a limit, not an order: an
+agent that can scale before encoding sends a picture that fits in them, keeping the desktop's shape, and frames
+say the size they have; an absent or 0 side means no limit, and a `setVideo` without either keeps the area. Old
+agents ignore the fields and old viewers do not send them, so both keep streaming at the desktop's size.
 
 **Who may connect.** Two ways, both usable at the same time:
 
@@ -297,7 +339,11 @@ This publishes the agent as one self-contained executable per platform (no .NET 
 guest) and wraps each in an archive under `publish/`: `bettervnc-agent-<version>-win-x64.zip`,
 `…-linux-x64.tar.gz`, `…-linux-arm64.tar.gz`, `…-osx-arm64.tar.gz` (Apple Silicon) and
 `…-osx-x64.tar.gz` (Intel Mac). Each archive holds the binary, `INSTALL.txt` and, for Linux and
-macOS, `install.sh`. `-Rids osx-arm64,win-x64` limits the set.
+macOS, `install.sh`. `-Rids osx-arm64,win-x64` limits the set. The Mac archives also need the
+screen capture helper, which only builds on a Mac (`sh tools/BetterVnc.Agent.MacCapture/build.sh`,
+Xcode or the Command Line Tools); copy the result to this machine and pass
+`-MacCapture <path to bettervnc-capture>`. Without it the Mac archives work but cannot stream. The
+release workflow builds it on its macOS runner.
 
 ### Installing
 
@@ -371,7 +417,10 @@ dialog live: not as a Windows service, and on Linux with `DISPLAY` or `WAYLAND_D
   no tray icon on Linux; use the command line.
 * **macOS**: text through `pbcopy`/`pbpaste`; images, files, HTML and change detection through
   `osascript` (JavaScript for Automation against `NSPasteboard`). Nothing needs to be installed. The
-  binary is unsigned, so `install.sh` clears the download quarantine before running it.
+  binary is unsigned, so `install.sh` clears the download quarantine before running it. Screen
+  streaming comes from `bettervnc-capture`, which `install` copies next to the agent; it needs the
+  [Screen Recording permission](#picture-modes-and-screen-streaming), which macOS asks for when the
+  first stream starts.
 
 ### Smooth scrolling
 
@@ -414,7 +463,8 @@ the window under the mouse, as it does locally.
 the remote clipboard (`pair` instead of the token pairs the probe the way the viewer does); `probe … watch` prints change notifications; `probe … get png out.png`,
 `probe … set png in.png`, `probe … set files <paths>` and `probe … get files <dir>` move data by hand;
 `probe … scroll <dx> <dy> [steps]` injects a scroll gesture (pixels, `dy > 0` is up);
-`probe … video [kbit/s] [fps] [seconds] [first-frame.jpg]` starts a screen stream and prints frames and bandwidth per second.
+`probe … video [kbit/s] [fps] [seconds] [first-frame.jpg|-] [codec|-] [WxH [WxH]]` starts a screen stream and
+prints frames, bandwidth and frame size per second (the sizes act as a viewer's picture area at the start and halfway).
 The agent framing, authentication and request handling are covered by `tests/BetterVnc.Agent.Tests`
 (an executable like the protocol tests; `dotnet tests/BetterVnc.Agent.Tests/bin/Debug/net10.0/BetterVnc.Agent.Tests.dll`
 also runs it).
@@ -427,6 +477,7 @@ src/BetterVnc.Agent.Protocol  Guest agent wire protocol, server core and viewer-
 src/BetterVnc.App             WPF viewer
 tests/                        Protocol tests with a fake RFB server; agent tests with a fake clipboard
 tools/BetterVnc.Agent         Guest agent executable (Windows, Linux, macOS clipboard back ends)
+tools/BetterVnc.Agent.MacCapture  Screen capture helper of the Mac agent (Swift: ScreenCaptureKit, VideoToolbox; build.sh)
 tools/BetterVnc.DemoServer    Development VNC server
 tools/BetterVnc.StreamBench   Plays a 1080p60 H.264 stream into the real session view and measures the viewer's CPU per path
 tools/BetterVnc.IconGen       Renders the app icon (src/BetterVnc.App/Assets/BetterVNC.ico and icon.svg) from code

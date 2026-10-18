@@ -9,7 +9,7 @@ case "$(uname -m)" in
   *)     arch=x64 ;;
 esac
 bin="$base/$arch/bettervnc-agent"
-chmod 755 "$base/arm64/bettervnc-agent" "$base/x64/bettervnc-agent" "$base/uninstall.sh" 2>/dev/null || true
+chmod 755 "$base/arm64/bettervnc-agent" "$base/x64/bettervnc-agent" "$base/arm64/bettervnc-capture" "$base/x64/bettervnc-capture" "$base/uninstall.sh" 2>/dev/null || true
 mkdir -p /usr/local/bin
 ln -sfn "$bin" /usr/local/bin/bettervnc-agent
 

@@ -6,6 +6,12 @@ public sealed class VideoRequest
     public required string Codec { get; init; }
     public int BitrateKbps { get; init; } = 8_000;
     public int MaxFps { get; init; } = 60;
+    /// <summary>
+    /// The viewer's picture area in device pixels (see <see cref="IVideoSession.SetMaxSize"/>); 0 = no limit in that
+    /// direction, which is also what viewers that do not send a size get.
+    /// </summary>
+    public int MaxWidth { get; init; }
+    public int MaxHeight { get; init; }
 }
 
 /// <summary>One encoded frame produced by an <see cref="IVideoSession"/>.</summary>
@@ -53,6 +59,14 @@ public interface IVideoSession : IDisposable
 
     /// <summary>Changes the bitrate and/or frame-rate cap on the fly; null leaves a value as it is.</summary>
     void Set(int? bitrateKbps, int? maxFps);
+
+    /// <summary>
+    /// The viewer's picture area changed (its window was resized, or it switched between fit and 1:1); 0 = no limit in that
+    /// direction. A source that can scale before encoding (the macOS helper, on the GPU) then encodes at most this large,
+    /// keeping the desktop's shape, so the viewer shows the picture 1:1. Frames carry their new size. Sources that cannot
+    /// scale ignore it, which is the default.
+    /// </summary>
+    void SetMaxSize(int maxWidth, int maxHeight) { }
 
     /// <summary>Makes the next frame a key frame (and for sources that skip unchanged frames: sends one even if nothing changed).</summary>
     void RequestKeyframe();

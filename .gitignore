@@ -6,3 +6,4 @@ publish/
 .vs/
 *.swp
 TestResults/
+tools/BetterVnc.Agent.MacCapture/build/

@@ -2,12 +2,17 @@
 # that contains the single-file binary, an installer script and a short INSTALL.txt.
 #
 #   powershell -ExecutionPolicy Bypass -File tools/BetterVnc.Agent/publish-agent.ps1 [-Rids win-x64,osx-arm64] [-Out publish]
+#              [-MacCapture path/to/bettervnc-capture]
+#
+# The macOS archives need the screen capture helper, which only builds on a Mac (tools/BetterVnc.Agent.MacCapture/build.sh).
+# Pass the built file with -MacCapture; without it the macOS archives work but cannot stream the screen.
 #
 # Output: publish/bettervnc-agent-<version>-<rid>.zip (Windows) or .tar.gz (Linux, macOS).
 param(
     [string[]]$Rids = @("win-x64", "linux-x64", "linux-arm64", "osx-arm64", "osx-x64"),
     [string]$Out = "publish",
-    [string]$Configuration = "Release"
+    [string]$Configuration = "Release",
+    [string]$MacCapture = ""
 )
 $ErrorActionPreference = "Stop"
 $Rids = @($Rids | ForEach-Object { $_ -split "," } | Where-Object { $_ })  # "-Rids a,b" arrives as one string when run with -File
@@ -24,7 +29,14 @@ $installSh = @'
 set -e
 cd "$(dirname "$0")"
 chmod +x ./bettervnc-agent
-if [ "$(uname)" = "Darwin" ]; then xattr -d com.apple.quarantine ./bettervnc-agent 2>/dev/null || true; fi
+if [ "$(uname)" = "Darwin" ]; then
+  xattr -d com.apple.quarantine ./bettervnc-agent 2>/dev/null || true
+  # The screen capture helper; "install" copies it next to the installed agent.
+  if [ -f ./bettervnc-capture ]; then
+    chmod +x ./bettervnc-capture
+    xattr -d com.apple.quarantine ./bettervnc-capture 2>/dev/null || true
+  fi
+fi
 exec ./bettervnc-agent install "$@"
 '@
 
@@ -36,6 +48,10 @@ foreach ($rid in $Rids) {
     & dotnet publish $project -c $Configuration -f $tfm -r $rid -o $stage -nologo -v q
     if ($LASTEXITCODE -ne 0) { throw "dotnet publish failed for $rid" }
     Get-ChildItem $stage -Filter *.pdb | Remove-Item -Force
+    if ($rid -like "osx-*") {
+        if ($MacCapture -and (Test-Path $MacCapture)) { Copy-Item $MacCapture (Join-Path $stage "bettervnc-capture") -Force }
+        else { Write-Warning "${rid}: no -MacCapture helper given; this archive cannot stream the screen." }
+    }
 
     $exe = if ($rid -like "win-*") { "bettervnc-agent.exe" } else { "bettervnc-agent" }
     $install = if ($rid -like "win-*") { "Open a command prompt in this folder and run:  bettervnc-agent.exe install" } else { "Open Terminal in this folder and run:  sh install.sh" }
