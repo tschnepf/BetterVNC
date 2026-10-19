@@ -27,8 +27,22 @@ public interface IScrollInjector
 }
 
 /// <summary>
+/// Keyboard and mouse for a session without a VNC server, injected by the guest agent. Pointer positions are pixels in
+/// the picture the view shows (the stream's frames), which is <c>width</c>×<c>height</c>; buttons are
+/// <see cref="AgentButton"/> bits. Keys carry the set 1 scan code (0xE000 added for extended keys, 0 for none) and the
+/// virtual key. Both return false when the agent cannot take the event right now.
+/// </summary>
+public interface IAgentInput
+{
+    bool TrySendPointer(int x, int y, int width, int height, int buttons);
+    bool TrySendKey(int scanCode, int virtualKey, bool down);
+}
+
+/// <summary>
 /// Renders a <see cref="VncClient"/> framebuffer and forwards pointer input. Keyboard input is
 /// fed in by the owning window (which owns the Win32 message hook) through <see cref="SendKey"/>.
+/// A session without VNC attaches with <see cref="AttachAgent"/> instead: the picture then comes only from the agent's
+/// stream, and pointer and keys go to the agent.
 /// </summary>
 public sealed class VncView : Grid
 {
@@ -43,7 +57,13 @@ public sealed class VncView : Grid
     private readonly KeyboardTranslator _translator = new();
     private readonly Dictionary<uint, TranslatedKey> _pressedKeys = new();
     private Cursor _remoteCursor = Cursors.Arrow;
+    private bool _remoteCursorVisible = true;
     private bool _mouseInside;
+    // Agent-only sessions (no VncClient): where input goes, and what the remote believes is held down.
+    private IAgentInput? _agentInput;
+    private int _agentButtons;
+    private (int X, int Y) _agentPointer;
+    private readonly Dictionary<int, (int Scan, int Vk)> _agentKeysDown = new();
     private int _frames;
     private DateTime _frameWindowStart = DateTime.UtcNow;
 
@@ -150,7 +170,7 @@ public sealed class VncView : Grid
             }
             try
             {
-                if (_client == null) return;
+                if (!IsAttached) return;
                 if (_gpuShown)
                 {
                     // The GPU path refused this frame: WPF takes over, and the surface must not cover it.
@@ -158,12 +178,14 @@ public sealed class VncView : Grid
                     _externalShown = false;
                     UpdateVideoPlacement();
                 }
-                if (frame.Offset is { } at)
+                if (frame.Offset is { } at && _client != null)
                 {
                     if (!PresentPartialFrame(frame.Pixels, frame.Width, frame.Height, at)) return;
                 }
                 else
                 {
+                    // Without VNC there is nothing around a partial frame: the frames are the whole picture.
+                    EnsureAgentPicture(frame.Width, frame.Height);
                     _externalRect = null;
                     if (_externalBitmap == null || _externalBitmap.PixelWidth != frame.Width || _externalBitmap.PixelHeight != frame.Height)
                         _externalBitmap = new WriteableBitmap(frame.Width, frame.Height, 96, 96, PixelFormats.Bgr32, null);
@@ -428,9 +450,15 @@ public sealed class VncView : Grid
 
     private void ApplyGpuFrame()
     {
-        lock (_gpuLock) _gpuUpdateQueued = false;
+        (int Width, int Height, (int X, int Y)? Offset) shown;
+        lock (_gpuLock)
+        {
+            _gpuUpdateQueued = false;
+            shown = _gpuFrame;
+        }
         int frames = Interlocked.Exchange(ref _gpuFramesUncounted, 0);
-        if (_client == null || _renderer == null) return;
+        if (!IsAttached || _renderer == null) return;
+        EnsureAgentPicture(shown.Width, shown.Height);
         if (!_gpuShown)
         {
             // From the RFB picture (or the WPF stream path) to the GPU surface. The framebuffer stays the image underneath:
@@ -461,7 +489,7 @@ public sealed class VncView : Grid
     private VideoPlacement ComputePlacement()
     {
         var client = _client;
-        if (client == null || _bitmap == null || !IsVisible) return default;
+        if (!IsAttached || _bitmap == null || !IsVisible) return default;
         if (PresentationSource.FromVisual(this) is not HwndSource { RootVisual: Visual root, CompositionTarget: { } target }) return default;
         if (!_image.IsDescendantOf(root)) return default;
         var m = target.TransformToDevice;
@@ -470,6 +498,8 @@ public sealed class VncView : Grid
         var clip = Device(VisibleArea(root));
         (int Width, int Height, (int X, int Y)? Offset) frame;
         lock (_gpuLock) frame = _gpuFrame;
+        // Without VNC the frames are the whole picture, whatever part of the desktop they show.
+        if (client == null) return VideoLayout.Place(image, frame.Width, frame.Height, frame.Width, frame.Height, null, clip);
         var fb = client.Framebuffer;
         return VideoLayout.Place(image, fb.Width, fb.Height, frame.Width, frame.Height, frame.Offset, clip);
     }
@@ -527,9 +557,68 @@ public sealed class VncView : Grid
         QueueRender();
     }
 
+    /// <summary>True while the view shows a remote: attached to a VNC client, or to the guest agent alone.</summary>
+    public bool IsAttached => _client != null || _agentInput != null;
+
+    /// <summary>True for a session without VNC (<see cref="AttachAgent"/>).</summary>
+    public bool IsAgentOnly => _agentInput != null;
+
+    /// <summary>
+    /// Shows a session that has no VNC connection: the picture comes only from streamed frames
+    /// (<see cref="PresentVideoFrame(in DecodedFrame, ValueTuple{int, int}?)"/>, <see cref="PresentExternalFrame"/>), each
+    /// frame the whole picture whatever part of the desktop it shows, and pointer and keys go to <paramref name="input"/>.
+    /// The pointer's shape arrives through <see cref="SetRemoteCursor"/>. Black, and no pointer events, until the stream's
+    /// size is known (<see cref="SetAgentPictureSize"/> or the first frame).
+    /// </summary>
+    public void AttachAgent(IAgentInput input)
+    {
+        Detach();
+        _agentInput = input;
+        _bitmap = null;
+        _image.Source = null;
+        _remoteCursor = Cursors.Arrow;
+        _remoteCursorVisible = true;
+        if (_mouseInside) Cursor = CurrentCursor;
+    }
+
+    /// <summary>Agent-only sessions: the stream's picture size, from its start, so layout and pointer are right before the first frame. Dispatcher only.</summary>
+    public void SetAgentPictureSize(int width, int height) => EnsureAgentPicture(width, height);
+
+    /// <summary>
+    /// Agent-only sessions: keeps <see cref="_bitmap"/> the size of the frames. It stays black; it is what the layout
+    /// (fit and 1:1), the pointer mapping and the GPU surface's placement go by, and what shows under that surface.
+    /// </summary>
+    private void EnsureAgentPicture(int width, int height)
+    {
+        if (_agentInput == null || width <= 0 || height <= 0) return;
+        if (_bitmap != null && _bitmap.PixelWidth == width && _bitmap.PixelHeight == height) return;
+        _bitmap = new WriteableBitmap(width, height, 96, 96, PixelFormats.Bgr32, null);
+        if (!_externalShown || _gpuShown) _image.Source = _bitmap;
+        ApplyScaleMode();
+        PictureAreaChanged?.Invoke();
+    }
+
+    /// <summary>The pointer's shape from somewhere other than RFB (the guest agent, for sessions without VNC). Any thread.</summary>
+    public void SetRemoteCursor(CursorShape shape) => OnCursorChanged(shape);
+
+    /// <summary>Hides the pointer over the picture while the remote hides its own (typing, a game). Any thread.</summary>
+    public void SetRemoteCursorVisible(bool visible)
+    {
+        Dispatcher.BeginInvoke(() =>
+        {
+            _remoteCursorVisible = visible;
+            if (_mouseInside) Cursor = CurrentCursor;
+        });
+    }
+
+    private Cursor CurrentCursor => _remoteCursorVisible ? _remoteCursor : Cursors.None;
+
     public void Detach()
     {
         HideStream();
+        _agentInput = null;
+        _agentButtons = 0;
+        _agentKeysDown.Clear();
         if (_client == null) return;
         _client.FramebufferUpdated -= OnFramebufferUpdated;
         _client.FramebufferResized -= OnFramebufferResized;
@@ -634,7 +723,7 @@ public sealed class VncView : Grid
         {
             var dpi = VisualTreeHelper.GetDpi(this);
             _remoteCursor = CursorFactory.Create(shape, dpi.DpiScaleX);
-            if (_mouseInside) Cursor = _remoteCursor;
+            if (_mouseInside) Cursor = CurrentCursor;
         });
     }
 
@@ -696,15 +785,35 @@ public sealed class VncView : Grid
 
     private void SendPointer(Point p)
     {
+        if (_agentInput != null)
+        {
+            SendAgentPointer(p);
+            return;
+        }
         if (_client == null || !TryMapToFramebuffer(p, out var x, out var y)) return;
         _client.SendPointerEvent(x, y, _buttons);
+    }
+
+    /// <summary>
+    /// Agent-only sessions: the pixel of the picture under <paramref name="p"/> (the one it falls in, clamped to the
+    /// picture while a drag goes past its edge) and the buttons, to the agent.
+    /// </summary>
+    private void SendAgentPointer(Point p)
+    {
+        var picture = _bitmap;
+        if (picture == null || _image.ActualWidth <= 0 || _image.ActualHeight <= 0) return;
+        var local = TranslatePoint(p, _image);
+        int x = Math.Clamp((int)Math.Floor(local.X * picture.PixelWidth / _image.ActualWidth), 0, picture.PixelWidth - 1);
+        int y = Math.Clamp((int)Math.Floor(local.Y * picture.PixelHeight / _image.ActualHeight), 0, picture.PixelHeight - 1);
+        _agentPointer = (x, y);
+        _agentInput!.TrySendPointer(x, y, picture.PixelWidth, picture.PixelHeight, _agentButtons);
     }
 
     protected override void OnMouseEnter(MouseEventArgs e)
     {
         base.OnMouseEnter(e);
         _mouseInside = true;
-        Cursor = _remoteCursor;
+        Cursor = CurrentCursor;
     }
 
     protected override void OnMouseLeave(MouseEventArgs e)
@@ -729,12 +838,23 @@ public sealed class VncView : Grid
         _ => 0,
     };
 
+    private static int AgentMaskFor(MouseButton b) => b switch
+    {
+        MouseButton.Left => AgentButton.Left,
+        MouseButton.Middle => AgentButton.Middle,
+        MouseButton.Right => AgentButton.Right,
+        MouseButton.XButton1 => AgentButton.Back,
+        MouseButton.XButton2 => AgentButton.Forward,
+        _ => 0,
+    };
+
     protected override void OnMouseDown(MouseButtonEventArgs e)
     {
         base.OnMouseDown(e);
         Focus();
         Keyboard.Focus(this);
         _buttons |= MaskFor(e.ChangedButton);
+        _agentButtons |= AgentMaskFor(e.ChangedButton);
         CaptureMouse();
         SendPointer(e.GetPosition(this));
         e.Handled = true;
@@ -744,8 +864,9 @@ public sealed class VncView : Grid
     {
         base.OnMouseUp(e);
         _buttons &= (byte)~MaskFor(e.ChangedButton);
+        _agentButtons &= ~AgentMaskFor(e.ChangedButton);
         SendPointer(e.GetPosition(this));
-        if (_buttons == 0) ReleaseMouseCapture();
+        if (_buttons == 0 && _agentButtons == 0) ReleaseMouseCapture();
         e.Handled = true;
     }
 
@@ -780,8 +901,9 @@ public sealed class VncView : Grid
 
     public void SendWheel(int delta, bool horizontal, Point position)
     {
-        if (_client == null || !TryMapToFramebuffer(position, out var x, out var y)) return;
+        if (!IsAttached || !TryMapToFramebuffer(position, out var x, out var y)) return;
         if (TrySendSmoothScroll(delta, horizontal, x, y)) return;
+        if (_client == null) return; // an agent-only session whose agent does not scroll
         // Precision touchpads deliver many small deltas; accumulate to whole notches (WHEEL_DELTA = 120)
         // so one physical notch always becomes exactly one (or ScrollClicksPerNotch) VNC wheel click.
         ref int acc = ref (horizontal ? ref _wheelAccumulatorH : ref _wheelAccumulatorV);
@@ -856,6 +978,11 @@ public sealed class VncView : Grid
     /// <summary>Called by the owning window for every raw key message while this view has focus.</summary>
     public void SendKey(int vk, int scancode, bool extended, bool down)
     {
+        if (_agentInput != null)
+        {
+            SendAgentKey(vk, scancode, extended, down);
+            return;
+        }
         if (_client == null) return;
         var key = _translator.Translate(vk, scancode, extended);
         uint id = key.Scancode != 0 ? key.Scancode : key.Keysym | 0x80000000;
@@ -870,6 +997,29 @@ public sealed class VncView : Grid
         }
         _client.SendKeyEvent(key.Keysym, down, key.Scancode);
     }
+
+    /// <summary>Agent-only sessions: the key as the guest's keyboard would send it; released with what it was pressed with.</summary>
+    private void SendAgentKey(int vk, int scancode, bool extended, bool down)
+    {
+        int scan = AgentScanCode(vk, scancode, extended);
+        int id = scan != 0 ? scan : 0x10000 | vk;
+        if (down) _agentKeysDown[id] = (scan, vk);
+        else if (_agentKeysDown.Remove(id, out var pressed)) (scan, vk) = pressed;
+        _agentInput!.TrySendKey(scan, vk, down);
+    }
+
+    /// <summary>
+    /// The set 1 make code (0xE000 added for extended keys) the agent injects for a key message's scan code and extended
+    /// flag. Two keys report something other than what the keyboard sends: Num Lock comes with the extended flag although
+    /// its make code is a plain 0x45, and Pause reports 0x45 without it while its real sequence (E1 1D 45) has no single
+    /// code, so it travels as a virtual key alone (0).
+    /// </summary>
+    public static int AgentScanCode(int vk, int scancode, bool extended) => vk switch
+    {
+        VK_PAUSE => 0,
+        VK_NUMLOCK => 0x45,
+        _ => scancode is > 0 and <= 0xFF ? (extended ? 0xE000 : 0) | scancode : 0,
+    };
 
     public void SendKeysym(uint keysym, bool down) => _client?.SendKeyEvent(keysym, down, 0);
 
@@ -887,6 +1037,16 @@ public sealed class VncView : Grid
     /// <summary>Releases every key the remote believes is down (focus loss, disconnect).</summary>
     public void ReleaseAllKeys()
     {
+        if (_agentInput != null)
+        {
+            foreach (var (scan, vk) in _agentKeysDown.Values) _agentInput.TrySendKey(scan, vk, false);
+            _agentKeysDown.Clear();
+            if (_agentButtons != 0 && _bitmap is { } picture)
+                _agentInput.TrySendPointer(_agentPointer.X, _agentPointer.Y, picture.PixelWidth, picture.PixelHeight, 0);
+            _agentButtons = 0;
+            _buttons = 0;
+            return;
+        }
         if (_client == null) { _pressedKeys.Clear(); return; }
         foreach (var k in _pressedKeys.Values)
             _client.SendKeyEvent(k.Keysym, false, k.Scancode);
@@ -902,12 +1062,12 @@ public sealed class VncView : Grid
     public BitmapSource? Snapshot()
     {
         var client = _client;
-        if (client == null) return null;
+        if (!IsAttached) return null;
         if (_gpuShown && _renderer?.CaptureFrame(out int w, out int h) is { } frame)
         {
             (int Width, int Height, (int X, int Y)? Offset) shown;
             lock (_gpuLock) shown = _gpuFrame;
-            if (shown.Offset is not { } at) return BitmapSource.Create(w, h, 96, 96, PixelFormats.Bgr32, null, frame, w * 4);
+            if (shown.Offset is not { } at || client == null) return BitmapSource.Create(w, h, 96, 96, PixelFormats.Bgr32, null, frame, w * 4);
             // A partial frame: paste the streamed display into the framebuffer picture, as it is on screen.
             var desk = client.Framebuffer;
             byte[] all;
@@ -924,6 +1084,7 @@ public sealed class VncView : Grid
             copy.Freeze();
             return copy;
         }
+        if (client == null) return null; // agent only, and no frame yet
         var fb = client.Framebuffer;
         byte[] pixels;
         lock (fb.SyncRoot) pixels = fb.CopyOut(fb.Bounds);

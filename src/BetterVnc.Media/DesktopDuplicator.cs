@@ -29,6 +29,8 @@ public sealed unsafe class DesktopDuplicator : IDisposable
         public DirtyRegion Changed = null!;
         /// <summary>The next frame must be copied whole: the first one, or the caller's picture buffer is new.</summary>
         public bool CopyAll = true;
+        /// <summary>The pointer is on this output and showing, as of its last pointer update.</summary>
+        public bool PointerVisible;
     }
 
     private ID3D11Device _device = null!;
@@ -48,6 +50,32 @@ public sealed unsafe class DesktopDuplicator : IDisposable
     public int OutputCount => _outputs.Count;
     /// <summary>Time the last <see cref="TryCapture(int, byte[], DirtyRegion?)"/> spent reading rectangles and copying pixels, without the wait.</summary>
     public long LastCopyMicros { get; private set; }
+
+    /// <summary>
+    /// Follow the pointer too: every capture also reads the pointer's new shape when the compositor reports one, and
+    /// whether it shows on the captured displays (it is not part of the captured picture). Read with
+    /// <see cref="TakePointerUpdate"/>. Pointer updates come with their own frames, so captures that return false
+    /// (nothing drawn) may still have one.
+    /// </summary>
+    public bool TrackPointer { get; set; }
+
+    private byte[] _shapeBuffer = Array.Empty<byte>();
+    private PointerShape? _newPointerShape;
+    private bool _pointerVisible, _pointerKnown, _pointerChanged;
+
+    /// <summary>
+    /// True when the pointer changed since the last call: whether it shows now, and its new shape (null when only its
+    /// visibility changed). See <see cref="TrackPointer"/>.
+    /// </summary>
+    public bool TakePointerUpdate(out bool visible, out PointerShape? shape)
+    {
+        visible = _pointerVisible;
+        shape = _newPointerShape;
+        if (!_pointerChanged) return false;
+        _pointerChanged = false;
+        _newPointerShape = null;
+        return true;
+    }
 
     private DesktopDuplicator() { }
 
@@ -192,6 +220,7 @@ public sealed unsafe class DesktopDuplicator : IDisposable
         o.Changed.Clear();
         try
         {
+            if (TrackPointer && info.LastMouseUpdateTime != 0) ReadPointer(o, info); // before ReleaseFrame, which ends access to it
             if (drawn)
             {
                 // Without the compositor's rectangles (or when asked to) the whole output counts as changed.
@@ -233,6 +262,47 @@ public sealed unsafe class DesktopDuplicator : IDisposable
         finally { _context.Unmap((ID3D11Resource)o.Staging, 0); }
         o.CopyAll = false;
         return true;
+    }
+
+    /// <summary>
+    /// Takes the pointer's visibility on this output from a frame that has a pointer update, and its shape when the frame
+    /// carries a new one. The pointer shows when it does on any captured output; moving to a display that is not
+    /// captured hides it.
+    /// </summary>
+    private void ReadPointer(Output o, in DXGI_OUTDUPL_FRAME_INFO info)
+    {
+        o.PointerVisible = info.PointerVisible != 0;
+        bool visible = false;
+        foreach (var each in _outputs) visible |= each.PointerVisible;
+        if (visible != _pointerVisible || !_pointerKnown)
+        {
+            _pointerVisible = visible;
+            _pointerKnown = true;
+            _pointerChanged = true;
+        }
+        if (info.PointerShapeBufferSize == 0) return;
+        if (_shapeBuffer.Length < info.PointerShapeBufferSize) _shapeBuffer = new byte[info.PointerShapeBufferSize];
+        int hr;
+        uint required;
+        DXGI_OUTDUPL_POINTER_SHAPE_INFO si;
+        fixed (byte* buffer = _shapeBuffer) hr = o.Duplication.GetFramePointerShape((uint)_shapeBuffer.Length, (IntPtr)buffer, out required, out si);
+        if (hr < 0) return;
+        var data = _shapeBuffer.AsSpan(0, (int)Math.Min(required, (uint)_shapeBuffer.Length));
+        int width = (int)si.Width, height = (int)si.Height, pitch = (int)si.Pitch;
+        try
+        {
+            var shape = si.Type switch
+            {
+                D3D.DXGI_OUTDUPL_POINTER_SHAPE_TYPE_COLOR => PointerShape.FromColor(data, width, height, pitch, si.HotSpot.X, si.HotSpot.Y),
+                D3D.DXGI_OUTDUPL_POINTER_SHAPE_TYPE_MASKED_COLOR => PointerShape.FromMaskedColor(data, width, height, pitch, si.HotSpot.X, si.HotSpot.Y),
+                D3D.DXGI_OUTDUPL_POINTER_SHAPE_TYPE_MONOCHROME => PointerShape.FromMonochrome(data, width, height / 2, pitch, si.HotSpot.X, si.HotSpot.Y),
+                _ => null,
+            };
+            if (shape == null) return;
+            _newPointerShape = shape;
+            _pointerChanged = true;
+        }
+        catch (ArgumentException) { } // a shape that does not fit its own description: keep the last good one
     }
 
     /// <summary>

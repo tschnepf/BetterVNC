@@ -144,8 +144,9 @@ public static class Program
 
             Without a command the agent starts serving and creates bettervnc-agent.json next to the executable on first
             start. Viewers get in by pairing (you click Allow in a dialog on this screen) or with the token. The file also
-            holds port, listen, maxPayloadMb, enableVideo (screen streaming for the viewer's Stream picture modes) and the
-            scroll settings (enableScroll, scrollScale, scrollInvert, scrollPhases).
+            holds port, listen, maxPayloadMb, enableVideo (screen streaming for the viewer's Stream picture modes),
+            enableInput (keyboard and mouse for viewers without VNC; Windows) and the scroll settings (enableScroll,
+            scrollScale, scrollInvert, scrollPhases).
             """);
     }
 
@@ -194,7 +195,7 @@ public static class Program
 
         Console.WriteLine($"BetterVNC guest agent {Version} on {host.Clipboard.OsName}");
         Console.WriteLine($"Config: {configPath}  ({cfg.AuthSummary})");
-        Console.WriteLine($"Scroll injection: {host.InputDescription}");
+        Console.WriteLine($"Input injection: {host.InputDescription}");
         Console.WriteLine($"Screen streaming: {host.VideoDescription}");
 #if !WINDOWS
         if (host.Input is Input.MacInput mac && !mac.IsTrusted(prompt: false))

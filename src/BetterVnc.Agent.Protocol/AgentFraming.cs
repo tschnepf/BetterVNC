@@ -65,11 +65,12 @@ public static class AgentFraming
     public static async ValueTask WriteAsync(Stream stream, AgentMessage header, ReadOnlyMemory<byte> payload, CancellationToken ct)
     {
         var json = EncodeHeader(header);
-        var prefix = new byte[8];
-        BinaryPrimitives.WriteUInt32BigEndian(prefix, (uint)json.Length);
-        BinaryPrimitives.WriteUInt32BigEndian(prefix.AsSpan(4), (uint)payload.Length);
-        await stream.WriteAsync(prefix, ct).ConfigureAwait(false);
-        await stream.WriteAsync(json, ct).ConfigureAwait(false);
+        // Prefix and header in one write: with Nagle off, a pointer move or a key is then one packet instead of two.
+        var head = new byte[8 + json.Length];
+        BinaryPrimitives.WriteUInt32BigEndian(head, (uint)json.Length);
+        BinaryPrimitives.WriteUInt32BigEndian(head.AsSpan(4), (uint)payload.Length);
+        json.CopyTo(head, 8);
+        await stream.WriteAsync(head, ct).ConfigureAwait(false);
         if (payload.Length > 0) await stream.WriteAsync(payload, ct).ConfigureAwait(false);
         await stream.FlushAsync(ct).ConfigureAwait(false);
     }

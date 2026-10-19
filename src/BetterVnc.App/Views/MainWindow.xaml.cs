@@ -138,7 +138,7 @@ public partial class MainWindow : Window
                     if (answer != MessageBoxResult.Yes) return;
                     Cursor = Cursors.Wait;
                     await svc.StartVmAsync(vm.Name);
-                    for (int i = 0; i < 20 && vm.VncPort == null; i++)
+                    for (int i = 0; i < 20 && vm.VncPort == null && !profile.AgentOnly; i++)
                     {
                         await Task.Delay(1000);
                         vm = await svc.GetVmAsync(profile.UnraidVmName);
@@ -148,7 +148,7 @@ public partial class MainWindow : Window
                 port = vm.VncPort;
                 password = vm.VncPassword;
                 guestAddress = vm.GuestAddress;
-                if (port == null)
+                if (port == null && !profile.AgentOnly) // without VNC (a passthrough GPU) the agent is all it takes
                 {
                     MessageBox.Show(this, $"VM \"{vm.Name}\" has no VNC display (is it using a passthrough GPU?).", "BetterVNC", MessageBoxButton.OK, MessageBoxImage.Warning);
                     return;

@@ -18,7 +18,10 @@ public sealed class ProfileStore
         Converters = { new JsonStringEnumConverter() },
     };
 
-    public static string Directory { get; } = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "BetterVNC");
+    /// <summary>%AppData%\BetterVNC, or the folder in BETTERVNC_PROFILE_DIR (for test runs that must not touch the real profiles).</summary>
+    public static string Directory { get; } = Environment.GetEnvironmentVariable("BETTERVNC_PROFILE_DIR") is { Length: > 0 } dir
+        ? Path.GetFullPath(dir)
+        : Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "BetterVNC");
     public static string FilePath { get; } = Path.Combine(Directory, "profiles.json");
 
     public ObservableCollection<ConnectionProfile> Connections { get; } = new();

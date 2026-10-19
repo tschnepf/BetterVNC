@@ -13,6 +13,10 @@ public sealed class FakeVideoSource : IGuestVideoSource
     public string? FailStart { get; set; }
     /// <summary>When set, sessions report their frames as this part of the desktop (a primary display inside a larger one).</summary>
     public (int X, int Y)? Offset { get; set; }
+    /// <summary>The screen area sessions say their frames show (pointer messages are mapped onto it).</summary>
+    public ScreenArea? Area { get; set; }
+    /// <summary>Announce that this source reports the pointer.</summary>
+    public bool SupportsCursor { get; set; }
     public int Starts { get; private set; }
     public FakeSession? Last { get; private set; }
     private readonly System.Threading.Channels.Channel<FakeSession> _sessions = System.Threading.Channels.Channel.CreateUnbounded<FakeSession>();
@@ -20,11 +24,13 @@ public sealed class FakeVideoSource : IGuestVideoSource
     /// <summary>The sessions in the order they were started; each call consumes one.</summary>
     public async Task<FakeSession> NextSession() => await _sessions.Reader.ReadAsync().AsTask().WaitAsync(TimeSpan.FromSeconds(5));
 
-    public IVideoSession Start(VideoRequest request, Action<VideoFrame> onFrame, Action<string?> onEnded)
+    public IVideoSession Start(VideoRequest request, Action<VideoFrame> onFrame, Action<string?> onEnded) => Start(request, onFrame, onEnded, null);
+
+    public IVideoSession Start(VideoRequest request, Action<VideoFrame> onFrame, Action<string?> onEnded, Action<GuestCursor>? onCursor)
     {
         Starts++;
         if (FailStart != null) throw new InvalidOperationException(FailStart);
-        var s = new FakeSession(request, onFrame, onEnded) { Offset = Offset };
+        var s = new FakeSession(request, onFrame, onEnded) { Offset = Offset, Area = Area, OnCursor = onCursor };
         Last = s;
         _sessions.Writer.TryWrite(s);
         return s;
@@ -57,6 +63,9 @@ public sealed class FakeVideoSource : IGuestVideoSource
         public int Width => 1920;
         public int Height => 1080;
         public (int X, int Y)? Offset { get; set; }
+        public ScreenArea? Area { get; set; }
+        /// <summary>What the server passed for the pointer; null when the viewer did not ask for it.</summary>
+        public Action<GuestCursor>? OnCursor { get; init; }
         public string EncoderKind => AgentVideoEncoder.Software;
         public int KeyframeRequests { get; private set; }
         public bool IsDisposed => _disposed.Task.IsCompleted;

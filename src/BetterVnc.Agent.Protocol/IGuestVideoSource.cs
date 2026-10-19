@@ -22,6 +22,12 @@ public sealed class VideoRequest
 /// <param name="OffsetX">Position of the frame in the desktop when it shows only part of it (see <see cref="IVideoSession.Offset"/>); null for the whole desktop.</param>
 public readonly record struct VideoFrame(ReadOnlyMemory<byte> Data, bool Keyframe, long TimestampMicros, int Width, int Height, int? OffsetX = null, int? OffsetY = null);
 
+/// <summary>A pointer image: <paramref name="Width"/>×<paramref name="Height"/> pixels of B, G, R, A with straight alpha, top row first.</summary>
+public sealed record CursorImage(int Width, int Height, int HotX, int HotY, byte[] Bgra);
+
+/// <summary>The guest pointer as a video source saw it: whether it shows, and its image when that changed (null: as before).</summary>
+public sealed record GuestCursor(bool Visible, CursorImage? Shape);
+
 /// <summary>
 /// Screen capture plus encoder on the machine the agent runs on. Implementations are OS specific; an agent without one
 /// simply does not announce <see cref="AgentFeature.Video"/>. One source serves any number of sessions.
@@ -38,6 +44,17 @@ public interface IGuestVideoSource
     /// Throws when capturing is impossible right now; the message is sent to the viewer.
     /// </summary>
     IVideoSession Start(VideoRequest request, Action<VideoFrame> onFrame, Action<string?> onEnded);
+
+    /// <summary>True when <see cref="Start(VideoRequest, Action{VideoFrame}, Action{string?}, Action{GuestCursor}?)"/> reports the pointer; the server then announces <see cref="AgentFeature.Cursor"/>.</summary>
+    bool SupportsCursor => false;
+
+    /// <summary>
+    /// Like <see cref="Start(VideoRequest, Action{VideoFrame}, Action{string?})"/>, and reports the pointer through
+    /// <paramref name="onCursor"/> (from the capture thread): first soon after the start, with its shape, then whenever
+    /// the shape or its visibility changes. Sources without <see cref="SupportsCursor"/> ignore it.
+    /// </summary>
+    IVideoSession Start(VideoRequest request, Action<VideoFrame> onFrame, Action<string?> onEnded, Action<GuestCursor>? onCursor) =>
+        Start(request, onFrame, onEnded);
 }
 
 /// <summary>A running stream. Disposing stops capture and encoding; no frames arrive after Dispose returns.</summary>
@@ -54,6 +71,11 @@ public interface IVideoSession : IDisposable
     /// primary display of a desktop too large to encode as one picture; null when they show the whole desktop.
     /// </summary>
     (int X, int Y)? Offset => null;
+    /// <summary>
+    /// The part of the guest's screen the frames show, in the OS's screen coordinates; pointer messages are mapped onto
+    /// it. Null when the source cannot say, and pointer messages then map onto the whole desktop.
+    /// </summary>
+    ScreenArea? Area => null;
     /// <summary>See <see cref="AgentVideoEncoder"/>.</summary>
     string EncoderKind { get; }
 

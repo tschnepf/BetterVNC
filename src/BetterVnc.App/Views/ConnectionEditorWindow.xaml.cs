@@ -49,7 +49,8 @@ public partial class ConnectionEditorWindow : Window
         SmbPathBox.Text = profile.SmbPath ?? "";
         SmbUserBox.Text = profile.SmbUsername ?? "";
         if (profile.SmbProtectedPassword != null) SmbPasswordBox.Password = KeepPassword;
-        AgentBox.IsChecked = profile.AgentEnabled;
+        AgentBox.IsChecked = profile.AgentEnabled || profile.AgentOnly;
+        AgentOnlyBox.IsChecked = profile.AgentOnly;
         AgentHostBox.Text = profile.AgentHost ?? "";
         AgentPortBox.Text = profile.AgentPort.ToString();
         AgentPairRadio.IsChecked = profile.AgentAuth == AgentAuthMode.Pair;
@@ -66,7 +67,12 @@ public partial class ConnectionEditorWindow : Window
 
     private void OnAgentChanged(object sender, RoutedEventArgs e)
     {
-        if (!IsInitialized || AgentPanel == null) return;
+        if (!IsInitialized || AgentPanel == null || AgentOnlyBox == null) return;
+        // Without VNC the agent is the connection: it cannot be switched off, and the VNC port means nothing.
+        bool agentOnly = AgentOnlyBox.IsChecked == true;
+        if (agentOnly) AgentBox.IsChecked = true;
+        AgentBox.IsEnabled = !agentOnly;
+        PortBox.IsEnabled = !agentOnly;
         AgentPanel.Visibility = AgentBox.IsChecked == true ? Visibility.Visible : Visibility.Collapsed;
         OnAgentAuthChanged(this, null!);
     }
@@ -131,7 +137,8 @@ public partial class ConnectionEditorWindow : Window
 
     private void OnSave(object sender, RoutedEventArgs e)
     {
-        if (string.IsNullOrWhiteSpace(HostBox.Text) && KindBox.SelectedIndex != (int)ConnectionKind.UnraidVm)
+        bool agentHostOnly = AgentOnlyBox.IsChecked == true && !string.IsNullOrWhiteSpace(AgentHostBox.Text);
+        if (string.IsNullOrWhiteSpace(HostBox.Text) && KindBox.SelectedIndex != (int)ConnectionKind.UnraidVm && !agentHostOnly)
         {
             MessageBox.Show(this, "Enter a host name or IP address.", "Connection", MessageBoxButton.OK, MessageBoxImage.Warning);
             return;
@@ -172,7 +179,10 @@ public partial class ConnectionEditorWindow : Window
         p.SmbPath = string.IsNullOrWhiteSpace(SmbPathBox.Text) ? null : SmbPathBox.Text.Trim();
         p.SmbUsername = string.IsNullOrWhiteSpace(SmbUserBox.Text) ? null : SmbUserBox.Text.Trim();
         if (SmbPasswordBox.Password != KeepPassword) p.SmbProtectedPassword = ProfileStore.Protect(SmbPasswordBox.Password);
-        p.AgentEnabled = AgentBox.IsChecked == true;
+        p.AgentOnly = AgentOnlyBox.IsChecked == true;
+        p.AgentEnabled = AgentBox.IsChecked == true || p.AgentOnly;
+        // A stream mode is the only picture there is without VNC.
+        if (p.AgentOnly && !picture.IsStream) p.PictureMode = PictureMode.StreamQuality;
         p.AgentHost = string.IsNullOrWhiteSpace(AgentHostBox.Text) ? null : AgentHostBox.Text.Trim();
         p.AgentPort = int.TryParse(AgentPortBox.Text, out var ap) && ap > 0 && ap <= 65535 ? ap : 5970;
         p.AgentAuth = AgentTokenRadio.IsChecked == true ? AgentAuthMode.Token : AgentAuthMode.Pair;

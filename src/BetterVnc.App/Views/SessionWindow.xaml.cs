@@ -52,8 +52,17 @@ public partial class SessionWindow : Window
     /// <summary>The profile this window was opened for.</summary>
     public ConnectionProfile Profile => _profile;
 
-    /// <summary>True while the VNC connection is up (false while connecting, after a disconnect, or on the error overlay).</summary>
+    /// <summary>
+    /// True while the VNC connection is up (false while connecting, after a disconnect, or on the error overlay); for a
+    /// session without VNC, while the agent's stream shows.
+    /// </summary>
     public bool IsConnected { get; private set; }
+
+    /// <summary>A session without VNC: the guest agent carries picture, keyboard, mouse and pointer shapes.</summary>
+    private bool AgentOnly => _profile.AgentOnly;
+
+    /// <summary>Something to send clipboard text and files to: the VNC connection, or the agent of a session without one.</summary>
+    private bool HasSession => _client != null || (AgentOnly && _agent != null);
 
     /// <param name="hostOverride">Resolved host/port/password for Unraid VMs (looked up over SSH before opening the window).</param>
     /// <param name="fullscreen">Start in fullscreen for this session only, without changing the profile's StartFullscreen setting.</param>
@@ -87,6 +96,14 @@ public partial class SessionWindow : Window
         SendFilesButton.IsEnabled = PasteButton.IsEnabled = true;
 
         _wantedPicture = PictureModes.Get(profile.PictureMode);
+        // Without VNC the picture is always the stream; a VNC mode in the profile means its best stream.
+        if (profile.AgentOnly && !_wantedPicture.IsStream) _wantedPicture = PictureModes.Get(PictureMode.StreamQuality);
+        if (profile.AgentOnly)
+        {
+            CadButton.IsEnabled = false;
+            CadButton.ToolTip = "Ctrl+Alt+Del needs a VNC connection (or, later, the agent's system service): Windows ignores it from an app.";
+            AudioToggle.IsEnabled = false;
+        }
         _pictureUpdating = true;
         foreach (var info in PictureModes.All)
             PictureBox.Items.Add(new ComboBoxItem { Content = info.Label, Tag = info, ToolTip = info.Description });
@@ -122,6 +139,7 @@ public partial class SessionWindow : Window
     {
         SessionManager.Unregister(this);
         _statusTimer.Stop();
+        _streamRetryTimer?.Stop();
         _llHook?.Dispose();
         if (_clipboardListening && _hwndSource != null) RemoveClipboardFormatListener(_hwndSource.Handle);
         _hwndSource?.RemoveHook(WndProc);
@@ -151,6 +169,11 @@ public partial class SessionWindow : Window
 
     private async Task ConnectAsync()
     {
+        if (AgentOnly)
+        {
+            ConnectThroughAgent();
+            return;
+        }
         ShowOverlay("Connecting…", $"{_host}:{_port}", showButtons: false);
         View.Detach();
         View.ScrollInjector = null;
@@ -246,6 +269,167 @@ public partial class SessionWindow : Window
             StatusLeft.Text = "Stream mode needs the guest agent; showing VNC lossless because this connection has none configured";
     }
 
+    // ------------------------------------------------------------------ session without VNC
+
+    private bool _fittedToStream;
+    private DispatcherTimer? _streamRetryTimer;
+
+    /// <summary>
+    /// A session without VNC: the guest agent is the whole connection. Its client reconnects by itself; the stream starts
+    /// whenever the agent is up (and again after it comes back), and the overlay shows while there is no picture.
+    /// </summary>
+    private void ConnectThroughAgent()
+    {
+        _streamRetryTimer?.Stop();
+        View.Detach();
+        View.ScrollInjector = null;
+        _player?.Dispose();
+        _player = null;
+        _agent?.Dispose();
+        _agent = null;
+        SetAgentSessionUp(false);
+        if (!AgentClient.IsConfigured(_profile))
+        {
+            ShowOverlay("Cannot connect", "This connection goes through the guest agent alone, but no agent is set up in it. Edit the connection: turn the agent on and choose pairing or enter its token.", showButtons: true);
+            return;
+        }
+        var agent = new AgentClient(_profile, _host, Dispatcher, _guestAddress, GuestAddressLookUp());
+        ShowOverlay("Connecting…", $"Guest agent at {agent.Target}", showButtons: false);
+        agent.StateChanged += () => { if (_agent == agent) OnAgentOnlyStateChanged(agent); };
+        agent.Message += m =>
+        {
+            if (_agent != agent) return;
+            StatusLeft.Text = m;
+            if (!IsConnected && Overlay.IsVisible && OverlayTitle.Text != "Cannot control this computer") OverlayDetail.Text = m;
+        };
+        agent.RemoteTextReceived += t => { if (_agent == agent) OnRemoteClipboard(t); };
+        agent.CursorChanged += (shape, visible) =>
+        {
+            if (_agent != agent) return;
+            if (shape != null) View.SetRemoteCursor(shape);
+            View.SetRemoteCursorVisible(visible);
+        };
+        _agent = agent;
+        View.AttachAgent(agent);
+        View.ScrollInjector = agent;
+        var player = new VideoStreamPlayer(agent, null, View, Dispatcher);
+        player.Message += m => { if (_player == player) StatusLeft.Text = m; };
+        player.Ended += reason => { if (_player == player) OnAgentOnlyStreamEnded(agent, reason); };
+        _player = player;
+        if (!_clipboardListening && _hwndSource != null)
+        {
+            AddClipboardFormatListener(_hwndSource.Handle);
+            _clipboardListening = true;
+        }
+        _statusTimer.Start();
+        agent.Start();
+        RefreshPictureMenu();
+    }
+
+    private void OnAgentOnlyStateChanged(AgentClient agent)
+    {
+        RefreshPictureMenu();
+        UpdateStatus();
+        if (agent.IsConnected)
+        {
+            if (!agent.CanControl)
+            {
+                SetAgentSessionUp(false);
+                ShowOverlay("Cannot control this computer", agent.ControlUnavailableReason ?? "The guest agent cannot be controlled.", showButtons: true);
+                return;
+            }
+            if (_player is { IsStreaming: false }) _ = StartAgentStreamAsync();
+            return;
+        }
+        if (IsConnected)
+        {
+            SetAgentSessionUp(false);
+            ShowOverlay("Connection lost", $"Reconnecting to the guest agent at {agent.Target}…", showButtons: true);
+        }
+        else if (Overlay.IsVisible)
+        {
+            // Still trying (or given up: pairing denied, token rejected); the agent's own message has the details.
+            ReconnectButton.Visibility = CloseButton.Visibility = Visibility.Visible;
+        }
+    }
+
+    private async Task StartAgentStreamAsync()
+    {
+        var agent = _agent;
+        var player = _player;
+        if (agent == null || player == null || player.IsStreaming) return;
+        var mode = _wantedPicture.IsStream ? _wantedPicture : PictureModes.Get(PictureMode.StreamQuality);
+        try
+        {
+            await player.StartAsync(mode);
+        }
+        catch (Exception ex)
+        {
+            if (_agent != agent) return;
+            ShowOverlay("No picture", "The guest agent could not start streaming: " + ex.Message, showButtons: true);
+            ScheduleStreamRetry();
+            return;
+        }
+        if (_agent != agent || agent.StreamInfo is not { } info) return;
+        View.SetAgentPictureSize(info.Width, info.Height);
+        if (!_fittedToStream)
+        {
+            _fittedToStream = true;
+            FitWindowToRemote(info.Width, info.Height);
+        }
+        SetAgentSessionUp(true);
+        TitleText.Text = $"{_profile.Name}  ·  {agent.RemoteOs} through the guest agent";
+        _profile.LastConnected = DateTime.Now;
+        try { App.Profiles.Save(); } catch { }
+        RefreshPictureMenu();
+        UpdateStatus();
+    }
+
+    /// <summary>The agent stopped the stream on its own (capture failed, desktop locked): try again shortly while it stays connected.</summary>
+    private void OnAgentOnlyStreamEnded(AgentClient agent, string? reason)
+    {
+        RefreshPictureMenu();
+        UpdateStatus();
+        if (!agent.IsConnected) return; // the state change shows "connection lost" and restarts the stream on reconnect
+        SetAgentSessionUp(false);
+        ShowOverlay("No picture", $"The remote stopped streaming ({reason ?? "no reason given"}). Trying again…", showButtons: true);
+        ScheduleStreamRetry();
+    }
+
+    private void ScheduleStreamRetry()
+    {
+        _streamRetryTimer ??= new DispatcherTimer { Interval = TimeSpan.FromSeconds(3) };
+        _streamRetryTimer.Tick -= OnStreamRetry;
+        _streamRetryTimer.Tick += OnStreamRetry;
+        _streamRetryTimer.Stop();
+        _streamRetryTimer.Start();
+    }
+
+    private void OnStreamRetry(object? sender, EventArgs e)
+    {
+        _streamRetryTimer?.Stop();
+        if (_agent is { CanControl: true } && _player is { IsStreaming: false }) _ = StartAgentStreamAsync();
+    }
+
+    /// <summary>The picture of a session without VNC appeared (the stream started) or went away.</summary>
+    private void SetAgentSessionUp(bool up)
+    {
+        if (up)
+        {
+            Overlay.Visibility = Visibility.Collapsed;
+            View.Focus();
+            Keyboard.Focus(View);
+        }
+        else
+        {
+            View.ReleaseAllKeys();
+        }
+        if (IsConnected == up) return;
+        IsConnected = up;
+        SessionManager.NotifyStateChanged(this);
+        UpdateHook();
+    }
+
     // ------------------------------------------------------------------ guest agent
 
     /// <summary>Connects to the BetterVNC guest agent (rich clipboard, scrolling, screen stream) once the VNC session is up, if the profile has one.</summary>
@@ -298,7 +482,11 @@ public partial class SessionWindow : Window
         {
             var info = (PictureModes.Info)item.Tag;
             string? why = null;
-            if (info.IsStream)
+            if (!info.IsStream && AgentOnly)
+            {
+                why = "This connection has no VNC server: the picture is the guest agent's stream.";
+            }
+            else if (info.IsStream)
             {
                 if (_agent == null || _player == null)
                     why = "This connection has no guest agent. Enable the agent in the connection settings; the stream modes need it.";
@@ -340,6 +528,20 @@ public partial class SessionWindow : Window
     /// </summary>
     private async Task ApplyPictureAsync()
     {
+        if (AgentOnly)
+        {
+            // Only stream modes can be chosen here: re-tune the running stream, or start it if the agent is up without one.
+            if (!_wantedPicture.IsStream || _player == null || _agent?.CanControl != true) return;
+            try
+            {
+                if (_player.IsStreaming) await _player.StartAsync(_wantedPicture);
+                else await StartAgentStreamAsync();
+            }
+            catch (Exception ex) { StatusLeft.Text = "Picture: " + ex.Message; }
+            RefreshPictureMenu();
+            UpdateStatus();
+            return;
+        }
         var client = _client;
         if (client == null) return;
         var mode = _wantedPicture;
@@ -466,7 +668,7 @@ public partial class SessionWindow : Window
             case WM_SYSKEYDOWN:
             case WM_KEYUP:
             case WM_SYSKEYUP:
-                if (_client != null && View.IsKeyboardFocused)
+                if (View.IsAttached && View.IsKeyboardFocused)
                 {
                     int vk = (int)wParam;
                     long lp = lParam.ToInt64();
@@ -488,7 +690,7 @@ public partial class SessionWindow : Window
                 if (View.IsKeyboardFocused) handled = true;
                 break;
             case WM_MOUSEHWHEEL:
-                if (_client != null)
+                if (View.IsAttached)
                 {
                     int delta = (short)((wParam.ToInt64() >> 16) & 0xFFFF);
                     View.SendWheel(delta, horizontal: true, Mouse.GetPosition(View));
@@ -516,7 +718,7 @@ public partial class SessionWindow : Window
 
     private void UpdateHook()
     {
-        bool wantHook = _client != null && IsActive && (GrabToggle.IsChecked == true || _fullscreen);
+        bool wantHook = View.IsAttached && IsActive && (GrabToggle.IsChecked == true || _fullscreen);
         if (wantHook)
         {
             _llHook ??= new LowLevelKeyboardHook(
@@ -534,7 +736,7 @@ public partial class SessionWindow : Window
 
     private void OnLocalClipboardChanged()
     {
-        if (_client == null || ClipboardToggle.IsChecked != true) return;
+        if (!HasSession || ClipboardToggle.IsChecked != true) return;
         if (_agent?.IsOwnClipboardChange() == true) return; // the agent just put guest content here
         PushLocalClipboard();
         if (_agent?.IsConnected == true) _ = MirrorLocalImageAsync();
@@ -571,7 +773,7 @@ public partial class SessionWindow : Window
 
     private void PushLocalClipboard()
     {
-        if (_client == null) return;
+        if (!HasSession) return;
         string? text = null;
         for (int attempt = 0; attempt < 3 && text == null; attempt++)
         {
@@ -587,15 +789,15 @@ public partial class SessionWindow : Window
         // Through the agent when it is connected: UTF-8, and it works where the VNC server keeps no clipboard of its own
         // (QEMU without a qemu-vdagent channel, as on most Unraid VMs). Over VNC otherwise.
         if (_agent is { IsConnected: true } agent) _ = PushTextThroughAgentAsync(agent, _client, text);
-        else _client.SendClipboardText(text);
+        else _client?.SendClipboardText(text);
     }
 
-    private static async Task PushTextThroughAgentAsync(AgentClient agent, VncClient client, string text)
+    private static async Task PushTextThroughAgentAsync(AgentClient agent, VncClient? client, string text)
     {
         bool sent;
         try { sent = await agent.PushTextAsync(text); }
         catch (Exception) { sent = false; }
-        if (!sent) client.SendClipboardText(text);
+        if (!sent) client?.SendClipboardText(text);
     }
 
     private void OnRemoteClipboard(string text)
@@ -616,7 +818,7 @@ public partial class SessionWindow : Window
 
     private async void OnPasteToRemote(object sender, RoutedEventArgs e)
     {
-        if (_client == null) return;
+        if (!HasSession) return;
         try
         {
             if (Clipboard.ContainsFileDropList())
@@ -825,6 +1027,11 @@ public partial class SessionWindow : Window
 
     private void UpdateStatus()
     {
+        if (AgentOnly)
+        {
+            UpdateAgentOnlyStatus();
+            return;
+        }
         var client = _client;
         if (client == null) return;
         var s = client.Statistics;
@@ -866,6 +1073,30 @@ public partial class SessionWindow : Window
         if (_wantedPicture.IsStream && _player is not { IsStreaming: true }) picture += "  (waiting for agent stream)";
 
         StatusRight.Text = $"{client.Framebuffer.Width}×{client.Framebuffer.Height}  ·  {View.Fps:0} fps  ·  {picture}  ·  {traffic}  ·  {string.Join(", ", features)}";
+    }
+
+    /// <summary>The status bar of a session without VNC: the stream, its traffic and what the agent does.</summary>
+    private void UpdateAgentOnlyStatus()
+    {
+        var agent = _agent;
+        if (agent == null) return;
+        var features = new List<string> { agent.IsConnected ? $"agent ({agent.RemoteOs})" : agent.Status };
+        if (agent.IsConnected)
+        {
+            if (agent.CanControl) features.Add("keyboard and mouse");
+            if (agent.StreamInfo is { Cursor: true }) features.Add("pointer shapes");
+            if (agent.CanScroll) features.Add("smooth scroll");
+        }
+        if (_player is { IsStreaming: true } player && player.Info is { } info)
+        {
+            string path = player.DecodePath is { } p ? $" ({p})" : "";
+            string skipped = player.FramesSkipped > 0 ? $" ({player.FramesSkipped} skipped)" : "";
+            StatusRight.Text = $"{info.Width}×{info.Height}  ·  {View.Fps:0} fps  ·  stream {info.Codec}, {info.EncoderKind} encoder{path}{skipped}  ·  {FormatRate(player.TakeRate())}  ·  {string.Join(", ", features)}";
+        }
+        else
+        {
+            StatusRight.Text = $"no picture yet  ·  {string.Join(", ", features)}";
+        }
     }
 
     private static string FormatRate(double bytesPerSecond) => bytesPerSecond switch
