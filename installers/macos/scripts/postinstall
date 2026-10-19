@@ -1,15 +1,12 @@
 #!/bin/sh
-# Runs as root at the end of the package install. Picks the build for this CPU, exposes it on the PATH and sets the
-# agent up for the person who is signed in, through the agent's own "install" command (per-user copy in
-# ~/Library/Application Support/BetterVNC, LaunchAgent, started now). Never fails the package: a missing signed-in
-# user only means "install" has to be run later.
-base="/usr/local/libexec/bettervnc-agent"
-case "$(uname -m)" in
-  arm64) arch=arm64 ;;
-  *)     arch=x64 ;;
-esac
-bin="$base/$arch/bettervnc-agent"
-chmod 755 "$base/arm64/bettervnc-agent" "$base/x64/bettervnc-agent" "$base/arm64/bettervnc-capture" "$base/x64/bettervnc-capture" "$base/uninstall.sh" 2>/dev/null || true
+# Runs as root at the end of the package install. Exposes the agent on the PATH and sets it up for the person who is
+# signed in, through the agent's own "install" command (LaunchAgent, started now; it finds itself in /Applications and
+# leaves the app as it is). Never fails the package: a missing signed-in user only means "install" has to be run later.
+app="/Applications/BetterVNC Agent.app"
+bin="$app/Contents/MacOS/bettervnc-agent"
+
+# Packages before the native app put the .NET agent under /usr/local/libexec/bettervnc-agent/<arch>.
+rm -rf /usr/local/libexec/bettervnc-agent/arm64 /usr/local/libexec/bettervnc-agent/x64
 mkdir -p /usr/local/bin
 ln -sfn "$bin" /usr/local/bin/bettervnc-agent
 

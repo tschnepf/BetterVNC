@@ -6,6 +6,6 @@ Two macOS permissions make everything work. Both are in System Settings, Privacy
 
   Screen & System Audio Recording (Screen Recording before macOS 15): needed for the "Stream" picture modes. macOS asks the first time a viewer starts a stream; switch BetterVNC Agent on, accept "Quit & Reopen" if offered, and the stream starts.
 
-If BetterVNC Agent is not in a list, click +, press Command-Shift-G and enter ~/Library/Application Support/BetterVNC/BetterVNC Agent.app.
+If BetterVNC Agent is not in a list, click +, open the Applications folder and choose BetterVNC Agent. The agent's menu bar item has Permissions…, which walks through both.
 
 In BetterVNC on your PC, edit the connection, tick "Use the guest agent", connect, and click Allow in the dialog that appears on this screen.

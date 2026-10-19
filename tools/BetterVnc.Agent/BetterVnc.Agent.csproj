@@ -1,17 +1,16 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
   <!--
-    The BetterVNC guest agent: runs inside the VM or on the Mac and gives the viewer a rich clipboard
-    (images, files, HTML) that RFB cannot carry.
+    The BetterVNC guest agent for Windows and Linux: runs inside the VM and gives the viewer a rich clipboard
+    (images, files, HTML) that RFB cannot carry. The macOS agent is a native app, tools/BetterVnc.Agent.Mac.
 
     Two target frameworks: net10.0-windows (Windows Forms clipboard, SendInput scrolling) for the Windows build,
-    plain net10.0 (xclip / wl-clipboard / pbcopy, pbpaste, osascript; CoreGraphics or xdotool scrolling) for Linux and macOS.
-    The macOS build streams the screen through a separate Swift helper; see the end of this file.
+    plain net10.0 (xclip / wl-clipboard; xdotool or ydotool scrolling) for Linux. The plain build also runs the 'probe'
+    test client on any OS.
 
     Publish (single file, self-contained):
       dotnet publish tools/BetterVnc.Agent -c Release -f net10.0-windows -r win-x64   -o publish/agent-win-x64
       dotnet publish tools/BetterVnc.Agent -c Release -f net10.0         -r linux-x64 -o publish/agent-linux-x64
-      dotnet publish tools/BetterVnc.Agent -c Release -f net10.0         -r osx-arm64 -o publish/agent-osx-arm64
   -->
 
   <PropertyGroup>
@@ -39,7 +38,7 @@
   </PropertyGroup>
 
   <PropertyGroup>
-    <!-- Function pointers for the Objective-C runtime bridge of the macOS menu bar item. -->
+    <!-- Pointers into captured frames (H264ScreenSession). -->
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
   </PropertyGroup>
 
@@ -50,11 +49,6 @@
   <ItemGroup Condition="'$(TargetFramework)' == 'net10.0-windows'">
     <!-- Tray and dialog icon, shared with the viewer. -->
     <EmbeddedResource Include="..\..\src\BetterVnc.App\Assets\BetterVNC.ico" Link="Assets\BetterVNC.ico" LogicalName="BetterVNC.ico" />
-  </ItemGroup>
-
-  <ItemGroup Condition="'$(TargetFramework)' != 'net10.0-windows'">
-    <!-- Icon of BetterVNC Agent.app, which "install" builds on macOS (MacAppBundle). -->
-    <EmbeddedResource Include="..\..\docs\icon.png" Link="Assets\BetterVNC.png" LogicalName="BetterVNC.png" />
   </ItemGroup>
 
   <ItemGroup Condition="'$(TargetFramework)' != 'net10.0-windows'">
@@ -75,19 +69,6 @@
   <ItemGroup Condition="'$(TargetFramework)' == 'net10.0-windows'">
     <!-- Media Foundation H.264 encoder and Desktop Duplication capture for the screen stream. -->
     <ProjectReference Include="..\..\src\BetterVnc.Media\BetterVnc.Media.csproj" />
-  </ItemGroup>
-
-  <!--
-    macOS screen streaming: bettervnc-capture (Swift; ScreenCaptureKit and VideoToolbox) has to sit next to the agent.
-    It is built on a Mac with tools/BetterVnc.Agent.MacCapture/build.sh; when that has been done, building or publishing
-    for osx-arm64 or osx-x64 copies it next to the single-file agent. Without it the agent works, minus streaming.
-  -->
-  <PropertyGroup>
-    <MacCaptureHelper Condition="'$(MacCaptureHelper)' == ''">$(MSBuildThisFileDirectory)..\BetterVnc.Agent.MacCapture\build\bettervnc-capture</MacCaptureHelper>
-  </PropertyGroup>
-  <ItemGroup Condition="('$(RuntimeIdentifier)' == 'osx-arm64' or '$(RuntimeIdentifier)' == 'osx-x64') and Exists('$(MacCaptureHelper)')">
-    <None Include="$(MacCaptureHelper)" Link="bettervnc-capture" Visible="false"
-          CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" ExcludeFromSingleFile="true" />
   </ItemGroup>
 
 </Project>
