@@ -26,9 +26,10 @@ final class VideoEncoder {
     let lowLatency: Bool
     private let session: VTCompressionSession
     private let output: (CMSampleBuffer) -> Void
+    private let log: ((String) -> Void)?
 
     init(codec: Codec, width: Int, height: Int, bitrateKbps: Int, fps: Int, allowLowLatency: Bool,
-         output: @escaping (CMSampleBuffer) -> Void) throws {
+         log: ((String) -> Void)? = nil, output: @escaping (CMSampleBuffer) -> Void) throws {
         // Low-latency rate control (H.264) is made for exactly this kind of stream: steady frame sizes, no frame held
         // back. Not every Mac offers it, so it is asked for first and the ordinary real-time mode taken otherwise. Where
         // it only comes in software (seen in a macOS virtual machine) an ordinary hardware session wins.
@@ -53,7 +54,7 @@ final class VideoEncoder {
             if best?.hardware == true { break }
         }
         guard let chosen = best else {
-            throw HelperError("VideoToolbox could not create a \(codec.label) encoder for \(width)x\(height) (error \(status)).")
+            throw VideoError("VideoToolbox could not create a \(codec.label) encoder for \(width)x\(height) (error \(status)).")
         }
         self.codec = codec
         self.width = width
@@ -62,6 +63,7 @@ final class VideoEncoder {
         self.lowLatency = chosen.lowLatency
         self.isHardware = chosen.hardware
         self.output = output
+        self.log = log
 
         set(kVTCompressionPropertyKey_RealTime, kCFBooleanTrue)
         set(kVTCompressionPropertyKey_AllowFrameReordering, kCFBooleanFalse)
@@ -105,14 +107,14 @@ final class VideoEncoder {
         ) { status, _, sample in
             if status == noErr, let sample { output(sample) }
         }
-        if status != noErr { logLine("\(codec.label) encoder refused a frame (error \(status))") }
+        if status != noErr { log?("\(codec.label) encoder refused a frame (error \(status))") }
         return status == noErr
     }
 
     @discardableResult
     private func set(_ key: CFString, _ value: CFTypeRef) -> Bool {
         let status = VTSessionSetProperty(session, key: key, value: value)
-        if status != noErr { logLine("\(codec.label) encoder: \(key as String) not taken (error \(status))") }
+        if status != noErr { log?("\(codec.label) encoder: \(key as String) not taken (error \(status))") }
         return status == noErr
     }
 
@@ -122,6 +124,11 @@ final class VideoEncoder {
               let object = value?.takeRetainedValue() else { return false }
         return (object as? NSNumber)?.boolValue ?? false
     }
+}
+
+struct VideoError: Error, CustomStringConvertible {
+    let description: String
+    init(_ description: String) { self.description = description }
 }
 
 /// VideoToolbox hands out H.264/HEVC as length-prefixed NAL units with the parameter sets in the format description;

@@ -230,7 +230,9 @@ that makes RDP pleasant is outside the protocol for both targets:
 | Smart-card, printer, USB redirection | No | No | Out of scope. |
 
 The **BetterVNC guest agent** (`tools/BetterVnc.Agent`, one self-contained
-executable per OS) fills the clipboard gap over its own TCP port (default 5970):
+executable for Windows and for Linux; on macOS the native app in
+`tools/BetterVnc.Agent.Mac`, which implements the same protocol in Swift) fills
+the clipboard gap over its own TCP port (default 5970):
 
 * Wire format: `u32 headerLength, u32 payloadLength, UTF-8 JSON header, payload`.
   Messages: `hello`/`welcome` (handshake), `clipboardChanged` (push from the
@@ -259,8 +261,8 @@ executable per OS) fills the clipboard gap over its own TCP port (default 5970):
   for its settings.
 * Clipboard back ends: Windows Forms clipboard on a dedicated STA thread with
   `GetClipboardSequenceNumber` for change detection; `xclip` or `wl-clipboard`
-  on Linux with a content hash as change token; `pbcopy`/`pbpaste` plus JXA
-  (`NSPasteboard`) on macOS with `changeCount`.
+  on Linux with a content hash as change token; `NSPasteboard` in process on
+  macOS with `changeCount`.
 * Echo prevention: the agent records the change token its own `setClipboard`
   produced and does not announce it; the viewer remembers the sequence number
   of what it just placed on the Windows clipboard and the hashes of the last

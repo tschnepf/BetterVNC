@@ -1,16 +1,18 @@
 using System.Text;
 using BetterVnc.Agent.Protocol;
+#if WINDOWS
 using BetterVnc.Agent.Tray;
+#endif
 
 namespace BetterVnc.Agent;
 
-// BetterVNC guest agent. Run it inside the VM (or on the Mac) in the logged-in user's session; the viewer connects
+// BetterVNC guest agent for Windows and Linux (the macOS agent is the Swift app in tools/BetterVnc.Agent.Mac; it speaks
+// the same protocol). Run it inside the VM in the logged-in user's session; the viewer connects
 // to it next to the VNC session, mirrors images, files and HTML between the two clipboards and injects
 // high-resolution scrolling (the RFB wheel buttons only move a line per click on macOS).
 //
 // Viewers are let in either by pairing (the viewer asks, a dialog on this screen asks you to Allow, both sides keep a
-// derived key) or by a token/password set in the agent. On Windows the agent lives in the tray, on macOS in the menu
-// bar; both open the settings.
+// derived key) or by a token/password set in the agent. On Windows the agent lives in the tray, which opens the settings.
 public static class Program
 {
     private static string Version => typeof(Program).Assembly.GetName().Version?.ToString(3) ?? "?";
@@ -127,11 +129,11 @@ public static class Program
             BetterVNC guest agent
 
               bettervnc-agent install [--port <n>] [--listen <addr>] [--dry-run]
-                                         copy into place, register to start at login (Run entry / LaunchAgent /
-                                         systemd user service) and start now
+                                         copy into place, register to start at login (Run entry / systemd
+                                         user service) and start now
               bettervnc-agent uninstall [--dry-run]
               bettervnc-agent [--config <file>] [--port <n>] [--listen <addr>] [--token <t>] [--verbose] [--console]
-                                         serve; on Windows in the tray and on macOS in the menu bar unless --console
+                                         serve; on Windows in the tray unless --console
               bettervnc-agent token show | set <value> | generate | clear      token or password for token-mode viewers
               bettervnc-agent viewers [remove <name or id>]                     paired viewers
               bettervnc-agent pairing on | off                                  accept new pairings
@@ -171,6 +173,15 @@ public static class Program
 
     private static int Serve(string configPath, int? port, string? listen, string? token, bool verbose, bool console)
     {
+        var lockPath = SingleInstance.LockPath(configPath);
+        using var instance = SingleInstance.TryAcquire(lockPath);
+        if (instance == null)
+        {
+            // Exit 0: whatever started this copy (a second start at sign-in, a double click) has nothing to restart.
+            Console.WriteLine($"Another BetterVNC guest agent is already running with {configPath} (it holds {lockPath}); this copy exits.");
+            return 0;
+        }
+
         var cfg = LoadOrCreate(configPath, out var created);
         if (port is { } p) cfg.Port = p;
         if (listen != null) cfg.Listen = listen;
@@ -197,10 +208,6 @@ public static class Program
         Console.WriteLine($"Config: {configPath}  ({cfg.AuthSummary})");
         Console.WriteLine($"Input injection: {host.InputDescription}");
         Console.WriteLine($"Screen streaming: {host.VideoDescription}");
-#if !WINDOWS
-        if (host.Input is Input.MacInput mac && !mac.IsTrusted(prompt: false))
-            Console.WriteLine("  Accessibility permission missing: System Settings > Privacy & Security > Accessibility > turn on BetterVNC Agent. Scroll events are dropped until then.");
-#endif
         if (created) Console.WriteLine("New config written. Connect from BetterVNC and click Allow in the dialog that appears here, or set a token with 'bettervnc-agent token generate'.");
 
         try { host.Start(); }
@@ -208,15 +215,13 @@ public static class Program
         {
             Console.Error.WriteLine($"Cannot listen on {cfg.Listen}:{cfg.Port}: {ex.Message}");
             if (console) return 4;
-            // In tray / menu bar mode stay alive so the port can be changed in the settings.
+            // In tray mode stay alive so the port can be changed in the settings.
         }
 
         try
         {
 #if WINDOWS
             if (!console) { TrayApp.Run(host); return 0; }
-#else
-            if (!console && OperatingSystem.IsMacOS()) { MacStatusItem.Run(host); return 0; }
 #endif
             if (!host.IsListening) return 4;
             using var cts = new CancellationTokenSource();

@@ -8,7 +8,7 @@ namespace BetterVnc.Agent;
 
 /// <summary>
 /// Everything a running agent consists of: the config file, the clipboard and input back ends, the server and a log.
-/// The tray icon (Windows), the menu bar item (macOS) and the console front end all drive this one object; settings
+/// The tray icon (Windows) and the console front end drive this one object; settings
 /// changes go through <see cref="SaveAndRestartAsync"/>.
 /// </summary>
 public sealed class AgentHost : IAsyncDisposable
@@ -62,8 +62,6 @@ public sealed class AgentHost : IAsyncDisposable
     public event Action? Changed;
     /// <summary>A pairing was approved.</summary>
     public event Action<PairedViewer>? Paired;
-    /// <summary>macOS: a stream or a scroll was refused for want of Screen Recording or Accessibility; from any thread.</summary>
-    public event Action? PermissionsNeeded;
 
     public string StatusLine
     {
@@ -211,9 +209,10 @@ public sealed class AgentHost : IAsyncDisposable
 #if WINDOWS
         return new WindowsClipboard();
 #else
-        if (OperatingSystem.IsMacOS()) return new MacClipboard();
         if (OperatingSystem.IsLinux() || OperatingSystem.IsFreeBSD()) return new LinuxClipboard();
-        throw new PlatformNotSupportedException("This build of the agent supports Linux and macOS; use the Windows build on Windows.");
+        if (OperatingSystem.IsMacOS())
+            throw new PlatformNotSupportedException("on macOS the agent is BetterVNC Agent.app (tools/BetterVnc.Agent.Mac, or the macOS package).");
+        throw new PlatformNotSupportedException("This build of the agent supports Linux; use the Windows build on Windows.");
 #endif
     }
 
@@ -223,8 +222,6 @@ public sealed class AgentHost : IAsyncDisposable
         return cfg.EnableScroll || cfg.EnableInput ? new WindowsInput(cfg.ScrollScale, cfg.EnableScroll, cfg.EnableInput) : null;
 #else
         if (!cfg.EnableScroll) return null; // pointer and keys are Windows only so far
-        if (OperatingSystem.IsMacOS())
-            return new MacInput(cfg.ScrollScale, cfg.ScrollInvert, cfg.ScrollPhases) { Log = Log, AccessibilityMissing = PermissionsNeededHandler };
         if (OperatingSystem.IsLinux() || OperatingSystem.IsFreeBSD()) return LinuxInput.TryCreate(cfg.ScrollScale, Log);
         return null;
 #endif
@@ -235,26 +232,14 @@ public sealed class AgentHost : IAsyncDisposable
 #if WINDOWS
         return new Video.WindowsScreenSource { Log = Log };
 #else
-        if (OperatingSystem.IsMacOS()) return new Video.MacScreenSource { Log = Log, PermissionMissing = () => PermissionsNeededHandler() };
         return null; // a Linux (PipeWire) source is still to come
 #endif
-    }
-
-    /// <summary>Raises <see cref="PermissionsNeeded"/>; false when nothing listens (console mode), so the caller can fall back to macOS's own prompt.</summary>
-    private bool PermissionsNeededHandler()
-    {
-        var handlers = PermissionsNeeded;
-        if (handlers == null) return false;
-        try { handlers(); } catch (Exception ex) { Log("Permission wizard failed: " + ex.Message); }
-        return true;
     }
 
     public string VideoDescription => Video switch
     {
 #if WINDOWS
         Video.WindowsScreenSource w => w.Description,
-#else
-        Video.MacScreenSource m => m.Description,
 #endif
         null => !Config.EnableVideo ? "off" : _videoUnavailable != null ? "unavailable: " + _videoUnavailable : "not available on this OS yet",
         _ => Video.GetType().Name,
@@ -265,7 +250,6 @@ public sealed class AgentHost : IAsyncDisposable
 #if WINDOWS
         WindowsInput w => w.Description,
 #else
-        MacInput m => m.Description,
         LinuxInput l => l.Description,
 #endif
         null => "off",
@@ -277,7 +261,6 @@ public sealed class AgentHost : IAsyncDisposable
 #if WINDOWS
         return new WindowsApprover();
 #else
-        if (OperatingSystem.IsMacOS()) return new MacApprover();
         return new LinuxApprover(Log);
 #endif
     }
