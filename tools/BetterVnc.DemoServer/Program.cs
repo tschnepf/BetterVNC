@@ -6,6 +6,7 @@ using BetterVnc.Protocol;
 
 // A tiny RFB 3.8 server for development: animated test pattern, echoes pointer position and
 // typed keys, supports None or VNC-password auth, Raw encoding, legacy clipboard and bell, and QEMU audio (silence).
+// F12 toggles the desktop between its size and three quarters of it (DesktopSize), to watch a viewer follow a resize.
 // Usage: BetterVnc.DemoServer [port] [password] [--size <width>x<height>]
 // --size replaces the 800x500 desktop, e.g. with the size of a multi-monitor desktop that a guest agent streams part of.
 
@@ -71,23 +72,47 @@ static void Serve(TcpClient tcp, string? password, int W, int H)
         int mouseX = W / 2, mouseY = H / 2;
         byte buttons = 0;
         var typed = new StringBuilder();
+        int width = W, height = H;
         var frame = new byte[W * H * 4];
         var sendLock = new object();
         int tick = 0;
         bool audioOffered = false, audioAcknowledged = false;
+        bool resizeOffered = false, resizePending = false;
+
+        // F12 switches between the desktop's size and three quarters of it.
+        void ToggleSize(uint keysym)
+        {
+            if (keysym != Keysym.F1 + 11 || !resizeOffered) return;
+            lock (sendLock)
+            {
+                (width, height) = width == W ? (W * 3 / 4, H * 3 / 4) : (W, H);
+                frame = new byte[width * height * 4];
+                mouseX = Math.Min(mouseX, width - 1);
+                mouseY = Math.Min(mouseY, height - 1);
+                resizePending = true;
+            }
+            Console.WriteLine($"Desktop resized to {width}x{height}");
+        }
 
         void SendFrame()
         {
-            tick++;
-            RenderPattern(frame, W, H, tick, mouseX, mouseY, buttons, typed.ToString());
-            var b = new RfbMessageBuilder();
-            // The first update after the client offered QEMU audio acknowledges it with a pseudo-rectangle.
-            bool ack = audioOffered && !audioAcknowledged;
-            audioAcknowledged |= ack;
-            b.U8(ServerMessage.FramebufferUpdate).Pad(1).U16((ushort)(ack ? 2 : 1));
-            if (ack) b.U16(0).U16(0).U16(0).U16(0).S32(RfbEncoding.QemuAudio);
-            b.U16(0).U16(0).U16(W).U16(H).S32(RfbEncoding.Raw).Bytes(frame);
-            lock (sendLock) Write(b.Data);
+            lock (sendLock)
+            {
+                tick++;
+                RenderPattern(frame, width, height, tick, mouseX, mouseY, buttons, typed.ToString());
+                var b = new RfbMessageBuilder();
+                // The first update after the client offered QEMU audio acknowledges it with a pseudo-rectangle.
+                bool ack = audioOffered && !audioAcknowledged;
+                audioAcknowledged |= ack;
+                bool resize = resizePending;
+                resizePending = false;
+                b.U8(ServerMessage.FramebufferUpdate).Pad(1).U16((ushort)(1 + (ack ? 1 : 0) + (resize ? 1 : 0)));
+                if (ack) b.U16(0).U16(0).U16(0).U16(0).S32(RfbEncoding.QemuAudio);
+                // The new size comes first, so the client has resized its framebuffer when the new pixels arrive.
+                if (resize) b.U16(0).U16(0).U16(width).U16(height).S32(RfbEncoding.DesktopSize);
+                b.U16(0).U16(0).U16(width).U16(height).S32(RfbEncoding.Raw).Bytes(frame);
+                Write(b.Data);
+            }
         }
 
         while (true)
@@ -107,6 +132,7 @@ static void Serve(TcpClient tcp, string? password, int W, int H)
                     for (int i = 0; i < n; i++) encs.Add(r.ReadS32());
                     Console.WriteLine("Client encodings: " + string.Join(", ", encs.Select(RfbEncoding.Name)));
                     audioOffered = encs.Contains(RfbEncoding.QemuAudio);
+                    resizeOffered = encs.Contains(RfbEncoding.DesktopSize);
                     break;
                 case ClientMessage.FramebufferUpdateRequest:
                     r.ReadBytes(9);
@@ -119,6 +145,7 @@ static void Serve(TcpClient tcp, string? password, int W, int H)
                     r.Skip(2);
                     uint keysym = r.ReadU32();
                     if (down) AppendKey(typed, keysym);
+                    if (down) ToggleSize(keysym);
                     Console.WriteLine($"Key {(down ? "down" : "up  ")} 0x{keysym:X}");
                     break;
                 }
@@ -160,6 +187,7 @@ static void Serve(TcpClient tcp, string? password, int W, int H)
                         bool down = r.ReadU16() != 0;
                         uint keysym = r.ReadU32(), keycode = r.ReadU32();
                         if (down) AppendKey(typed, keysym);
+                        if (down) ToggleSize(keysym);
                         Console.WriteLine($"Key {(down ? "down" : "up  ")} 0x{keysym:X} (XT 0x{keycode:X})");
                     }
                     else
