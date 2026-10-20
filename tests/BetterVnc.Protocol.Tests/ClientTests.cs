@@ -489,6 +489,30 @@ public class ClientTests
     }
 
     [Fact]
+    public async Task NumLock_and_Pause_reach_qemu_with_their_own_key_numbers()
+    {
+        var (server, client) = await ConnectAsync();
+        using (server) using (client)
+        {
+            var upd = NextUpdate(client);
+            server.SendUpdate(
+                new FakeRfbServer.Rect(0, 0, 64, 48, RfbEncoding.QemuExtendedKeyEvent, Array.Empty<byte>()),
+                new FakeRfbServer.Rect(0, 0, 1, 1, RfbEncoding.Raw, Bgrx(1, 1)));
+            await upd;
+
+            client.SendKeyEvent(Keysym.NumLock, true, XtScancode.FromWindows(0x45, extended: true));
+            var numLock = server.WaitFor(ClientMessage.Qemu);
+            Assert.Equal(Keysym.NumLock, BinaryPrimitives.ReadUInt32BigEndian(numLock.Payload.AsSpan(3)));
+            Assert.Equal(0x45u, BinaryPrimitives.ReadUInt32BigEndian(numLock.Payload.AsSpan(7)));
+
+            client.SendKeyEvent(Keysym.Pause, true, XtScancode.FromWindows(0x45, extended: false));
+            var pause = server.WaitFor(ClientMessage.Qemu);
+            Assert.Equal(Keysym.Pause, BinaryPrimitives.ReadUInt32BigEndian(pause.Payload.AsSpan(3)));
+            Assert.Equal(0xC6u, BinaryPrimitives.ReadUInt32BigEndian(pause.Payload.AsSpan(7)));
+        }
+    }
+
+    [Fact]
     public async Task Pointer_events_are_clamped_and_encoded()
     {
         var (server, client) = await ConnectAsync();
