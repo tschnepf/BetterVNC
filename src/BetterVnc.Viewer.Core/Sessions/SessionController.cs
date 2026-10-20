@@ -429,6 +429,8 @@ public sealed class SessionController : IDisposable
     {
         var client = Client;
         if (client == null) return;
+        // The format check does not open the clipboard, so a copy without text never waits for whoever holds it open.
+        if (!_clipboard.GetFormats().Contains(AgentFormat.Text)) return;
         string? text = null;
         for (int attempt = 0; attempt < 3 && text == null; attempt++)
         {

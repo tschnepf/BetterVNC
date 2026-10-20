@@ -217,11 +217,13 @@ public sealed class VideoStreamPlayer : IDisposable
         long now = Environment.TickCount64;
         if (now - Interlocked.Read(ref _lastKeyframeRequest) < 500) return;
         Interlocked.Exchange(ref _lastKeyframeRequest, now);
-        _ui.Post(async () =>
-        {
-            try { await _agent.SetStreamAsync(null, null, keyframe: true); }
-            catch (Exception ex) { Message?.Invoke("Key frame request failed: " + ex.Message); }
-        });
+        _ui.Post(() => _ = SendKeyframeRequestAsync());
+    }
+
+    private async Task SendKeyframeRequestAsync()
+    {
+        try { await _agent.SetStreamAsync(null, null, keyframe: true); }
+        catch (Exception ex) { Message?.Invoke("Key frame request failed: " + ex.Message); }
     }
 
     /// <summary>Puts a line in the status bar and the trace log (the decoder and presentation path in use, fallbacks).</summary>

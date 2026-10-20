@@ -68,17 +68,29 @@ public sealed class WindowsClipboard : ILocalClipboard, IDisposable
         return seq == 0 ? null : seq.ToString();
     }
 
-    public IReadOnlyList<string> GetFormats() => OnSta(() =>
+    private const uint CF_TEXT = 1, CF_BITMAP = 2, CF_DIB = 8, CF_UNICODETEXT = 13, CF_HDROP = 15, CF_DIBV5 = 17;
+    private static readonly uint CfHtml = RegisterClipboardFormat(DataFormats.Html);
+    private static readonly uint CfPng = RegisterClipboardFormat(PngFormat);
+
+    [DllImport("user32.dll")]
+    private static extern bool IsClipboardFormatAvailable(uint format);
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+    private static extern uint RegisterClipboardFormat(string format);
+
+    /// <summary>
+    /// Asks Windows which formats are on the clipboard without opening it, from any thread, so it never waits for an
+    /// application that holds the clipboard open (Windows Forms' Contains checks open it and retry for a second).
+    /// </summary>
+    public IReadOnlyList<string> GetFormats()
     {
         var list = new List<string>();
-        var data = Clipboard.GetDataObject();
-        if (data == null) return list;
-        if (data.GetDataPresent(DataFormats.UnicodeText) || data.GetDataPresent(DataFormats.Text)) list.Add(AgentFormat.Text);
-        if (data.GetDataPresent(DataFormats.Html)) list.Add(AgentFormat.Html);
-        if (data.GetDataPresent(PngFormat) || data.GetDataPresent(DataFormats.Bitmap) || data.GetDataPresent(DataFormats.Dib)) list.Add(AgentFormat.Png);
-        if (data.GetDataPresent(DataFormats.FileDrop)) list.Add(AgentFormat.Files);
+        if (IsClipboardFormatAvailable(CF_UNICODETEXT) || IsClipboardFormatAvailable(CF_TEXT)) list.Add(AgentFormat.Text);
+        if (CfHtml != 0 && IsClipboardFormatAvailable(CfHtml)) list.Add(AgentFormat.Html);
+        if ((CfPng != 0 && IsClipboardFormatAvailable(CfPng)) || IsClipboardFormatAvailable(CF_BITMAP)
+            || IsClipboardFormatAvailable(CF_DIB) || IsClipboardFormatAvailable(CF_DIBV5)) list.Add(AgentFormat.Png);
+        if (IsClipboardFormatAvailable(CF_HDROP)) list.Add(AgentFormat.Files);
         return list;
-    });
+    }
 
     public byte[]? GetData(string format) => OnSta<byte[]?>(() =>
     {
