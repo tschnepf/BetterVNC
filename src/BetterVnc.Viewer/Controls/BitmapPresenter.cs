@@ -21,6 +21,7 @@ internal sealed class BitmapPresenter : Control, IPicturePresenter
     private readonly CpuPictureSource _source = new();
     private readonly Action _frameShown;
     private int _updateQueued;
+    private bool _disposed;
     private WriteableBitmap? _framebuffer, _stream;
     private (int X, int Y)? _streamOffset;
     private PixelRect _destination;
@@ -69,6 +70,7 @@ internal sealed class BitmapPresenter : Control, IPicturePresenter
     private unsafe void Update()
     {
         Volatile.Write(ref _updateQueued, 0);
+        if (_disposed) return; // an update queued before the presenter was let go
         bool changed = false;
         var rects = _source.TakeDirty(out bool all);
         var fb = _source.Framebuffer;
@@ -147,8 +149,10 @@ internal sealed class BitmapPresenter : Control, IPicturePresenter
 
     public void Dispose()
     {
+        _disposed = true;
         _source.Changed -= QueueUpdate;
         _framebuffer?.Dispose();
         _stream?.Dispose();
+        _framebuffer = _stream = null;
     }
 }
