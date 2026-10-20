@@ -13,7 +13,7 @@ public sealed class WpfUiThread : IUiThread
     public bool CheckAccess() => _dispatcher.CheckAccess();
 
     public void Post(Action action, UiPriority priority = UiPriority.Normal) =>
-        _dispatcher.BeginInvoke(action, priority == UiPriority.Background ? DispatcherPriority.Background : DispatcherPriority.Normal);
+        _dispatcher.BeginInvoke(priority == UiPriority.Background ? DispatcherPriority.Background : DispatcherPriority.Normal, action);
 
     public Task InvokeAsync(Action action) => _dispatcher.InvokeAsync(action).Task;
 
