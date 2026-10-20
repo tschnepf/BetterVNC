@@ -4,52 +4,6 @@ using BetterVnc.Media.Interop;
 namespace BetterVnc.Media;
 
 /// <summary>
-/// A decoded picture in NV12: either in system memory (<see cref="Y"/>, <see cref="UV"/>) or, from a hardware decoder,
-/// a slice of a Direct3D 11 texture (<see cref="IsTexture"/>; hand it to <see cref="VideoRenderer.Present(in DecodedFrame)"/>).
-/// Pointers and textures are valid only inside the callback that delivers the frame.
-/// </summary>
-public readonly struct DecodedFrame
-{
-    public DecodedFrame(IntPtr y, IntPtr uv, int stride, int width, int height, long timestampMicros)
-    {
-        Y = y; UV = uv; Stride = stride; Width = width; Height = height; TimestampMicros = timestampMicros;
-    }
-
-    internal DecodedFrame(IntPtr texture, uint subresource, int offsetX, int offsetY, int width, int height, long timestampMicros)
-    {
-        Texture = texture; Subresource = subresource; OffsetX = offsetX; OffsetY = offsetY;
-        Width = width; Height = height; TimestampMicros = timestampMicros;
-    }
-
-    /// <summary>First visible luma byte (zero for a texture frame).</summary>
-    public IntPtr Y { get; }
-    /// <summary>First visible interleaved chroma pair (zero for a texture frame).</summary>
-    public IntPtr UV { get; }
-    public int Stride { get; }
-    public int Width { get; }
-    public int Height { get; }
-    public long TimestampMicros { get; }
-
-    /// <summary>The picture lives on the GPU (hardware decode); <see cref="ToBgrx"/> is not available.</summary>
-    public bool IsTexture => Texture != IntPtr.Zero;
-    /// <summary>ID3D11Texture2D (NV12, often a texture array the decoder owns) and the slice holding this picture.</summary>
-    internal IntPtr Texture { get; }
-    internal uint Subresource { get; }
-    /// <summary>Where the visible picture starts inside the texture (the decoder's surfaces are padded to whole macroblocks).</summary>
-    internal int OffsetX { get; }
-    internal int OffsetY { get; }
-
-    /// <summary>Writes the picture as BGRX, Width*4 bytes per row, into <paramref name="bgrx"/> (at least Width*Height*4 bytes).</summary>
-    public unsafe void ToBgrx(byte[] bgrx)
-    {
-        if (IsTexture) throw new InvalidOperationException("The picture is a GPU texture; present it with VideoRenderer.");
-        if (bgrx.Length < Width * Height * 4) throw new ArgumentException("Buffer too small.");
-        fixed (byte* d = bgrx)
-            PixelConvert.Nv12ToBgrx((byte*)Y, Stride, (byte*)UV, Stride, Width, Height, d, Width * 4);
-    }
-}
-
-/// <summary>
 /// H.264 decoding with Microsoft's Media Foundation decoder in low-latency mode: every access unit fed in comes
 /// out as a picture right away (the agent sends no B-frames). Resolution changes mid-stream (a new SPS) are
 /// followed automatically; <see cref="Width"/> and <see cref="Height"/> are the visible size of the last picture.
@@ -58,10 +12,8 @@ public readonly struct DecodedFrame
 /// software exactly as without a device (<see cref="IsHardware"/>, <see cref="HardwareFailure"/>).
 /// All methods must be called from one thread.
 /// </summary>
-public sealed unsafe class H264Decoder : IDisposable
+public sealed unsafe class H264Decoder : IH264Decoder
 {
-    public delegate void FrameHandler(in DecodedFrame frame);
-
     private IMFActivate? _activate;
     private IMFTransform _mft = null!;
     private IMFSample? _outputSample;
@@ -219,7 +171,7 @@ public sealed unsafe class H264Decoder : IDisposable
     /// Feeds one Annex B access unit and delivers the pictures that come out (usually exactly one). Returns the
     /// number of pictures delivered.
     /// </summary>
-    public int Decode(ReadOnlySpan<byte> annexB, long timestampMicros, FrameHandler onFrame)
+    public int Decode(ReadOnlySpan<byte> annexB, long timestampMicros, DecodedFrameHandler onFrame)
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
         if (annexB.Length == 0) return 0;
@@ -252,7 +204,7 @@ public sealed unsafe class H264Decoder : IDisposable
         return delivered;
     }
 
-    private int DrainOutput(FrameHandler onFrame)
+    private int DrainOutput(DecodedFrameHandler onFrame)
     {
         int delivered = 0;
         while (true)
@@ -286,7 +238,7 @@ public sealed unsafe class H264Decoder : IDisposable
         }
     }
 
-    private void Deliver(IMFSample sample, FrameHandler onFrame)
+    private void Deliver(IMFSample sample, DecodedFrameHandler onFrame)
     {
         sample.GetSampleTime(out var time);
         MF.Check(sample.GetBufferByIndex(0, out var buffer), "GetBufferByIndex");
@@ -346,7 +298,7 @@ public sealed unsafe class H264Decoder : IDisposable
     }
 
     /// <summary>Asks for every picture the decoder still holds; the end of a stream, not something to do per frame (the decoder stops accepting input afterwards).</summary>
-    public int Drain(FrameHandler onFrame)
+    public int Drain(DecodedFrameHandler onFrame)
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
         MF.Check(_mft.ProcessMessage(MF.MFT_MESSAGE_COMMAND_DRAIN, UIntPtr.Zero), "drain");

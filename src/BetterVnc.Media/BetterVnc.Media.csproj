@@ -1,13 +1,14 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
   <!--
-    Windows media plumbing shared by the viewer and the Windows build of the guest agent: Media Foundation H.264
-    encoder and decoder wrappers, DXGI Desktop Duplication capture, and the BGRA/NV12 pixel conversions between
-    them. Plain COM interop over mfplat/d3d11/dxgi; no NuGet packages, so the agent's single-file publish stays simple.
+    The portable half of the media plumbing, shared by the viewer and the guest agent on every OS: the SIMD BGRA/NV12
+    conversions, Annex B parsing, dirty regions, the stream's frame-rate governor, video placement, and the decoded
+    picture and decoder shapes each OS's video backend implements. Plain C#, no native code. The Windows backend
+    (Media Foundation, Direct3D 11, Desktop Duplication) is BetterVnc.Media.Windows.
   -->
 
   <PropertyGroup>
-    <TargetFramework>net10.0-windows</TargetFramework>
+    <TargetFramework>net10.0</TargetFramework>
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>

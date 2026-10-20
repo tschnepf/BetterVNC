@@ -79,7 +79,7 @@
 
   <ItemGroup Condition="'$(TargetFramework)' == 'net10.0-windows'">
     <!-- Media Foundation H.264 encoder and Desktop Duplication capture for the screen stream. -->
-    <ProjectReference Include="..\..\src\BetterVnc.Media\BetterVnc.Media.csproj" />
+    <ProjectReference Include="..\..\src\BetterVnc.Media.Windows\BetterVnc.Media.Windows.csproj" />
   </ItemGroup>
 
   <!--
