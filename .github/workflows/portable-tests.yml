@@ -1,0 +1,68 @@
+# Builds and runs the portable test projects (everything that targets plain net10.0) on Linux, macOS and Windows
+# whenever the libraries, the tests or this workflow change. Each failed test becomes an error annotation at its line in
+# tests/, and each assembly's totals a notice, so the results show on the run's summary page and through the checks API.
+name: Portable tests
+
+on:
+  # Every branch, so a pull request shows the result on its commits.
+  push:
+    paths:
+      - 'src/**'
+      - 'tests/**'
+      # The agent tests compile some of the agent's own files (the Mac capture helper's reader, the app bundle).
+      - 'tools/BetterVnc.Agent/**'
+      - '.github/workflows/portable-tests.yml'
+      - '.github/scripts/xunit-annotations.awk'
+  workflow_dispatch:
+
+concurrency:
+  group: portable-tests-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  DOTNET_NOLOGO: true
+  DOTNET_CLI_TELEMETRY_OPTOUT: true
+  TESTS: BetterVnc.Protocol.Tests BetterVnc.Agent.Tests BetterVnc.Media.Tests BetterVnc.Viewer.Core.Tests
+
+jobs:
+  test:
+    name: Tests (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+      - name: Build
+        # BetterVnc.Platform also targets net10.0-windows; EnableWindowsTargeting lets restore fetch that target's
+        # reference packs on Linux and macOS. The tests only build and load its net10.0 target.
+        run: |
+          for t in $TESTS; do
+            dotnet build "tests/$t" -c Release -p:EnableWindowsTargeting=true
+          done
+      - name: Test
+        # The test projects are executables (xunit.v3), run as `dotnet <dll>` as in release.yml; the .NET 10 SDK's
+        # `dotnet test` no longer drives them in VSTest mode. Every assembly runs even when an earlier one fails.
+        timeout-minutes: 10
+        run: |
+          mkdir -p test-logs
+          failed=""
+          for t in $TESTS; do
+            if ! dotnet "tests/$t/bin/Release/net10.0/$t.dll" -noColor -noLogo -longRunning 60 2>&1 | tee "test-logs/$t.log"; then
+              failed="$failed $t"
+            fi
+          done
+          if [ -n "$failed" ]; then echo "Failed:$failed"; exit 1; fi
+      - name: Report
+        if: always()
+        run: |
+          ls test-logs/*.log > /dev/null 2>&1 || exit 0
+          awk -v ws="$GITHUB_WORKSPACE" -v os="$RUNNER_OS" -f .github/scripts/xunit-annotations.awk test-logs/*.log
