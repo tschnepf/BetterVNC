@@ -28,7 +28,8 @@
   </ItemGroup>
 
   <ItemGroup>
-    <ProjectReference Include="..\..\src\BetterVnc.Media\BetterVnc.Media.csproj" />
+    <!-- The Windows video backend (H.264 encoder and decoder, Direct3D 11 device, swap chain); it brings BetterVnc.Media. -->
+    <ProjectReference Include="..\..\src\BetterVnc.Media.Windows\BetterVnc.Media.Windows.csproj" />
     <ProjectReference Include="..\..\src\BetterVnc.Protocol\BetterVnc.Protocol.csproj" />
   </ItemGroup>
 
