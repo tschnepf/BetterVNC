@@ -17,6 +17,8 @@
 
   <ItemGroup>
     <ProjectReference Include="..\..\src\BetterVnc.Agent.Protocol\BetterVnc.Agent.Protocol.csproj" />
+    <!-- ProcessRunner, which the linked Mac files below use. -->
+    <ProjectReference Include="..\..\src\BetterVnc.Platform\BetterVnc.Platform.csproj" />
   </ItemGroup>
 
   <ItemGroup>
@@ -26,7 +28,6 @@
     <!-- Only its helper command line is tested here; the rest needs a Mac. -->
     <Compile Include="..\..\tools\BetterVnc.Agent\Video\MacScreenSource.cs" Link="Linked\MacScreenSource.cs" />
     <Compile Include="..\..\tools\BetterVnc.Agent\MacPermissions.cs" Link="Linked\MacPermissions.cs" />
-    <Compile Include="..\..\tools\BetterVnc.Agent\Clipboards\ProcessRunner.cs" Link="Linked\ProcessRunner.cs" />
   </ItemGroup>
 
 </Project>

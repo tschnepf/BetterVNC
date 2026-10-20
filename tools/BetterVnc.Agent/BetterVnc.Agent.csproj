@@ -63,7 +63,6 @@
   </ItemGroup>
 
   <ItemGroup Condition="'$(TargetFramework)' != 'net10.0-windows'">
-    <Compile Remove="Clipboards\WindowsClipboard.cs" />
     <Compile Remove="Input\WindowsInput.cs" />
     <Compile Remove="Video\WindowsScreenSource.cs" />
     <Compile Remove="Video\H264ScreenSession.cs" />
@@ -75,6 +74,8 @@
 
   <ItemGroup>
     <ProjectReference Include="..\..\src\BetterVnc.Agent.Protocol\BetterVnc.Agent.Protocol.csproj" />
+    <!-- The clipboards (Windows Forms, xclip / wl-clipboard, pbcopy / osascript), shared with the viewer. -->
+    <ProjectReference Include="..\..\src\BetterVnc.Platform\BetterVnc.Platform.csproj" />
   </ItemGroup>
 
   <ItemGroup Condition="'$(TargetFramework)' == 'net10.0-windows'">

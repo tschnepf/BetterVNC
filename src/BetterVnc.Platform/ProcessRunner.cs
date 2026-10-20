@@ -1,9 +1,9 @@
 using System.Diagnostics;
 
-namespace BetterVnc.Agent.Clipboards;
+namespace BetterVnc.Platform;
 
 /// <summary>Runs clipboard helper tools (xclip, wl-copy, pbpaste, osascript, ...) with binary stdin/stdout.</summary>
-internal static class ProcessRunner
+public static class ProcessRunner
 {
     public sealed record Result(int ExitCode, byte[] Stdout, string Stderr)
     {

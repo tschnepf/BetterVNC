@@ -1,8 +1,8 @@
 using System.Net;
-using BetterVnc.Agent.Clipboards;
 using BetterVnc.Agent.Input;
 using BetterVnc.Agent.Pairing;
 using BetterVnc.Agent.Protocol;
+using BetterVnc.Platform.Clipboards;
 
 namespace BetterVnc.Agent;
 

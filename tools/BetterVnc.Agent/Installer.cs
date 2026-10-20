@@ -1,6 +1,6 @@
 using System.Diagnostics;
 using System.Text;
-using BetterVnc.Agent.Clipboards;
+using BetterVnc.Platform;
 using Microsoft.Win32;
 using BetterVnc.Agent.Protocol;
 

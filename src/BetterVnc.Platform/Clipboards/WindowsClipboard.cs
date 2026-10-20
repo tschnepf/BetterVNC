@@ -1,5 +1,6 @@
 using System.Collections.Concurrent;
 using System.Collections.Specialized;
+using System.ComponentModel;
 using System.Drawing;
 using System.Drawing.Imaging;
 using System.Runtime.InteropServices;
@@ -7,19 +8,23 @@ using System.Text;
 using System.Windows.Forms;
 using BetterVnc.Agent.Protocol;
 
-namespace BetterVnc.Agent.Clipboards;
+namespace BetterVnc.Platform.Clipboards;
 
 /// <summary>
-/// Windows clipboard through Windows Forms. Every call is marshalled onto one dedicated STA thread because OLE
-/// clipboard access requires it. Change detection uses the clipboard sequence number, which is cheap and exact.
+/// Windows clipboard through Windows Forms, for the agent and the viewer alike. Every call is marshalled onto one
+/// dedicated STA thread because OLE clipboard access requires it. Change detection uses the clipboard sequence number,
+/// which is cheap and exact; <see cref="Changed"/> comes from a clipboard format listener.
 /// </summary>
-public sealed class WindowsClipboard : IGuestClipboard, IDisposable
+public sealed class WindowsClipboard : ILocalClipboard, IDisposable
 {
     private const string PngFormat = "PNG";
     private const string DropEffectFormat = "Preferred DropEffect";
 
     private readonly BlockingCollection<Action> _queue = new();
     private readonly Thread _thread;
+    private readonly object _listenerLock = new();
+    private Action? _changed;
+    private ChangeListener? _listener;
 
     public WindowsClipboard()
     {
@@ -34,6 +39,25 @@ public sealed class WindowsClipboard : IGuestClipboard, IDisposable
 
     public string OsName => "windows";
     public TimeSpan PollInterval => TimeSpan.FromMilliseconds(250);
+
+    /// <summary>
+    /// From a message-only window registered as a clipboard format listener (WM_CLIPBOARDUPDATE), on a thread of its own
+    /// that the first handler starts. The agent polls the sequence number instead and never starts it.
+    /// </summary>
+    public event Action? Changed
+    {
+        add
+        {
+            lock (_listenerLock)
+            {
+                _changed += value;
+                if (_listener != null) return;
+                try { _listener = ChangeListener.Start(() => Volatile.Read(ref _changed)?.Invoke()); }
+                catch (Exception ex) { System.Diagnostics.Trace.WriteLine("BetterVNC clipboard: no change listener: " + ex.Message); }
+            }
+        }
+        remove { lock (_listenerLock) _changed -= value; }
+    }
 
     [DllImport("user32.dll")]
     private static extern uint GetClipboardSequenceNumber();
@@ -186,5 +210,79 @@ public sealed class WindowsClipboard : IGuestClipboard, IDisposable
         return tcs.Task.GetAwaiter().GetResult();
     }
 
-    public void Dispose() => _queue.CompleteAdding();
+    public void Dispose()
+    {
+        lock (_listenerLock) _listener?.Stop();
+        _queue.CompleteAdding();
+    }
+
+    /// <summary>A message-only window with a message loop of its own, told about every clipboard change.</summary>
+    private sealed class ChangeListener : NativeWindow
+    {
+        private const int WM_CLOSE = 0x0010, WM_CLIPBOARDUPDATE = 0x031D;
+        private static readonly IntPtr HWND_MESSAGE = new(-3);
+        private readonly Action _changed;
+
+        private ChangeListener(Action changed) => _changed = changed;
+
+        public static ChangeListener Start(Action changed)
+        {
+            var listener = new ChangeListener(changed);
+            var ready = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var thread = new Thread(() =>
+            {
+                try
+                {
+                    listener.CreateHandle(new CreateParams { Parent = HWND_MESSAGE });
+                    if (!AddClipboardFormatListener(listener.Handle)) throw new Win32Exception();
+                    ready.SetResult();
+                }
+                catch (Exception ex)
+                {
+                    if (listener.Handle != IntPtr.Zero) listener.DestroyHandle();
+                    ready.SetException(ex);
+                    return;
+                }
+                Application.Run();
+            })
+            {
+                IsBackground = true,
+                Name = "clipboard-listener",
+            };
+            thread.SetApartmentState(ApartmentState.STA);
+            thread.Start();
+            ready.Task.GetAwaiter().GetResult();
+            return listener;
+        }
+
+        public void Stop()
+        {
+            var hwnd = Handle;
+            if (hwnd != IntPtr.Zero) PostMessage(hwnd, WM_CLOSE, IntPtr.Zero, IntPtr.Zero);
+        }
+
+        protected override void WndProc(ref Message m)
+        {
+            switch (m.Msg)
+            {
+                case WM_CLIPBOARDUPDATE:
+                    try { _changed(); }
+                    catch (Exception ex) { System.Diagnostics.Trace.WriteLine("BetterVNC clipboard: change handler failed: " + ex.Message); }
+                    return;
+                case WM_CLOSE:
+                    RemoveClipboardFormatListener(Handle);
+                    DestroyHandle();
+                    Application.ExitThread();
+                    return;
+            }
+            base.WndProc(ref m);
+        }
+
+        [DllImport("user32.dll", SetLastError = true)]
+        private static extern bool AddClipboardFormatListener(IntPtr hwnd);
+        [DllImport("user32.dll")]
+        private static extern bool RemoveClipboardFormatListener(IntPtr hwnd);
+        [DllImport("user32.dll")]
+        private static extern bool PostMessage(IntPtr hwnd, int msg, IntPtr wParam, IntPtr lParam);
+    }
 }

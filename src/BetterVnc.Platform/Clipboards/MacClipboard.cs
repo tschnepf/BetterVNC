@@ -1,16 +1,23 @@
 using System.Text;
 using BetterVnc.Agent.Protocol;
 
-namespace BetterVnc.Agent.Clipboards;
+namespace BetterVnc.Platform.Clipboards;
 
 /// <summary>
 /// macOS clipboard through <c>pbpaste</c>/<c>pbcopy</c> for text and <c>osascript</c> (JavaScript for Automation, which
 /// can call AppKit's NSPasteboard) for images, files, HTML and the change counter. Binary data goes through temporary
 /// files so nothing has to be quoted into a script.
 /// </summary>
-public sealed class MacClipboard : IGuestClipboard
+public sealed class MacClipboard : ILocalClipboard
 {
     private const string Prelude = "ObjC.import('AppKit'); var pb = $.NSPasteboard.generalPasteboard; var env = $.NSProcessInfo.processInfo.environment; ";
+
+    private readonly ClipboardPoller _poller;
+
+    public MacClipboard() => _poller = new ClipboardPoller(this);
+
+    /// <summary>Polled every <see cref="PollInterval"/>: the helper tools offer no change notification.</summary>
+    public event Action? Changed { add => _poller.Add(value); remove => _poller.Remove(value); }
 
     public string OsName => "macos";
     public TimeSpan PollInterval => TimeSpan.FromSeconds(1);

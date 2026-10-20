@@ -2,19 +2,21 @@ using System.Security.Cryptography;
 using System.Text;
 using BetterVnc.Agent.Protocol;
 
-namespace BetterVnc.Agent.Clipboards;
+namespace BetterVnc.Platform.Clipboards;
 
 /// <summary>
 /// Linux clipboard through <c>wl-paste</c>/<c>wl-copy</c> (Wayland) or <c>xclip</c> (X11). Neither protocol has a cheap
 /// change counter a separate process can read, so the change token is a hash of the clipboard's target list plus the
 /// content of the most relevant target, polled once a second.
 /// </summary>
-public sealed class LinuxClipboard : IGuestClipboard
+public sealed class LinuxClipboard : ILocalClipboard
 {
     private readonly bool _wayland;
+    private readonly ClipboardPoller _poller;
 
     public LinuxClipboard()
     {
+        _poller = new ClipboardPoller(this);
         bool haveWayland = !string.IsNullOrEmpty(Environment.GetEnvironmentVariable("WAYLAND_DISPLAY"));
         bool haveX11 = !string.IsNullOrEmpty(Environment.GetEnvironmentVariable("DISPLAY"));
         if (haveWayland && ProcessRunner.Exists("wl-paste") && ProcessRunner.Exists("wl-copy")) _wayland = true;
@@ -23,6 +25,9 @@ public sealed class LinuxClipboard : IGuestClipboard
         else if (haveX11) throw new InvalidOperationException("X11 session detected but xclip is not installed (apt install xclip).");
         else throw new InvalidOperationException("No DISPLAY or WAYLAND_DISPLAY in the environment; the agent must run inside the desktop session.");
     }
+
+    /// <summary>Polled every <see cref="PollInterval"/>: the helper tools offer no change notification.</summary>
+    public event Action? Changed { add => _poller.Add(value); remove => _poller.Remove(value); }
 
     public string OsName => "linux";
     public TimeSpan PollInterval => TimeSpan.FromSeconds(1);
