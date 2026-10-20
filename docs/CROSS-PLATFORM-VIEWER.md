@@ -183,6 +183,51 @@ Answer the four questions that decide the design.
 **Done when:** every row of the README's feature table works in the Avalonia build on Windows, including the stream
 modes on the GPU path and Windows-key capture in fullscreen.
 
+**Progress (2026-10-20):** `src/BetterVnc.Viewer`, with steps 1, 2, 4, 5, 6 and 7 in place.
+
+- **The picture:** `VncView` draws through `IPicturePresenter`, which has three implementations:
+  - `SwapChainPresenter`: `VideoRenderer`, with its new framebuffer picture, in a `NativeControlHost`. The child window
+    and Avalonia's holder window both return `HTTRANSPARENT`, so the mouse reaches the Avalonia window.
+  - `GlPresenter` and `BitmapPresenter`: the fallbacks. Each is taken in turn when the one before fails, at start or
+    mid-session. `BETTERVNC_PICTURE=gl|bitmap` forces one.
+- **Popups:** menus, tooltips and drop-downs show over the native surface, as Phase 0 expected.
+- **Not done yet:**
+  - Step 3's `PhysicalKey` table, `IKeyboardLayout` and `ISystemKeyCapture`. Windows keeps raw scancodes and
+    `ToUnicodeEx` (Phase 0), so these move to Phase 3, where macOS first needs them.
+  - Step 8 (retiring WPF), which waits for the preview.
+- **JPEG (step 6):** SkiaSharp decodes exactly what WIC does.
+  - Tight-sized rectangles (64×64): 2.5–2.9× faster than WIC.
+  - 256×256: as fast as WIC.
+  - Whole 1080p to 4K frames: 1.2–1.6× slower (8.5–42 ms against 6.4–32 ms). Only legacy motion JPEG streams use
+    frames that large.
+
+Checks, run against the real windows on a scratch profile store (the WPF viewer's profiles untouched), with the test
+windows never activated except for fullscreen:
+
+| README row | Checked |
+|---|---|
+| Unraid | The server window lists Tardis's 13 VMs over SSH, with state, VNC port, guest address and warnings. A session opens on the port looked up from the VM. Starting a VM was not tried. |
+| macOS | Apple Remote Desktop sign-in to a Mac mini. The lossy modes are greyed out with the reason, and the keyboard switches to Mac mode. |
+| Picture | Fit and 1:1, with scroll bars. On screen the framebuffer matches pixel for pixel at 1:1, scrolled too. Picture changes go between VNC lossless, Stream quality and Stream balanced. A resize during the session (the DemoServer's F12) is followed. |
+| Stream modes, GPU path | DXVA decode into the swap chain from the local Windows agent, at 28–53 fps on screen, and from the Mac's agent (scaled to the picture area) at about 57 fps. Software decode reaches OpenGL at 26 fps and the bitmap fallback at 29 fps. |
+| Pointer | Left, right, middle and back buttons land at the right framebuffer pixel. QEMU's cursor shape becomes the local cursor, and so does the agent's. |
+| Keyboard | Keys, Alt and F10 go to the remote with their keysyms, and the picture keeps focus. In fullscreen the low-level hook is installed: a non-injected Win key fed to its callback is swallowed and sent as Super_L. |
+| Clipboard | Text both ways, the Clipboard toggle, Paste, and Screenshot (a PNG of the whole remote screen) to the clipboard. |
+| Files and images | A file dropped on the window goes through the agent onto the remote's clipboard. |
+| Scrolling | Wheel up and down and tilt left and right become VNC wheel clicks, and half notches add up. The scroll bars never move with the wheel. |
+| Audio | Against the DemoServer's QEMU audio: the toggle lights up, playback starts, and the toggle stops and restarts it. |
+| Secrets | The Mac's saved password, protected with DPAPI, signs in. A password prompt with Remember off saves nothing. |
+| Shortcuts | `BetterVNC.exe host:port` and `vnc://host:port/` open a session, driven through UI Automation. The picture is in the UIA tree with its state as its value. |
+| Without VNC | A local agent streams the picture and sends pointer shapes. A pointer move is injected at the right desktop pixel. |
+
+**Not checked by these tests:**
+
+- A physically pressed Win key (the hook's own callback was driven instead).
+- A drag from Explorer onto the native surface (the drop handler was driven in-process).
+- Keys through the agent in a session without VNC.
+- The idle fallback on screen: the only display here never stood still. `VideoStreamPlayer`'s tests cover it.
+- Sessions without VNC on a remote PC: Win11-Coder's agent did not answer.
+
 ### Phase 3: macOS viewer
 
 **Platform services:**

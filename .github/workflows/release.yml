@@ -52,6 +52,14 @@ jobs:
           dotnet publish src/BetterVnc.App -c Release -r win-x64 --self-contained true `
             -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true -p:DebugType=none `
             -p:Version=$env:VERSION -o out/BetterVNC-win-x64
+      - name: Publish viewer preview (Avalonia, win-x64, self-contained single file)
+        # The cross-platform viewer (src/BetterVnc.Viewer) ships beside the WPF one until it replaces it; the installer
+        # keeps installing the WPF viewer.
+        shell: pwsh
+        run: |
+          dotnet publish src/BetterVnc.Viewer -c Release -r win-x64 --self-contained true `
+            -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true -p:DebugType=none `
+            -p:Version=$env:VERSION -o out/BetterVNC-preview-win-x64
       - name: Publish Windows agent
         shell: pwsh
         run: |
@@ -71,6 +79,7 @@ jobs:
         shell: pwsh
         run: |
           Compress-Archive -Path out/BetterVNC-win-x64/* -DestinationPath "dist/BetterVNC-$env:VERSION-win-x64.zip"
+          Compress-Archive -Path out/BetterVNC-preview-win-x64/* -DestinationPath "dist/BetterVNC-$env:VERSION-preview-win-x64.zip"
           Compress-Archive -Path out/bettervnc-agent-win-x64/* -DestinationPath "dist/bettervnc-agent-$env:VERSION-win-x64.zip"
           Get-ChildItem dist | Format-Table Name, Length
       - uses: actions/upload-artifact@v4
@@ -167,6 +176,7 @@ jobs:
           | App | File | Install |
           |---|---|---|
           | BetterVNC viewer (Windows x64) | \`BetterVNC-$v-win-x64.zip\` | Unzip anywhere and run \`BetterVNC.exe\`. |
+          | BetterVNC viewer preview (Windows x64) | \`BetterVNC-$v-preview-win-x64.zip\` | The new cross-platform (Avalonia) viewer, for trying side by side: unzip to its own folder and run \`BetterVNC.exe\`. It uses the same connections as the installed viewer. |
           | Guest agent, Windows VM | \`bettervnc-agent-$v-win-x64.zip\` | Unzip, then run \`bettervnc-agent install\` in that folder. |
           | Guest agent, Linux VM | \`bettervnc-agent-$v-linux-x64.tar.gz\` | \`tar xzf\`, then \`sh install.sh\` in the unpacked folder as the desktop user. |
           | Guest agent, Mac | \`bettervnc-agent-$v-osx-arm64.tar.gz\` (Apple silicon) or \`-osx-x64\` (Intel) | \`tar xzf\`, then \`sh install.sh\` in the unpacked folder. |

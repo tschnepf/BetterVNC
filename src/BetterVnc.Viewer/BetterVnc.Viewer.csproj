@@ -38,6 +38,13 @@
     <PackageReference Include="NAudio.WinMM" Version="2.2.1" />
   </ItemGroup>
 
+  <!-- SkiaSharp and HarfBuzz ship their native debug symbols (about 100 MB); a release publish leaves them out. -->
+  <Target Name="LeaveOutNativeSymbols" AfterTargets="ComputeResolvedFilesToPublishList" Condition="'$(DebugType)' == 'none'">
+    <ItemGroup>
+      <ResolvedFileToPublish Remove="@(ResolvedFileToPublish)" Condition="'%(Extension)' == '.pdb'" />
+    </ItemGroup>
+  </Target>
+
   <ItemGroup>
     <ProjectReference Include="..\BetterVnc.Protocol\BetterVnc.Protocol.csproj" />
     <ProjectReference Include="..\BetterVnc.Agent.Protocol\BetterVnc.Agent.Protocol.csproj" />
