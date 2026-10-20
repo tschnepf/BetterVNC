@@ -31,7 +31,7 @@
                             </ContextMenu>
                         </ComboBox.ContextMenu>
                     </ComboBox>
-                    <ToggleButton x:Name="ClipboardToggle" Content="Clipboard" ToolTip="Synchronise text clipboard in both directions" />
+                    <ToggleButton x:Name="ClipboardToggle" Content="Clipboard" ToolTip="Synchronise text clipboard in both directions" Checked="OnClipboardToggled" Unchecked="OnClipboardToggled" />
                     <ToggleButton x:Name="AudioToggle" Content="Audio" ToolTip="Play the VM's audio (QEMU VNC audio extension)" Checked="OnAudioToggled" Unchecked="OnAudioToggled" />
                     <ToggleButton x:Name="GrabToggle" Content="Win keys" ToolTip="Send Windows key, Alt+Tab, Alt+F4 to the remote instead of the local desktop" />
                     <ToggleButton x:Name="FullscreenToggle" Content="Fullscreen" ToolTip="Toggle fullscreen (F11, or Ctrl+Shift+F11 while the viewer has focus)" Checked="OnFullscreenToggled" Unchecked="OnFullscreenToggled" />

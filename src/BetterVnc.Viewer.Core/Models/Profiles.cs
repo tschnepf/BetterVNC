@@ -2,7 +2,7 @@ using System.ComponentModel;
 using System.Runtime.CompilerServices;
 using System.Text.Json.Serialization;
 
-namespace BetterVnc.App.Models;
+namespace BetterVnc.Viewer.Core.Models;
 
 public enum ConnectionKind
 {
@@ -75,7 +75,7 @@ public sealed class ConnectionProfile : ObservableBase
     public ConnectionKind Kind { get => _kind; set { if (Set(ref _kind, value)) Raise(nameof(KindLabel)); } }
     public string? Username { get; set; }
 
-    /// <summary>DPAPI-protected password; null when none is stored.</summary>
+    /// <summary>Protected (<see cref="Services.ProfileStore.Protect"/>) password; null when none is stored.</summary>
     public string? ProtectedPassword { get; set; }
 
     public DateTime? LastConnected { get => _lastConnected; set { if (Set(ref _lastConnected, value)) Raise(nameof(Subtitle)); } }
@@ -121,9 +121,9 @@ public sealed class ConnectionProfile : ObservableBase
     public int AgentPort { get; set; } = 5970;
     /// <summary>How the viewer proves itself to the agent: pairing (approved once in the guest) or the agent's token.</summary>
     public AgentAuthMode AgentAuth { get; set; } = AgentAuthMode.Pair;
-    /// <summary>DPAPI-protected shared token or password set in the agent (token mode).</summary>
+    /// <summary>Protected (<see cref="Services.ProfileStore.Protect"/>) shared token or password set in the agent (token mode).</summary>
     public string? AgentProtectedToken { get; set; }
-    /// <summary>DPAPI-protected key derived when this connection's agent approved the pairing; null until paired.</summary>
+    /// <summary>Protected (<see cref="Services.ProfileStore.Protect"/>) key derived when this connection's agent approved the pairing; null until paired.</summary>
     public string? AgentProtectedPairKey { get; set; }
 
     /// <summary>Number of session windows currently open for this profile (runtime only, maintained by SessionManager).</summary>

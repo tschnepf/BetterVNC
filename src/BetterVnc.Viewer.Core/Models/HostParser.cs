@@ -1,6 +1,6 @@
 using System.Text.RegularExpressions;
 
-namespace BetterVnc.App.Models;
+namespace BetterVnc.Viewer.Core.Models;
 
 /// <summary>
 /// Normalises whatever a person types into a host field: strips URL schemes (including typos such

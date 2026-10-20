@@ -1,9 +1,10 @@
+using BetterVnc.Platform;
 using NAudio.Wave;
 
 namespace BetterVnc.App.Services;
 
 /// <summary>Plays the raw PCM stream delivered by the QEMU audio extension.</summary>
-public sealed class AudioPlayer : IDisposable
+public sealed class AudioPlayer : IAudioSink
 {
     private WaveOutEvent? _out;
     private BufferedWaveProvider? _buffer;

@@ -1,20 +1,32 @@
 using System.Windows;
 using System.Windows.Threading;
-using BetterVnc.App.Models;
-using BetterVnc.App.Services;
 using BetterVnc.App.Views;
+using BetterVnc.Platform;
+using BetterVnc.Platform.Clipboards;
+using BetterVnc.Viewer.Core.Models;
+using BetterVnc.Viewer.Core.Services;
 
 namespace BetterVnc.App;
 
 public partial class App : Application
 {
-    public static ProfileStore Profiles { get; } = new();
+    public static ProfileStore Profiles { get; } = new(new DpapiSecretStore());
+
+    /// <summary>The Windows clipboard, shared by every session (one STA thread, one change listener).</summary>
+    public static WindowsClipboard LocalClipboard { get; } = new();
 
     protected override void OnStartup(StartupEventArgs e)
     {
         base.OnStartup(e);
         DispatcherUnhandledException += OnUnhandledException;
-        Profiles.Load();
+        try
+        {
+            Profiles.Load();
+        }
+        catch (Exception ex)
+        {
+            MessageBox.Show($"Could not read {Profiles.FilePath}:\n{ex.Message}", "BetterVNC", MessageBoxButton.OK, MessageBoxImage.Warning);
+        }
 
         // "BetterVNC.exe host[:port]" or "vnc://host:port" opens a session straight away (handy for shortcuts).
         if (e.Args.Length > 0 && TryParseTarget(e.Args[0], out var host, out var port))

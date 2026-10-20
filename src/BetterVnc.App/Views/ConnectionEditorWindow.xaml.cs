@@ -1,7 +1,6 @@
 using System.Windows;
 using System.Windows.Controls;
-using BetterVnc.App.Models;
-using BetterVnc.App.Services;
+using BetterVnc.Viewer.Core.Models;
 
 namespace BetterVnc.App.Views;
 
@@ -145,7 +144,7 @@ public partial class ConnectionEditorWindow : Window
         p.Host = cleanHost;
         p.Port = port;
         p.Username = p.Kind == ConnectionKind.Mac && !string.IsNullOrWhiteSpace(UserBox.Text) ? UserBox.Text.Trim() : null;
-        if (PasswordBox.Password != KeepPassword) p.ProtectedPassword = ProfileStore.Protect(PasswordBox.Password);
+        if (PasswordBox.Password != KeepPassword) p.ProtectedPassword = App.Profiles.Protect(PasswordBox.Password);
         p.UnraidServerId = p.Kind == ConnectionKind.UnraidVm ? (ServerBox.SelectedItem as UnraidServer)?.Id : null;
         p.UnraidVmName = p.Kind == ConnectionKind.UnraidVm ? VmBox.Text.Trim() : null;
         if (p.Kind == ConnectionKind.UnraidVm && string.IsNullOrEmpty(p.Host) && ServerBox.SelectedItem is UnraidServer s) p.Host = s.Host;
@@ -166,17 +165,17 @@ public partial class ConnectionEditorWindow : Window
         p.SftpHost = string.IsNullOrWhiteSpace(SftpHostBox.Text) ? null : SftpHostBox.Text.Trim();
         p.SftpPort = int.TryParse(SftpPortBox.Text, out var sp) && sp > 0 ? sp : 22;
         p.SftpUsername = string.IsNullOrWhiteSpace(SftpUserBox.Text) ? null : SftpUserBox.Text.Trim();
-        if (SftpPasswordBox.Password != KeepPassword) p.SftpProtectedPassword = ProfileStore.Protect(SftpPasswordBox.Password);
+        if (SftpPasswordBox.Password != KeepPassword) p.SftpProtectedPassword = App.Profiles.Protect(SftpPasswordBox.Password);
         p.SftpPrivateKeyPath = string.IsNullOrWhiteSpace(SftpKeyBox.Text) ? null : SftpKeyBox.Text.Trim();
         p.RemoteDropFolder = string.IsNullOrWhiteSpace(SftpFolderBox.Text) ? null : SftpFolderBox.Text.Trim();
         p.SmbPath = string.IsNullOrWhiteSpace(SmbPathBox.Text) ? null : SmbPathBox.Text.Trim();
         p.SmbUsername = string.IsNullOrWhiteSpace(SmbUserBox.Text) ? null : SmbUserBox.Text.Trim();
-        if (SmbPasswordBox.Password != KeepPassword) p.SmbProtectedPassword = ProfileStore.Protect(SmbPasswordBox.Password);
+        if (SmbPasswordBox.Password != KeepPassword) p.SmbProtectedPassword = App.Profiles.Protect(SmbPasswordBox.Password);
         p.AgentEnabled = AgentBox.IsChecked == true;
         p.AgentHost = string.IsNullOrWhiteSpace(AgentHostBox.Text) ? null : AgentHostBox.Text.Trim();
         p.AgentPort = int.TryParse(AgentPortBox.Text, out var ap) && ap > 0 && ap <= 65535 ? ap : 5970;
         p.AgentAuth = AgentTokenRadio.IsChecked == true ? AgentAuthMode.Token : AgentAuthMode.Pair;
-        if (AgentTokenBox.Password != KeepPassword) p.AgentProtectedToken = ProfileStore.Protect(AgentTokenBox.Password.Trim());
+        if (AgentTokenBox.Password != KeepPassword) p.AgentProtectedToken = App.Profiles.Protect(AgentTokenBox.Password.Trim());
         if (!_pairKeyKept) p.AgentProtectedPairKey = null;
         if (p.AgentEnabled && p.AgentAuth == AgentAuthMode.Token && string.IsNullOrEmpty(p.AgentProtectedToken))
         {

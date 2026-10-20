@@ -1,22 +1,20 @@
 using System.Collections.Concurrent;
 using System.Threading.Channels;
-using System.Windows.Threading;
 using BetterVnc.Agent.Protocol;
-using BetterVnc.App.Controls;
-using BetterVnc.App.Models;
 using BetterVnc.Media;
-using BetterVnc.Protocol;
+using BetterVnc.Protocol.Decoders;
+using BetterVnc.Viewer.Core.Models;
 
-namespace BetterVnc.App.Services;
+namespace BetterVnc.Viewer.Core.Services;
 
 /// <summary>
-/// Plays the guest agent's video stream into a <see cref="VncView"/> while the RFB connection goes on carrying input,
+/// Plays the guest agent's video stream into the session's <see cref="IVideoSurface"/> while the RFB connection goes on carrying input,
 /// cursor shapes and resizes at a trickle. Frames are decoded off the UI thread with a latest-frame-wins policy for
 /// what is shown: motion JPEG frames stand alone, so a slow decoder simply skips to the newest; H.264 delta frames
 /// all go through the decoder (they are each other's reference) but only the newest picture is shown.
-/// Where it can, H.264 is decoded on the GPU (DXVA, on the view's Direct3D device) and presented from there by the
-/// view's swap chain, never touching the CPU or the UI thread; otherwise the decoder runs in software and the view
-/// converts on the GPU, or, without Direct3D, the frame is converted here and drawn through WPF.
+/// Where it can, H.264 is decoded on the GPU (on Windows DXVA, on the view's Direct3D device) and presented from there by
+/// the view's swap chain, never touching the CPU or the UI thread; otherwise the decoder runs in software and the view
+/// converts on the GPU, or, without a GPU surface, the frame is converted here and drawn through the view's CPU path.
 /// When the agent sends nothing for a moment (the screen is still) the view switches back to the RFB framebuffer and
 /// a full lossless update is requested, so a quiet desktop is always shown pixel-exact; the first new frame switches
 /// back to the stream.
@@ -33,16 +31,17 @@ public sealed class VideoStreamPlayer : IDisposable
     /// </summary>
     public static readonly TimeSpan AreaSettleTime = TimeSpan.FromMilliseconds(300);
 
-    private readonly AgentClient _agent;
-    private readonly VncClient _client;
-    private readonly VncView _view;
-    private readonly Dispatcher _dispatcher;
+    private readonly IAgentStream _agent;
+    private readonly IRfbPicture _client;
+    private readonly IVideoSurface _view;
+    private readonly IUiThread _ui;
     private readonly Channel<AgentFrame> _frames;
     private readonly CancellationTokenSource _cts = new();
-    private readonly DispatcherTimer _idleTimer;
-    private readonly DispatcherTimer _areaTimer;
-    private (int Width, int Height)? _sentArea; // the picture area the agent last heard of; dispatcher only
-    private readonly WicJpegDecoder _jpeg = new();
+    private readonly IUiTimer _idleTimer;
+    private readonly IUiTimer _areaTimer;
+    private (int Width, int Height)? _sentArea; // the picture area the agent last heard of; UI thread only
+    private readonly IJpegDecoder _jpeg;
+    private readonly string _jpegName;
     private readonly ConcurrentBag<byte[]> _pool = new();
     private Task? _decodeLoop;
     private int _generation;
@@ -55,19 +54,20 @@ public sealed class VideoStreamPlayer : IDisposable
     private long _bytesAtRate;
     private DateTime _rateTime = DateTime.UtcNow;
 
-    public VideoStreamPlayer(AgentClient agent, VncClient client, VncView view, Dispatcher dispatcher)
+    /// <param name="jpeg">Decodes motion JPEG frames; <paramref name="jpegName"/> names it in the status bar ("WIC").</param>
+    public VideoStreamPlayer(IAgentStream agent, IRfbPicture client, IVideoSurface view, IUiThread ui, IJpegDecoder jpeg, string jpegName)
     {
         _agent = agent;
         _client = client;
         _view = view;
-        _dispatcher = dispatcher;
+        _ui = ui;
+        _jpeg = jpeg;
+        _jpegName = jpegName;
         // Room for a burst of H.264 delta frames; when even that overflows the oldest go and a key frame is requested.
         _frames = Channel.CreateBounded<AgentFrame>(new BoundedChannelOptions(32) { FullMode = BoundedChannelFullMode.DropOldest, SingleReader = true },
             _ => { Interlocked.Increment(ref _framesSkipped); _lostFrames = true; });
-        _idleTimer = new DispatcherTimer(DispatcherPriority.Background, dispatcher) { Interval = IdleAfter };
-        _idleTimer.Tick += (_, _) => OnIdle();
-        _areaTimer = new DispatcherTimer(DispatcherPriority.Background, dispatcher) { Interval = AreaSettleTime };
-        _areaTimer.Tick += (_, _) => _ = SendAreaAsync();
+        _idleTimer = ui.CreateTimer(IdleAfter, OnIdle);
+        _areaTimer = ui.CreateTimer(AreaSettleTime, () => _ = SendAreaAsync());
         _agent.StreamFrame += OnFrame;
         _agent.StreamStopped += OnAgentStopped;
         _view.PictureAreaChanged += OnPictureAreaChanged;
@@ -88,7 +88,7 @@ public sealed class VideoStreamPlayer : IDisposable
 
     /// <summary>Short status for the status bar.</summary>
     public event Action<string>? Message;
-    /// <summary>The stream ended without <see cref="StopAsync"/> (agent gone, capture failed); the player is back on RFB. On the dispatcher.</summary>
+    /// <summary>The stream ended without <see cref="StopAsync"/> (agent gone, capture failed); the player is back on RFB. On the UI thread.</summary>
     public event Action<string?>? Ended;
 
     /// <summary>Bytes per second since the previous call (call about once a second).</summary>
@@ -217,7 +217,7 @@ public sealed class VideoStreamPlayer : IDisposable
         long now = Environment.TickCount64;
         if (now - Interlocked.Read(ref _lastKeyframeRequest) < 500) return;
         Interlocked.Exchange(ref _lastKeyframeRequest, now);
-        _ = _dispatcher.BeginInvoke(async () =>
+        _ui.Post(async () =>
         {
             try { await _agent.SetStreamAsync(null, null, keyframe: true); }
             catch (Exception ex) { Message?.Invoke("Key frame request failed: " + ex.Message); }
@@ -228,23 +228,23 @@ public sealed class VideoStreamPlayer : IDisposable
     private void Report(string line)
     {
         System.Diagnostics.Trace.WriteLine("BetterVNC stream: " + line);
-        _ = _dispatcher.BeginInvoke(() => Message?.Invoke(line));
+        _ui.Post(() => Message?.Invoke(line));
     }
 
     /// <summary>Says which decoder runs and how its pictures reach the screen, from the first picture it delivered.</summary>
-    private void DescribeDecoder(H264Decoder decoder, bool texture)
+    private void DescribeDecoder(IH264Decoder decoder, bool texture)
     {
-        bool gpu = _view.GpuVideoDevice != null;
+        bool gpu = _view.HasGpuVideo;
         string decode = texture ? "hardware (DXVA)"
             : decoder.HardwareFailure is { } why ? $"software (hardware refused: {why})"
             : "software";
-        DecodePath = (texture ? "DXVA" : "software") + (gpu ? " → GPU" : " → WPF");
+        DecodePath = (texture ? "DXVA" : "software") + (gpu ? " → GPU" : " → " + _view.CpuPathName);
         Report($"H.264 decoder: {decoder.Name}, {decode}; {_view.GpuVideoStatus}");
     }
 
     private async Task DecodeLoopAsync(CancellationToken ct)
     {
-        H264Decoder? h264 = null;
+        IH264Decoder? h264 = null;
         int generation = -1;
         int? lastSequence = null;
         bool awaitingKeyframe = false;
@@ -281,8 +281,8 @@ public sealed class VideoStreamPlayer : IDisposable
                     {
                         if (h264 == null)
                         {
-                            // With the view's device the decoder uses DXVA; it falls back to software by itself if refused.
-                            h264 = new H264Decoder(softwareOnly ? null : _view.GpuVideoDevice);
+                            // On the view's GPU device the decoder uses DXVA; it falls back to software by itself if refused.
+                            h264 = _view.CreateH264Decoder(hardware: !softwareOnly);
                             reportDecoder = true;
                         }
                         // Delta frames need every frame before them since the last key frame. A gap in the sequence
@@ -345,15 +345,15 @@ public sealed class VideoStreamPlayer : IDisposable
                         if (!reportedJpeg)
                         {
                             reportedJpeg = true;
-                            DecodePath = gpu ? "JPEG → GPU" : "JPEG → WPF";
-                            Report($"Motion JPEG decoder: WIC; {_view.GpuVideoStatus}");
+                            DecodePath = gpu ? "JPEG → GPU" : "JPEG → " + _view.CpuPathName;
+                            Report($"Motion JPEG decoder: {_jpegName}; {_view.GpuVideoStatus}");
                         }
                     }
                 }
                 catch (Exception ex)
                 {
                     Interlocked.Increment(ref _framesSkipped);
-                    _ = _dispatcher.BeginInvoke(() => Message?.Invoke("Frame decode failed: " + ex.Message));
+                    _ui.Post(() => Message?.Invoke("Frame decode failed: " + ex.Message));
                     if (h264 != null)
                     {
                         if (h264.IsHardware)
@@ -370,7 +370,7 @@ public sealed class VideoStreamPlayer : IDisposable
                     continue;
                 }
                 Interlocked.Increment(ref _framesDecoded);
-                _ = _dispatcher.BeginInvoke(OnFramePresented, DispatcherPriority.Background);
+                _ui.Post(OnFramePresented, UiPriority.Background);
             }
         }
         catch (OperationCanceledException) { }

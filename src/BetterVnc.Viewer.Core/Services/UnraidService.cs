@@ -1,12 +1,12 @@
-using System.IO;
 using System.Net;
 using System.Net.Sockets;
 using System.Text.RegularExpressions;
 using System.Xml.Linq;
-using BetterVnc.App.Models;
+using BetterVnc.Platform;
+using BetterVnc.Viewer.Core.Models;
 using Renci.SshNet;
 
-namespace BetterVnc.App.Services;
+namespace BetterVnc.Viewer.Core.Services;
 
 public sealed record UnraidVmInfo(
     string Name,
@@ -38,15 +38,17 @@ public sealed record UnraidVmInfo(
 public sealed class UnraidService
 {
     private readonly UnraidServer _server;
+    private readonly ISecretStore _secrets;
 
-    public UnraidService(UnraidServer server)
+    public UnraidService(UnraidServer server, ISecretStore secrets)
     {
         _server = server;
+        _secrets = secrets;
     }
 
     private SshClient CreateClient()
     {
-        var password = ProfileStore.Unprotect(_server.ProtectedPassword);
+        var password = _secrets.Unprotect(_server.ProtectedPassword);
         var methods = new List<AuthenticationMethod>();
         if (!string.IsNullOrEmpty(_server.PrivateKeyPath) && File.Exists(_server.PrivateKeyPath))
         {

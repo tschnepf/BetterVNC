@@ -8,29 +8,20 @@ using System.Windows.Media.Imaging;
 using System.Windows.Threading;
 using BetterVnc.Agent.Protocol;
 using BetterVnc.App.Input;
-using BetterVnc.App.Models;
 using BetterVnc.Media;
 using BetterVnc.Protocol;
+using BetterVnc.Viewer.Core.Models;
+using BetterVnc.Viewer.Core.Services;
 using static BetterVnc.App.Input.NativeMethods;
 
 namespace BetterVnc.App.Controls;
 
 /// <summary>
-/// Something that can scroll the remote machine by pixels (the guest agent). <paramref name="dx"/>/<paramref name="dy"/>
-/// are pixels, positive = right / up; <paramref name="wheelDx"/>/<paramref name="wheelDy"/> the same movement in Windows
-/// wheel units (120 per notch). Returns false when it cannot take the event right now, in which case the caller falls back
-/// to VNC wheel clicks.
-/// </summary>
-public interface IScrollInjector
-{
-    bool TrySendScroll(double dx, double dy, int x, int y, string phase, double wheelDx, double wheelDy);
-}
-
-/// <summary>
 /// Renders a <see cref="VncClient"/> framebuffer and forwards pointer input. Keyboard input is
-/// fed in by the owning window (which owns the Win32 message hook) through <see cref="SendKey"/>.
+/// fed in by the owning window (which owns the Win32 message hook) through <see cref="SendKey"/>. The agent's stream is
+/// drawn here too, as the session's <see cref="IVideoSurface"/>.
 /// </summary>
-public sealed class VncView : Grid
+public sealed class VncView : Grid, IVideoSurface
 {
     private readonly Image _image = new() { SnapsToDevicePixels = true };
     private WriteableBitmap? _bitmap;
@@ -296,6 +287,13 @@ public sealed class VncView : Grid
     /// leaving the GPU; null while frames are drawn through WPF. Any thread.
     /// </summary>
     public D3D11VideoDevice? GpuVideoDevice => Volatile.Read(ref _renderer) != null ? _gpuDevice : null;
+
+    public bool HasGpuVideo => GpuVideoDevice != null;
+
+    public string CpuPathName => "WPF";
+
+    /// <summary>A Media Foundation decoder, with DXVA on <see cref="GpuVideoDevice"/> when <paramref name="hardware"/>. Any thread.</summary>
+    public IH264Decoder CreateH264Decoder(bool hardware) => new H264Decoder(hardware ? GpuVideoDevice : null);
 
     /// <summary>
     /// True while a WPF element must show over the picture (the connecting / disconnected overlay): the GPU surface is a

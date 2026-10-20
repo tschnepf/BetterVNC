@@ -1,4 +1,4 @@
-namespace BetterVnc.App.Models;
+namespace BetterVnc.Viewer.Core.Models;
 
 /// <summary>
 /// Where the picture comes from and how it is compressed. The VNC modes change the Tight pseudo-encodings on the live RFB

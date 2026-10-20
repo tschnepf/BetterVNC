@@ -1,23 +1,17 @@
-using System.Collections.Specialized;
-using System.IO;
 using System.Runtime.InteropServices;
 using System.Text;
-using System.Windows;
-using System.Windows.Media.Imaging;
-using System.Windows.Threading;
 using BetterVnc.Agent.Protocol;
-using BetterVnc.App.Controls;
-using BetterVnc.App.Models;
-using static BetterVnc.App.Input.NativeMethods;
+using BetterVnc.Platform;
+using BetterVnc.Viewer.Core.Models;
 
-namespace BetterVnc.App.Services;
+namespace BetterVnc.Viewer.Core.Services;
 
 /// <summary>
 /// Keeps a connection to the BetterVNC guest agent next to a VNC session and mirrors the rich clipboard both ways:
-/// images and files copied in the guest land on the Windows clipboard, images and dropped files go to the guest.
-/// Reconnects by itself; everything it raises arrives on the window's dispatcher.
+/// images and files copied in the guest land on the local clipboard, images and dropped files go to the guest.
+/// Reconnects by itself; everything it raises arrives on the UI thread.
 /// </summary>
-public sealed class AgentClient : IDisposable, IScrollInjector
+public sealed class AgentClient : IDisposable, IScrollInjector, IAgentStream
 {
     /// <summary>Files copied in the guest are pulled automatically up to this total; bigger sets are only announced.</summary>
     public const long AutoFetchFileLimit = 64L * 1024 * 1024;
@@ -26,10 +20,12 @@ public sealed class AgentClient : IDisposable, IScrollInjector
     private volatile string? _host;
     private readonly Func<CancellationToken, Task<string?>>? _lookUpGuestAddress;
     private readonly string _token;
-    private readonly Dispatcher _dispatcher;
+    private readonly ProfileStore _profiles;
+    private readonly IUiThread _ui;
+    private readonly ILocalClipboard _clipboard;
     private readonly CancellationTokenSource _cts = new();
     private AgentConnection? _connection;
-    private uint _ownClipboardSequence;
+    private string? _ownClipboardToken;
     private byte[]? _lastReceivedPngHash;
     private byte[]? _lastSentPngHash;
     private bool _disposed;
@@ -42,11 +38,14 @@ public sealed class AgentClient : IDisposable, IScrollInjector
     /// Finds the guest's address again, for when it was not known (the VM is still booting) or an attempt failed (a new
     /// DHCP lease). Null when the agent runs on the VNC host. An agent host set in the profile overrides both.
     /// </param>
-    public AgentClient(ConnectionProfile profile, string vncHost, Dispatcher dispatcher,
+    /// <param name="profiles">Holds <paramref name="profile"/>: its secrets, the viewer's identity, and saved again when pairing changes the key.</param>
+    public AgentClient(ConnectionProfile profile, string vncHost, ProfileStore profiles, IUiThread ui, ILocalClipboard clipboard,
         string? guestAddress = null, Func<CancellationToken, Task<string?>>? lookUpGuestAddress = null)
     {
         _profile = profile;
-        _dispatcher = dispatcher;
+        _profiles = profiles;
+        _ui = ui;
+        _clipboard = clipboard;
         if (!string.IsNullOrWhiteSpace(profile.AgentHost))
             _host = profile.AgentHost.Trim();
         else
@@ -54,7 +53,7 @@ public sealed class AgentClient : IDisposable, IScrollInjector
             _host = lookUpGuestAddress != null ? guestAddress : guestAddress ?? vncHost;
             _lookUpGuestAddress = lookUpGuestAddress;
         }
-        _token = ProfileStore.Unprotect(profile.AgentProtectedToken) ?? "";
+        _token = profiles.Unprotect(profile.AgentProtectedToken) ?? "";
     }
 
     public static bool IsConfigured(ConnectionProfile p) =>
@@ -68,7 +67,7 @@ public sealed class AgentClient : IDisposable, IScrollInjector
 
     // ------------------------------------------------------------------ video
 
-    /// <summary>Codecs this viewer can decode, most preferred first: H.264 through Media Foundation, then motion JPEG through WIC.</summary>
+    /// <summary>Codecs this viewer can decode, most preferred first: H.264, then motion JPEG.</summary>
     public static readonly string[] DecodableCodecs = { AgentVideoCodec.H264, AgentVideoCodec.Jpeg };
 
     /// <summary>Codecs both sides agree on, in this viewer's order of preference; empty when streaming is impossible.</summary>
@@ -107,7 +106,7 @@ public sealed class AgentClient : IDisposable, IScrollInjector
 
     /// <summary>An encoded frame arrived; raised on the agent's receive thread, so decode elsewhere and return quickly.</summary>
     public event Action<AgentFrame>? StreamFrame;
-    /// <summary>The stream ended without this side asking (agent stopped it, or disconnected); on the dispatcher.</summary>
+    /// <summary>The stream ended without this side asking (agent stopped it, or disconnected); on the UI thread.</summary>
     public event Action<string?>? StreamStopped;
 
     /// <param name="area">Where the picture is shown, in device pixels (see <see cref="AgentMessage.Width"/>); null for no limit.</param>
@@ -167,9 +166,9 @@ public sealed class AgentClient : IDisposable, IScrollInjector
     private async Task ConnectLoopAsync(CancellationToken ct)
     {
         var delay = TimeSpan.FromSeconds(2);
-        var identity = ViewerIdentity.Current;
+        var identity = _profiles.Identity;
         bool pairMode = _profile.AgentAuth == AgentAuthMode.Pair;
-        string? pairKey = pairMode ? ProfileStore.Unprotect(_profile.AgentProtectedPairKey) : null;
+        string? pairKey = pairMode ? _profiles.Unprotect(_profile.AgentProtectedPairKey) : null;
         bool lookUpAgain = false;
         var nextLookUp = DateTime.MinValue;
         while (!ct.IsCancellationRequested)
@@ -230,11 +229,11 @@ public sealed class AgentClient : IDisposable, IScrollInjector
                     Post(() => Message?.Invoke($"Guest agent at {Target}: click Allow in the dialog on the remote screen to pair this computer"));
                     await conn.PairAsync(ct).ConfigureAwait(false);
                     pairKey = conn.PairedKey;
-                    var protectedKey = ProfileStore.Protect(pairKey);
+                    var protectedKey = _profiles.Protect(pairKey);
                     Post(() =>
                     {
                         _profile.AgentProtectedPairKey = protectedKey;
-                        try { App.Profiles.Save(); } catch { }
+                        try { _profiles.Save(); } catch { }
                     });
                 }
                 else
@@ -265,7 +264,7 @@ public sealed class AgentClient : IDisposable, IScrollInjector
                 Post(() =>
                 {
                     _profile.AgentProtectedPairKey = null;
-                    try { App.Profiles.Save(); } catch { }
+                    try { _profiles.Save(); } catch { }
                     Message?.Invoke("The guest agent no longer recognises this computer; pairing again");
                 });
                 conn.Dispose();
@@ -308,7 +307,7 @@ public sealed class AgentClient : IDisposable, IScrollInjector
     private void Post(Action action)
     {
         if (_disposed) return;
-        try { _dispatcher.BeginInvoke(action); } catch (TaskCanceledException) { }
+        try { _ui.Post(action); } catch (TaskCanceledException) { }
     }
 
     // ------------------------------------------------------------------ guest -> local
@@ -327,7 +326,7 @@ public sealed class AgentClient : IDisposable, IScrollInjector
                 if (_lastSentPngHash != null && hash.AsSpan().SequenceEqual(_lastSentPngHash)) return;         // our own push echoed back
                 if (_lastReceivedPngHash != null && hash.AsSpan().SequenceEqual(_lastReceivedPngHash)) return; // already on the local clipboard
                 _lastReceivedPngHash = hash;
-                await _dispatcher.InvokeAsync(() => SetLocalImage(png));
+                await _ui.InvokeAsync(() => SetLocalImage(png));
                 Post(() => Message?.Invoke($"Image received from guest clipboard ({FormatSize(png.Length)})"));
             }
             else if (formats.Contains(AgentFormat.Files))
@@ -342,7 +341,7 @@ public sealed class AgentClient : IDisposable, IScrollInjector
                 if (frame?.Header.Files == null || frame.Header.Files.Count == 0) return;
                 var dir = Path.Combine(ReceiveRoot, DateTime.Now.ToString("yyyyMMdd-HHmmss-fff"));
                 var paths = FileBundle.Unpack(frame.Header.Files, frame.Payload, dir);
-                await _dispatcher.InvokeAsync(() => SetLocalFiles(paths));
+                await _ui.InvokeAsync(() => SetLocalFiles(paths));
                 Post(() => Message?.Invoke($"{frame.Header.Files.Count} file(s) received from guest clipboard, ready to paste"));
             }
             else if (formats.Contains(AgentFormat.Text))
@@ -383,46 +382,26 @@ public sealed class AgentClient : IDisposable, IScrollInjector
         catch { }
     }
 
+    // Both run on the UI thread, so the change notification they cause is handled after the token is taken.
+
     private void SetLocalImage(byte[] png)
     {
-        var decoder = new PngBitmapDecoder(new MemoryStream(png), BitmapCreateOptions.PreservePixelFormat, BitmapCacheOption.OnLoad);
-        var image = decoder.Frames[0];
-        var obj = new DataObject();
-        obj.SetData("PNG", new MemoryStream(png), false); // keeps alpha for apps that read PNG
-        obj.SetImage(image);                               // CF_DIB for everything else
-        SetLocalClipboard(obj);
+        _clipboard.SetData(AgentFormat.Png, png); // the PNG keeps alpha; a bitmap goes along for everything else
+        _ownClipboardToken = _clipboard.GetChangeToken();
     }
 
     private void SetLocalFiles(IReadOnlyList<string> paths)
     {
-        var list = new StringCollection();
-        foreach (var p in paths) list.Add(p);
-        var obj = new DataObject();
-        obj.SetFileDropList(list);
-        obj.SetData("Preferred DropEffect", new MemoryStream(BitConverter.GetBytes(1)), false); // copy, not move
-        SetLocalClipboard(obj);
-    }
-
-    private void SetLocalClipboard(DataObject obj)
-    {
-        for (int attempt = 0; ; attempt++)
-        {
-            try
-            {
-                Clipboard.SetDataObject(obj, true);
-                break;
-            }
-            catch (COMException) when (attempt < 5) { Thread.Sleep(50); }
-        }
-        _ownClipboardSequence = GetClipboardSequenceNumber();
+        _clipboard.SetFiles(paths); // marked as a copy, not a move
+        _ownClipboardToken = _clipboard.GetChangeToken();
     }
 
     /// <summary>True when the current clipboard content is what this client just put there (so it must not be sent back).</summary>
-    public bool IsOwnClipboardChange() => _ownClipboardSequence != 0 && GetClipboardSequenceNumber() == _ownClipboardSequence;
+    public bool IsOwnClipboardChange() => _ownClipboardToken != null && _clipboard.GetChangeToken() == _ownClipboardToken;
 
     // ------------------------------------------------------------------ local -> guest
 
-    /// <summary>Sends the image currently on the local clipboard (as PNG) to the guest clipboard. Call on the UI thread.</summary>
+    /// <summary>Sends the image currently on the local clipboard (as PNG) to the guest clipboard. Call on the UI thread, where its message is raised.</summary>
     public async Task<bool> PushClipboardImageAsync()
     {
         var conn = _connection;
@@ -430,8 +409,8 @@ public sealed class AgentClient : IDisposable, IScrollInjector
         byte[]? png = null;
         for (int attempt = 0; attempt < 3 && png == null; attempt++)
         {
-            try { png = ReadClipboardPng(); }
-            catch (COMException) { await Task.Delay(40); }
+            try { png = _clipboard.GetData(AgentFormat.Png); }
+            catch (ExternalException) { await Task.Delay(40); } // another application holds the clipboard open
         }
         if (png == null) return false;
         var hash = System.Security.Cryptography.SHA256.HashData(png);
@@ -449,21 +428,6 @@ public sealed class AgentClient : IDisposable, IScrollInjector
         >= 1 << 10 => $"{bytes / (double)(1 << 10):0} KB",
         _ => $"{bytes} bytes",
     };
-
-    private static byte[]? ReadClipboardPng()
-    {
-        var data = Clipboard.GetDataObject();
-        if (data == null) return null;
-        if (data.GetDataPresent("PNG") && data.GetData("PNG") is MemoryStream ms) return ms.ToArray();
-        if (!data.GetDataPresent(DataFormats.Bitmap)) return null;
-        var image = Clipboard.GetImage();
-        if (image == null) return null;
-        var encoder = new PngBitmapEncoder();
-        encoder.Frames.Add(BitmapFrame.Create(image));
-        using var buffer = new MemoryStream();
-        encoder.Save(buffer);
-        return buffer.ToArray();
-    }
 
     public async Task PushFilesAsync(IReadOnlyList<string> paths, IProgress<string>? progress)
     {

@@ -12,7 +12,6 @@ internal static class NativeMethods
     public const int WM_SYSKEYUP = 0x0105;
     public const int WM_SYSCHAR = 0x0106;
     public const int WM_MOUSEHWHEEL = 0x020E;
-    public const int WM_CLIPBOARDUPDATE = 0x031D;
     public const int WM_ACTIVATE = 0x0006;
     public const int WM_KILLFOCUS = 0x0008;
 
@@ -70,15 +69,6 @@ internal static class NativeMethods
 
     public const uint MAPVK_VK_TO_CHAR = 2;
     public const uint MAPVK_VK_TO_VSC_EX = 4;
-
-    [DllImport("user32.dll")]
-    public static extern bool AddClipboardFormatListener(IntPtr hwnd);
-
-    [DllImport("user32.dll")]
-    public static extern bool RemoveClipboardFormatListener(IntPtr hwnd);
-
-    [DllImport("user32.dll")]
-    public static extern uint GetClipboardSequenceNumber();
 
     public const uint SPI_GETWHEELSCROLLCHARS = 0x006C;
 

@@ -1,9 +1,9 @@
-using System.IO;
 using System.Runtime.InteropServices;
-using BetterVnc.App.Models;
+using BetterVnc.Platform;
+using BetterVnc.Viewer.Core.Models;
 using Renci.SshNet;
 
-namespace BetterVnc.App.Services;
+namespace BetterVnc.Viewer.Core.Services;
 
 /// <summary>
 /// Uploads files to the remote machine through the connection's configured side channel
@@ -12,10 +12,12 @@ namespace BetterVnc.App.Services;
 public sealed class FileTransferService
 {
     private readonly ConnectionProfile _profile;
+    private readonly ISecretStore _secrets;
 
-    public FileTransferService(ConnectionProfile profile)
+    public FileTransferService(ConnectionProfile profile, ISecretStore secrets)
     {
         _profile = profile;
+        _secrets = secrets;
     }
 
     public bool IsConfigured => _profile.FileTransfer switch
@@ -38,7 +40,9 @@ public sealed class FileTransferService
         return _profile.FileTransfer switch
         {
             FileTransferMode.Sftp => Task.Run(() => UploadSftp(localPaths, progress, ct), ct),
-            FileTransferMode.Smb => Task.Run(() => UploadSmb(localPaths, progress, ct), ct),
+            FileTransferMode.Smb => OperatingSystem.IsWindows()
+                ? Task.Run(() => UploadSmb(localPaths, progress, ct), ct)
+                : throw new PlatformNotSupportedException("SMB drop folders work only on Windows; use SFTP or the guest agent."),
             _ => throw new InvalidOperationException("File transfer is not configured for this connection."),
         };
     }
@@ -47,7 +51,7 @@ public sealed class FileTransferService
     {
         var host = string.IsNullOrEmpty(_profile.SftpHost) ? _profile.Host : _profile.SftpHost!;
         var user = _profile.SftpUsername ?? "";
-        var password = ProfileStore.Unprotect(_profile.SftpProtectedPassword);
+        var password = _secrets.Unprotect(_profile.SftpProtectedPassword);
         var methods = new List<AuthenticationMethod>();
         if (!string.IsNullOrEmpty(_profile.SftpPrivateKeyPath) && File.Exists(_profile.SftpPrivateKeyPath))
         {
@@ -112,7 +116,7 @@ public sealed class FileTransferService
     private List<string> UploadSmb(IReadOnlyList<string> localPaths, IProgress<(string, double)>? progress, CancellationToken ct)
     {
         var target = _profile.SmbPath!.TrimEnd('\\');
-        var password = ProfileStore.Unprotect(_profile.SmbProtectedPassword);
+        var password = _secrets.Unprotect(_profile.SmbProtectedPassword);
         if (!string.IsNullOrEmpty(_profile.SmbUsername))
             SmbSession.Connect(target, _profile.SmbUsername, password ?? "");
         Directory.CreateDirectory(target);

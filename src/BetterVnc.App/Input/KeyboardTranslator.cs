@@ -1,5 +1,5 @@
 using System.Text;
-using BetterVnc.App.Models;
+using BetterVnc.Viewer.Core.Models;
 using BetterVnc.Protocol;
 using static BetterVnc.App.Input.NativeMethods;
 

@@ -2,8 +2,8 @@ using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Input;
 using System.Windows.Media;
-using BetterVnc.App.Models;
-using BetterVnc.App.Services;
+using BetterVnc.Viewer.Core.Models;
+using BetterVnc.Viewer.Core.Services;
 
 namespace BetterVnc.App.Views;
 
@@ -63,7 +63,7 @@ public partial class UnraidServerWindow : Window
         Server.Username = string.IsNullOrWhiteSpace(UserBox.Text) ? "root" : UserBox.Text.Trim();
         Server.SshPort = int.TryParse(PortBox.Text, out var p) && p > 0 ? p : 22;
         Server.PrivateKeyPath = string.IsNullOrWhiteSpace(KeyBox.Text) ? null : KeyBox.Text.Trim();
-        if (PasswordBox.Password != KeepPassword) Server.ProtectedPassword = ProfileStore.Protect(PasswordBox.Password);
+        if (PasswordBox.Password != KeepPassword) Server.ProtectedPassword = App.Profiles.Protect(PasswordBox.Password);
         Server.NotifyChanged();
         return true;
     }
@@ -75,7 +75,7 @@ public partial class UnraidServerWindow : Window
         StatusText.Text = $"Connecting to {Server.Host} over SSH…";
         try
         {
-            var vms = await new UnraidService(Server).ListVmsAsync();
+            var vms = await new UnraidService(Server, App.Profiles.Secrets).ListVmsAsync();
             VmList.ItemsSource = vms.Select(v => new VmRow { Info = v }).ToList();
             StatusText.Text = $"{vms.Count} VM(s), {vms.Count(v => v.IsRunning)} running";
         }
@@ -96,7 +96,7 @@ public partial class UnraidServerWindow : Window
         StatusText.Text = $"Starting {row.Name}…";
         try
         {
-            await new UnraidService(Server).StartVmAsync(row.Name);
+            await new UnraidService(Server, App.Profiles.Secrets).StartVmAsync(row.Name);
             await Task.Delay(1500);
             OnRefresh(this, new RoutedEventArgs());
         }

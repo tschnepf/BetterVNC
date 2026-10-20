@@ -18,13 +18,16 @@
 
   <ItemGroup>
     <PackageReference Include="NAudio" Version="2.2.1" />
-    <PackageReference Include="SSH.NET" Version="2026.0.0" />
   </ItemGroup>
 
   <ItemGroup>
     <ProjectReference Include="..\BetterVnc.Protocol\BetterVnc.Protocol.csproj" />
     <ProjectReference Include="..\BetterVnc.Agent.Protocol\BetterVnc.Agent.Protocol.csproj" />
     <ProjectReference Include="..\BetterVnc.Media.Windows\BetterVnc.Media.Windows.csproj" />
+    <!-- Everything that is not WPF: profiles, agent client, stream player, session controller. -->
+    <ProjectReference Include="..\BetterVnc.Viewer.Core\BetterVnc.Viewer.Core.csproj" />
+    <!-- The Windows clipboard and DPAPI, shared with the agent. -->
+    <ProjectReference Include="..\BetterVnc.Platform\BetterVnc.Platform.csproj" />
   </ItemGroup>
 
 </Project>

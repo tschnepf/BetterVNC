@@ -3,8 +3,9 @@ using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Data;
 using System.Windows.Input;
-using BetterVnc.App.Models;
 using BetterVnc.App.Services;
+using BetterVnc.Viewer.Core.Models;
+using BetterVnc.Viewer.Core.Services;
 
 namespace BetterVnc.App.Views;
 
@@ -129,7 +130,7 @@ public partial class MainWindow : Window
             try
             {
                 Cursor = Cursors.Wait;
-                var svc = new UnraidService(server);
+                var svc = new UnraidService(server, App.Profiles.Secrets);
                 var vm = await svc.GetVmAsync(profile.UnraidVmName);
                 if (!vm.IsRunning)
                 {
