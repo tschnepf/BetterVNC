@@ -1,0 +1,71 @@
+<Window xmlns="https://github.com/avaloniaui"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:controls="using:BetterVnc.Viewer.Controls"
+        x:Class="BetterVnc.Viewer.Views.SessionWindow"
+        Title="BetterVNC" Width="1280" Height="800" MinWidth="480" MinHeight="320"
+        Background="Black" DragDrop.AllowDrop="True" Icon="/Assets/BetterVNC.ico">
+    <Grid x:Name="Root" RowDefinitions="Auto,*,Auto">
+
+        <!-- Toolbar: here in a window; in fullscreen it moves into ToolbarPopup, its own window over the picture. -->
+        <Border x:Name="ToolbarHost" Grid.Row="0">
+            <Border x:Name="Toolbar" Background="{StaticResource PanelBrush}" BorderBrush="{StaticResource BorderBrush}" BorderThickness="0,0,0,1">
+                <DockPanel Margin="6,3">
+                    <Button x:Name="DisconnectButton" DockPanel.Dock="Right" Theme="{StaticResource ToolButton}" Content="Disconnect" Foreground="{StaticResource DangerBrush}"
+                            Click="OnDisconnectClick" VerticalAlignment="Top" />
+                    <WrapPanel Orientation="Horizontal">
+                        <TextBlock x:Name="TitleText" VerticalAlignment="Center" Margin="6,0,12,0" FontWeight="SemiBold" />
+                        <Button x:Name="CadButton" Theme="{StaticResource ToolButton}" Content="Ctrl+Alt+Del" ToolTip.Tip="Send Ctrl+Alt+Del to the remote" Click="OnCtrlAltDel" />
+                        <Button x:Name="ScreenshotButton" Theme="{StaticResource ToolButton}" Content="Screenshot"
+                                ToolTip.Tip="Copy the remote screen to the clipboard (Shift+click saves to a PNG file)" Click="OnScreenshot" />
+                        <Button x:Name="SendFilesButton" Theme="{StaticResource ToolButton}" Content="Files…"
+                                ToolTip.Tip="Send files to the remote: onto its clipboard through the guest agent, or into the drop folder over SFTP/SMB (or just drag files onto the window)"
+                                Click="OnSendFiles" />
+                        <Button x:Name="PasteButton" Theme="{StaticResource ToolButton}" Content="Paste"
+                                ToolTip.Tip="Send the local clipboard to the remote: text via VNC, images and files via the guest agent or the file channel" Click="OnPasteToRemote" />
+                        <Border Classes="Separator" />
+                        <ToggleButton x:Name="FitToggle" Content="Fit" ToolTip.Tip="Scale the remote screen to fit the window" IsCheckedChanged="OnFitChanged" />
+                        <ComboBox x:Name="PictureBox" MinWidth="170" Margin="4,0" VerticalAlignment="Center" SelectionChanged="OnPictureSelected"
+                                  ToolTip.Tip="Picture: where the pixels come from and how they are compressed. Greyed entries say why they are unavailable; right-click to make the choice the default for this connection.">
+                            <ComboBox.ContextMenu>
+                                <ContextMenu>
+                                    <MenuItem x:Name="PictureDefaultItem" Header="Use as default for this connection" Click="OnPictureMakeDefault" />
+                                </ContextMenu>
+                            </ComboBox.ContextMenu>
+                        </ComboBox>
+                        <ToggleButton x:Name="ClipboardToggle" Content="Clipboard" ToolTip.Tip="Synchronise text clipboard in both directions" IsCheckedChanged="OnClipboardToggled" />
+                        <ToggleButton x:Name="AudioToggle" Content="Audio" ToolTip.Tip="Play the VM's audio (QEMU VNC audio extension)" IsCheckedChanged="OnAudioToggled" />
+                        <ToggleButton x:Name="GrabToggle" Content="Win keys" ToolTip.Tip="Send Windows key, Alt+Tab, Alt+F4 to the remote instead of the local desktop" IsCheckedChanged="OnGrabToggled" />
+                        <ToggleButton x:Name="FullscreenToggle" Content="Fullscreen" ToolTip.Tip="Toggle fullscreen (F11, or Ctrl+Shift+F11 while the viewer has focus)" IsCheckedChanged="OnFullscreenToggled" />
+                    </WrapPanel>
+                </DockPanel>
+            </Border>
+        </Border>
+
+        <!-- Viewer -->
+        <controls:VncView x:Name="View" Grid.Row="1" />
+
+        <!-- Overlay for connecting / disconnected states; the picture surface steps aside while it shows -->
+        <Border x:Name="Overlay" Grid.Row="1" Background="#CC14161A" IsVisible="False">
+            <StackPanel VerticalAlignment="Center" HorizontalAlignment="Center" MaxWidth="520">
+                <TextBlock x:Name="OverlayTitle" Classes="Heading" HorizontalAlignment="Center" Text="Connecting…" />
+                <TextBlock x:Name="OverlayDetail" Classes="Muted" TextWrapping="Wrap" HorizontalAlignment="Center" TextAlignment="Center" Margin="0,8,0,16" />
+                <StackPanel Orientation="Horizontal" HorizontalAlignment="Center" Spacing="8">
+                    <Button x:Name="ReconnectButton" Theme="{StaticResource PrimaryButton}" Content="Reconnect" IsVisible="False" Click="OnReconnect" />
+                    <Button x:Name="CloseButton" Content="Close" IsVisible="False" Click="OnCloseClick" />
+                </StackPanel>
+            </StackPanel>
+        </Border>
+
+        <!-- Status bar -->
+        <Border x:Name="StatusBar" Grid.Row="2" Background="{StaticResource PanelBrush}" BorderBrush="{StaticResource BorderBrush}" BorderThickness="0,1,0,0">
+            <Grid Margin="10,3" ColumnDefinitions="*,Auto">
+                <TextBlock x:Name="StatusLeft" Classes="Muted" TextTrimming="CharacterEllipsis" Margin="0,0,12,0" />
+                <TextBlock x:Name="StatusRight" Grid.Column="1" Classes="Muted" />
+            </Grid>
+        </Border>
+
+        <!-- Fullscreen toolbar: a popup is a window of its own, so it shows over the picture's native surface -->
+        <Popup x:Name="ToolbarPopup" Grid.Row="1" PlacementTarget="{Binding #Root}" Placement="AnchorAndGravity"
+               PlacementAnchor="Top" PlacementGravity="Bottom" IsLightDismissEnabled="False" />
+    </Grid>
+</Window>

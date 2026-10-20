@@ -116,10 +116,15 @@ static void Serve(TcpClient tcp, string? password, int W, int H)
                     break;
                 }
                 case ClientMessage.PointerEvent:
-                    buttons = r.ReadU8();
+                {
+                    byte pressed = r.ReadU8();
                     mouseX = r.ReadU16();
                     mouseY = r.ReadU16();
+                    // Button changes only (wheel clicks are a press and a release), so a moving pointer does not flood the log.
+                    if (pressed != buttons) Console.WriteLine($"Pointer buttons 0x{pressed:X2} at {mouseX},{mouseY}");
+                    buttons = pressed;
                     break;
+                }
                 case ClientMessage.ClientCutText:
                 {
                     r.Skip(3);
@@ -143,7 +148,13 @@ static void Serve(TcpClient tcp, string? password, int W, int H)
                 case ClientMessage.Qemu:
                 {
                     byte sub = r.ReadU8();
-                    if (sub == QemuMessage.ExtendedKeyEvent) { r.ReadU16(); r.ReadU32(); r.ReadU32(); }
+                    if (sub == QemuMessage.ExtendedKeyEvent)
+                    {
+                        bool down = r.ReadU16() != 0;
+                        uint keysym = r.ReadU32(), keycode = r.ReadU32();
+                        if (down) AppendKey(typed, keysym);
+                        Console.WriteLine($"Key {(down ? "down" : "up  ")} 0x{keysym:X} (XT 0x{keycode:X})");
+                    }
                     else { ushort op = r.ReadU16(); if (op == QemuMessage.AudioSetFormat) r.ReadBytes(6); }
                     break;
                 }
