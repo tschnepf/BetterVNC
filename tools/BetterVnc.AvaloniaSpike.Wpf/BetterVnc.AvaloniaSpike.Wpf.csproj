@@ -1,0 +1,28 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    WPF baseline for the Avalonia spike's framebuffer test: the same synthetic framebuffer and screen probe, drawn the
+    way today's VncView draws (WriteableBitmap, dirty rectangles with AddDirtyRect). Dev tool, not shipped.
+    Options as for the Avalonia fb mode: size WxH, dirty small or full, seconds, win WxH.
+  -->
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <UseWPF>true</UseWPF>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <RootNamespace>BetterVnc.AvaloniaSpike</RootNamespace>
+    <ApplicationManifest>..\..\src\BetterVnc.App\app.manifest</ApplicationManifest>
+    <!-- A new hash per build: Smart App Control on the dev PC blocks some builds by hash. -->
+    <Deterministic>false</Deterministic>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Include="..\BetterVnc.AvaloniaSpike\Shared\*.cs" Link="Shared\%(Filename)%(Extension)" />
+    <PackageReference Include="Vortice.Direct3D11" Version="3.8.3" />
+    <PackageReference Include="Vortice.DXGI" Version="3.8.3" />
+  </ItemGroup>
+
+</Project>
