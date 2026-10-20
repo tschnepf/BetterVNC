@@ -40,7 +40,9 @@ jobs:
         run: |
           foreach ($t in @("tests/BetterVnc.Protocol.Tests/bin/Release/net10.0/BetterVnc.Protocol.Tests.exe",
                            "tests/BetterVnc.Agent.Tests/bin/Release/net10.0/BetterVnc.Agent.Tests.exe",
-                           "tests/BetterVnc.Media.Tests/bin/Release/net10.0-windows/BetterVnc.Media.Tests.exe")) {
+                           "tests/BetterVnc.Media.Tests/bin/Release/net10.0/BetterVnc.Media.Tests.exe",
+                           "tests/BetterVnc.Media.Windows.Tests/bin/Release/net10.0-windows/BetterVnc.Media.Windows.Tests.exe",
+                           "tests/BetterVnc.Viewer.Core.Tests/bin/Release/net10.0/BetterVnc.Viewer.Core.Tests.exe")) {
             & $t
             if ($LASTEXITCODE -ne 0) { throw "$t failed with exit code $LASTEXITCODE" }
           }

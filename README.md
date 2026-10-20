@@ -82,8 +82,14 @@ dotnet build tests/BetterVnc.Protocol.Tests && tests/BetterVnc.Protocol.Tests/bi
 The tests are executables rather than `dotnet test` projects for two reasons: with Smart App Control
 on, Windows refuses to load the unsigned test DLL into Microsoft's signed `testhost.exe`, and the
 .NET 10 SDK's `dotnet test` no longer drives xunit.v3 projects in its default (VSTest) mode. The
-release workflow runs the three executables the same way. `tests/BetterVnc.Agent.Tests` and
-`tests/BetterVnc.Media.Tests` (the latter under `net10.0-windows`) are built and run alike.
+release workflow runs every test executable the same way, and the others are built and run alike:
+
+| Project | Covers | Target |
+|---|---|---|
+| `tests/BetterVnc.Agent.Tests` | agent protocol, pairing, scrolling, video channel, Mac helper reader | `net10.0` |
+| `tests/BetterVnc.Media.Tests` | pixel conversion, Annex B, dirty regions, pacing, video layout | `net10.0` |
+| `tests/BetterVnc.Media.Windows.Tests` | Media Foundation encode and decode, Desktop Duplication, DXVA and the swap chain | `net10.0-windows` |
+| `tests/BetterVnc.Viewer.Core.Tests` | the session controller and stream player, with fakes and no GUI | `net10.0` |
 
 ### Demo server
 
@@ -482,9 +488,14 @@ also runs it).
 ```
 src/BetterVnc.Protocol        RFB client library (no UI): handshake, security, decoders, clipboard, QEMU extensions
 src/BetterVnc.Agent.Protocol  Guest agent wire protocol, server core and viewer-side connection (no UI, no OS code)
+src/BetterVnc.Viewer.Core     Viewer without UI: profiles, agent client, stream player, session controller (every OS)
+src/BetterVnc.Media           Portable media code: SIMD pixel conversion, Annex B, dirty regions, pacing, video layout
+src/BetterVnc.Media.Windows   Media Foundation H.264, Desktop Duplication, Direct3D 11 swap chain (viewer and Windows agent)
+src/BetterVnc.Platform        OS services shared by agent and viewer: clipboards, secret store, audio sink interface
 src/BetterVnc.App             WPF viewer
-tests/                        Protocol tests with a fake RFB server; agent tests with a fake clipboard
-tools/BetterVnc.Agent         Guest agent executable (Windows, Linux, macOS clipboard back ends)
+tests/                        Protocol tests with a fake RFB server; agent tests with a fake clipboard; media tests;
+                              viewer core tests with fakes and no GUI
+tools/BetterVnc.Agent         Guest agent executable (Windows, Linux, macOS)
 tools/BetterVnc.Agent.MacCapture  Screen capture helper of the Mac agent (Swift: ScreenCaptureKit, VideoToolbox; build.sh)
 tools/BetterVnc.DemoServer    Development VNC server
 tools/BetterVnc.StreamBench   Plays a 1080p60 H.264 stream into the real session view and measures the viewer's CPU per path

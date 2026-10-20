@@ -13,6 +13,7 @@
     <Project Path="tests/BetterVnc.Media.Tests/BetterVnc.Media.Tests.csproj" />
     <Project Path="tests/BetterVnc.Media.Windows.Tests/BetterVnc.Media.Windows.Tests.csproj" />
     <Project Path="tests/BetterVnc.Protocol.Tests/BetterVnc.Protocol.Tests.csproj" />
+    <Project Path="tests/BetterVnc.Viewer.Core.Tests/BetterVnc.Viewer.Core.Tests.csproj" />
   </Folder>
   <Folder Name="/tools/">
     <Project Path="tools/BetterVnc.Agent/BetterVnc.Agent.csproj" />
