@@ -129,19 +129,31 @@ public class RepairServerTests : IAsyncDisposable
         using var client = await ConnectAsync();
         Assert.True(client.SupportsRepair);
         var received = new List<AgentFrame>();
+        var gotTwo = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var gotFour = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-        client.VideoFrameReceived += f => { lock (received) { received.Add(f); if (received.Count == 4) gotFour.TrySetResult(); } };
+        client.VideoFrameReceived += f =>
+        {
+            lock (received)
+            {
+                received.Add(f);
+                if (received.Count == 2) gotTwo.TrySetResult();
+                if (received.Count == 4) gotFour.TrySetResult();
+            }
+        };
 
         var info = await client.StartVideoAsync(new[] { AgentVideoCodec.Jpeg }, 8000, 60, null, cursor: false, repair: true, default);
         Assert.True(info.Repair);
         var session = await _video.NextSession();
         Assert.True(session.Request.Repair);
 
+        // Two at a time: the server queues at most three and drops the oldest, as it would on a slow link.
         session.Emit(new byte[] { 1 });
         session.EmitRepair(new byte[] { 9, 9 }, whole: true);
+        await gotTwo.Task.WaitAsync(TimeSpan.FromSeconds(5));
         session.EmitDelta(new byte[] { 2 });
         session.EmitRepair(new byte[] { 8 }, whole: false);
         await gotFour.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        Assert.Equal(0, session.KeyframeRequests); // nothing was dropped
 
         lock (received)
         {
