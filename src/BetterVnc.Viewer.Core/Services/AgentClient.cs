@@ -9,9 +9,11 @@ namespace BetterVnc.Viewer.Core.Services;
 /// <summary>
 /// Keeps a connection to the BetterVNC guest agent next to a VNC session and mirrors the rich clipboard both ways:
 /// images and files copied in the guest land on the local clipboard, images and dropped files go to the guest.
-/// Reconnects by itself; everything it raises arrives on the UI thread.
+/// In a session without VNC it is the whole connection: stream, keyboard, mouse and the pointer's shape.
+/// Reconnects by itself; everything it raises arrives on the UI thread, except the stream's frames and the pointer's
+/// shapes, which come on the receive thread.
 /// </summary>
-public sealed class AgentClient : IDisposable, IScrollInjector, IAgentStream
+public sealed class AgentClient : IDisposable, IScrollInjector, IAgentInput, IAgentStream
 {
     /// <summary>Files copied in the guest are pulled automatically up to this total; bigger sets are only announced.</summary>
     public const long AutoFetchFileLimit = 64L * 1024 * 1024;
@@ -62,6 +64,21 @@ public sealed class AgentClient : IDisposable, IScrollInjector, IAgentStream
     public bool IsConnected => _connection?.IsConnected == true;
     /// <summary>True when the agent is connected and accepts high-resolution scroll messages.</summary>
     public bool CanScroll => _connection is { IsConnected: true, SupportsScroll: true };
+    /// <summary>True when the agent is connected and can be controlled without VNC: it streams, and takes pointer and keys.</summary>
+    public bool CanControl => _connection is { IsConnected: true, SupportsInput: true } && CanStream;
+
+    /// <summary>Why <see cref="CanControl"/> is false while the agent is connected, for the overlay; null when it is true or not connected.</summary>
+    public string? ControlUnavailableReason
+    {
+        get
+        {
+            var conn = _connection;
+            if (conn == null || !conn.IsConnected || CanControl) return null;
+            if (!CanStream) return StreamUnavailableReason;
+            return $"The guest agent ({conn.RemoteApp} on {conn.RemoteOs}) does not take keyboard and mouse input. " +
+                   "Update it, and turn on \"Let viewers use this computer's keyboard and mouse\" in its settings; or connect through VNC.";
+        }
+    }
     public string? RemoteOs => _connection?.RemoteOs;
     public string? RemoteApp => _connection?.RemoteApp;
 
@@ -108,12 +125,18 @@ public sealed class AgentClient : IDisposable, IScrollInjector, IAgentStream
     public event Action<AgentFrame>? StreamFrame;
     /// <summary>The stream ended without this side asking (agent stopped it, or disconnected); on the UI thread.</summary>
     public event Action<string?>? StreamStopped;
+    /// <summary>
+    /// The guest pointer changed, for a stream started with the cursor option: its new shape (null when only the
+    /// visibility changed) and whether it shows. Raised on the agent's receive thread.
+    /// </summary>
+    public event Action<BetterVnc.Protocol.CursorShape?, bool>? CursorChanged;
 
     /// <param name="area">Where the picture is shown, in device pixels (see <see cref="AgentMessage.Width"/>); null for no limit.</param>
-    public async Task<AgentConnection.VideoStartInfo> StartStreamAsync(int bitrateKbps, int maxFps, (int Width, int Height)? area = null)
+    /// <param name="cursor">Also have the agent send the pointer's shape (<see cref="CursorChanged"/>): for a session without VNC.</param>
+    public async Task<AgentConnection.VideoStartInfo> StartStreamAsync(int bitrateKbps, int maxFps, (int Width, int Height)? area = null, bool cursor = false)
     {
         var conn = _connection ?? throw new InvalidOperationException("The guest agent is not connected.");
-        var info = await conn.StartVideoAsync(StreamCodecs, bitrateKbps, maxFps, area, _cts.Token).ConfigureAwait(false);
+        var info = await conn.StartVideoAsync(StreamCodecs, bitrateKbps, maxFps, area, cursor && conn.SupportsCursor, _cts.Token).ConfigureAwait(false);
         StreamInfo = info;
         return info;
     }
@@ -220,6 +243,14 @@ public sealed class AgentClient : IDisposable, IScrollInjector, IAgentStream
                 if (StreamInfo == null) return;
                 StreamInfo = null;
                 Post(() => StreamStopped?.Invoke(reason ?? "the agent stopped the stream"));
+            };
+            conn.CursorReceived += frame =>
+            {
+                var h = frame.Header;
+                BetterVnc.Protocol.CursorShape? shape = null;
+                if (frame.Payload.Length > 0 && h is { Width: > 0 and <= 512, Height: > 0 and <= 512 } && frame.Payload.Length == h.Width * h.Height * 4)
+                    shape = new BetterVnc.Protocol.CursorShape(h.Width.Value, h.Height.Value, h.HotX ?? 0, h.HotY ?? 0, frame.Payload.ToArray());
+                CursorChanged?.Invoke(shape, h.Visible ?? true);
             };
             try
             {
@@ -447,6 +478,34 @@ public sealed class AgentClient : IDisposable, IScrollInjector, IAgentStream
         try
         {
             _ = conn.ScrollAsync(dx, dy, x, y, phase, wheelDx, wheelDy, _cts.Token)
+                .ContinueWith(t => _ = t.Exception, TaskContinuationOptions.OnlyOnFaulted | TaskContinuationOptions.ExecuteSynchronously);
+            return true;
+        }
+        catch (Exception) { return false; }
+    }
+
+    /// <summary>Fire-and-forget pointer injection for sessions without VNC (see <see cref="IAgentInput"/>). Never throws.</summary>
+    public bool TrySendPointer(int x, int y, int width, int height, int buttons)
+    {
+        var conn = _connection;
+        if (conn == null || !conn.IsConnected || !conn.SupportsInput) return false;
+        try
+        {
+            _ = conn.SendPointerAsync(x, y, width, height, buttons, _cts.Token)
+                .ContinueWith(t => _ = t.Exception, TaskContinuationOptions.OnlyOnFaulted | TaskContinuationOptions.ExecuteSynchronously);
+            return true;
+        }
+        catch (Exception) { return false; }
+    }
+
+    /// <summary>Fire-and-forget key injection for sessions without VNC (see <see cref="IAgentInput"/>). Never throws.</summary>
+    public bool TrySendKey(int scanCode, int virtualKey, bool down)
+    {
+        var conn = _connection;
+        if (conn == null || !conn.IsConnected || !conn.SupportsInput) return false;
+        try
+        {
+            _ = conn.SendKeyAsync(scanCode, virtualKey, down, _cts.Token)
                 .ContinueWith(t => _ = t.Exception, TaskContinuationOptions.OnlyOnFaulted | TaskContinuationOptions.ExecuteSynchronously);
             return true;
         }

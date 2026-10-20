@@ -130,7 +130,7 @@ public sealed class TestTimer : IUiTimer
         _tick = tick;
     }
 
-    public TimeSpan Interval { get; }
+    public TimeSpan Interval { get; set; }
     public bool IsEnabled { get; private set; }
     public void Start() => IsEnabled = true;
     public void Stop() => IsEnabled = false;

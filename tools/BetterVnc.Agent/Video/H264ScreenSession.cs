@@ -25,6 +25,7 @@ internal sealed class H264ScreenSession : IVideoSession
 
     private readonly Action<VideoFrame> _onFrame;
     private readonly Action<string?> _onEnded;
+    private readonly Action<GuestCursor>? _onCursor;
     private readonly Action<string>? _log;
     private readonly Thread _thread;
     private readonly ManualResetEventSlim _stop = new();
@@ -38,10 +39,12 @@ internal sealed class H264ScreenSession : IVideoSession
     private volatile bool _keyframe;
     private volatile bool _disposed;
 
-    public H264ScreenSession(VideoRequest request, Action<VideoFrame> onFrame, Action<string?> onEnded, Action<string>? log)
+    /// <param name="onCursor">Gets the pointer's shape and visibility as they change (Desktop Duplication reports them, GDI polls); null for none.</param>
+    public H264ScreenSession(VideoRequest request, Action<VideoFrame> onFrame, Action<string?> onEnded, Action<string>? log, Action<GuestCursor>? onCursor = null)
     {
         _onFrame = onFrame;
         _onEnded = onEnded;
+        _onCursor = onCursor;
         _log = log;
         _bitrateKbps = request.BitrateKbps;
         _maxFps = Math.Clamp(request.MaxFps, 1, 120);
@@ -75,6 +78,15 @@ internal sealed class H264ScreenSession : IVideoSession
     /// When only the primary display is streamed: where it sits in the virtual screen, measured from the virtual screen's
     /// top-left corner the way an RFB framebuffer is. Null while the whole desktop is streamed.
     /// </summary>
+    public ScreenArea? Area
+    {
+        get
+        {
+            var grabber = _grabber;
+            return new ScreenArea(grabber.Left, grabber.Top, grabber.Width, grabber.Height);
+        }
+    }
+
     public (int X, int Y)? Offset
     {
         get
@@ -128,7 +140,7 @@ internal sealed class H264ScreenSession : IVideoSession
         {
             try
             {
-                var g = new DxgiGrabber(_primaryOnly);
+                var g = new DxgiGrabber(_primaryOnly, _onCursor != null);
                 duplication = true;
                 return g;
             }
@@ -137,7 +149,7 @@ internal sealed class H264ScreenSession : IVideoSession
                 _log?.Invoke("Desktop Duplication unavailable, capturing with GDI: " + ex.Message);
             }
         }
-        return new GdiGrabber(_primaryOnly);
+        return new GdiGrabber(_primaryOnly, _onCursor != null);
     }
 
     /// <summary>False with BETTERVNC_SOFTWARE_ENCODER=1: the path a VM without a GPU takes, for trying it on a machine that has one.</summary>
@@ -233,6 +245,7 @@ internal sealed class H264ScreenSession : IVideoSession
                 }
                 lastChanged = changed;
                 captureWork += _grabber.WorkMicros;
+                if (_onCursor != null && _grabber.TakeCursor() is { } cursor) _onCursor(cursor);
                 if (changed)
                 {
                     pending.Add(captured);
@@ -404,13 +417,20 @@ internal interface IScreenGrabber : IDisposable
     bool TryCapture(int timeoutMs, byte[] bgra, DirtyRegion changed);
     /// <summary>Time the last <see cref="TryCapture"/> spent reading and copying pixels, without the wait.</summary>
     long WorkMicros { get; }
+    /// <summary>The pointer when it changed since the last call (the first call reports it as it is); null otherwise, or when it is not followed.</summary>
+    GuestCursor? TakeCursor();
 }
 
 internal sealed class DxgiGrabber : IScreenGrabber
 {
     private readonly DesktopDuplicator _dup;
+    private bool _initialShapeDone;
 
-    public DxgiGrabber(bool primaryOnly) { _dup = DesktopDuplicator.Create(primaryOnly); }
+    public DxgiGrabber(bool primaryOnly, bool trackPointer)
+    {
+        _dup = DesktopDuplicator.Create(primaryOnly);
+        _dup.TrackPointer = trackPointer;
+    }
 
     public string Name => $"Desktop Duplication ({_dup.OutputCount} output{(_dup.OutputCount == 1 ? "" : "s")})";
     public int Width => _dup.Width;
@@ -423,6 +443,25 @@ internal sealed class DxgiGrabber : IScreenGrabber
     {
         try { return _dup.TryCapture(timeoutMs, bgra, changed); }
         catch (DesktopDuplicationLostException ex) { throw new ScreenChangedException(ex.Message); }
+    }
+
+    public GuestCursor? TakeCursor()
+    {
+        if (!_dup.TrackPointer) return null;
+        bool changed = _dup.TakePointerUpdate(out bool visible, out var shape);
+        if (!_initialShapeDone)
+        {
+            // The compositor describes the pointer when it changes, which may take a while: until it has, the shape
+            // showing now comes from GDI, once.
+            _initialShapeDone = true;
+            if (shape == null && new CursorReader().Poll(out bool showing, out var current) && current != null)
+            {
+                shape = current;
+                if (!changed) visible = showing;
+                changed = true;
+            }
+        }
+        return changed ? new GuestCursor(visible, shape?.ToImage()) : null;
     }
 
     public void Dispose() => _dup.Dispose();
@@ -439,14 +478,16 @@ internal sealed class GdiGrabber : IScreenGrabber
     private readonly Rectangle _bounds;
     private readonly Bitmap _bitmap;
     private readonly Graphics _graphics;
+    private readonly CursorReader? _cursor;
     private byte[]? _picture;
     private int _failures;
 
     private static Rectangle Bounds(bool primaryOnly) => primaryOnly ? Screen.PrimaryScreen?.Bounds ?? SystemInformation.VirtualScreen : SystemInformation.VirtualScreen;
 
-    public GdiGrabber(bool primaryOnly)
+    public GdiGrabber(bool primaryOnly, bool trackPointer)
     {
         _primaryOnly = primaryOnly;
+        _cursor = trackPointer ? new CursorReader() : null;
         _bounds = Bounds(primaryOnly);
         if (_bounds.Width <= 0 || _bounds.Height <= 0) throw new InvalidOperationException("No screen to capture (the agent is not running on an interactive desktop).");
         _bitmap = new Bitmap(_bounds.Width, _bounds.Height, PixelFormat.Format32bppRgb);
@@ -522,9 +563,17 @@ internal sealed class GdiGrabber : IScreenGrabber
         }
     }
 
+    public GuestCursor? TakeCursor() =>
+        _cursor != null && _cursor.Poll(out bool visible, out var shape) ? new GuestCursor(visible, shape?.ToImage()) : null;
+
     public void Dispose()
     {
         _graphics.Dispose();
         _bitmap.Dispose();
     }
+}
+
+internal static class PointerShapeExtensions
+{
+    public static CursorImage ToImage(this PointerShape shape) => new(shape.Width, shape.Height, shape.HotX, shape.HotY, shape.Bgra);
 }

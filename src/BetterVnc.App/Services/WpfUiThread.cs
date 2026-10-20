@@ -31,6 +31,7 @@ public sealed class WpfUiThread : IUiThread
             _timer.Tick += (_, _) => tick();
         }
 
+        public TimeSpan Interval { get => _timer.Interval; set => _timer.Interval = value; }
         public bool IsEnabled => _timer.IsEnabled;
         public void Start() => _timer.Start();
         public void Stop() => _timer.Stop();

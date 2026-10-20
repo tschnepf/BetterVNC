@@ -70,9 +70,11 @@ public sealed class AgentServer : IAsyncDisposable
     {
         get
         {
-            var list = new List<string>(2);
-            if (_input != null) list.Add(AgentFeature.Scroll);
+            var list = new List<string>(4);
+            if (_input is { SupportsScroll: true }) list.Add(AgentFeature.Scroll);
             if (_video != null) list.Add(AgentFeature.Video);
+            if (_input is { SupportsPointerAndKeys: true }) list.Add(AgentFeature.Input);
+            if (_video is { SupportsCursor: true }) list.Add(AgentFeature.Cursor);
             return list.ToArray();
         }
     }
@@ -281,7 +283,7 @@ public sealed class AgentServer : IAsyncDisposable
 
     private void HandleScroll(AgentMessage req)
     {
-        if (_input == null) return; // not announced, so a well-behaved viewer never sends it; ignore rather than fail the session
+        if (_input is not { SupportsScroll: true }) return; // not announced, so a well-behaved viewer never sends it; ignore rather than fail the session
         double dx = req.Dx ?? 0, dy = req.Dy ?? 0;
         if (!double.IsFinite(dx) || !double.IsFinite(dy)) return;
         Log?.Invoke($"Scroll: dx={dx:0.##} dy={dy:0.##} {req.Phase}");
@@ -413,6 +415,7 @@ public sealed class AgentServer : IAsyncDisposable
             finally
             {
                 StopVideo(notifyViewer: false);
+                ReleaseInput();
                 if (Authenticated) _server.Log?.Invoke($"{Peer}: disconnected");
                 Close();
             }
@@ -448,6 +451,8 @@ public sealed class AgentServer : IAsyncDisposable
                 MaxWidth = PictureSide(req.Width),
                 MaxHeight = PictureSide(req.Height),
             };
+            // The pointer's shape only for a viewer that asked: one with a VNC connection gets it from there.
+            bool cursor = req.Cursor == true && source.SupportsCursor;
 
             lock (_videoLock)
             {
@@ -471,7 +476,8 @@ public sealed class AgentServer : IAsyncDisposable
                 {
                     session = source.Start(request,
                         frame => QueueFrame(frames, frame),
-                        reason => _ = OnVideoEndedAsync(frames, reason));
+                        reason => _ = OnVideoEndedAsync(frames, reason),
+                        cursor ? QueueCursor : null);
                 }
                 catch (Exception ex)
                 {
@@ -482,7 +488,7 @@ public sealed class AgentServer : IAsyncDisposable
                 _videoSession = session;
                 started = session;
                 _framePump = Task.Run(() => PumpFramesAsync(frames));
-                _server.Log?.Invoke($"{Peer}: video started ({session.Codec}, {session.BitrateKbps} kbit/s, {session.MaxFps} fps max, {session.Width}x{session.Height}{(session.Offset is { } at ? $" at {at.X},{at.Y}" : "")}, {session.EncoderKind}{(request.MaxWidth > 0 || request.MaxHeight > 0 ? ", viewer area " + Area(request.MaxWidth, request.MaxHeight) : "")})");
+                _server.Log?.Invoke($"{Peer}: video started ({session.Codec}, {session.BitrateKbps} kbit/s, {session.MaxFps} fps max, {session.Width}x{session.Height}{(session.Offset is { } at ? $" at {at.X},{at.Y}" : "")}, {session.EncoderKind}{(request.MaxWidth > 0 || request.MaxHeight > 0 ? ", viewer area " + Area(request.MaxWidth, request.MaxHeight) : "")}{(cursor ? ", with the pointer's shape" : "")})");
                 return new AgentFrame(new AgentMessage
                 {
                     Type = AgentMessageType.VideoStarted,
@@ -495,6 +501,7 @@ public sealed class AgentServer : IAsyncDisposable
                     OffsetX = session.Offset?.X,
                     OffsetY = session.Offset?.Y,
                     Encoder = session.EncoderKind,
+                    Cursor = cursor ? true : null,
                 });
             }
         }
@@ -609,6 +616,120 @@ public sealed class AgentServer : IAsyncDisposable
             _framePump = null;
         }
 
+        // ---- cursor (agent to viewer, with a stream that asked for it)
+
+        private readonly object _cursorLock = new();
+        private CursorImage? _cursorShape;   // the newest shape not sent yet
+        private bool? _cursorVisible;        // the newest visibility not sent yet; null when nothing waits
+        private bool _cursorSending;
+
+        /// <summary>
+        /// From the capture thread: remembers the newest pointer state and has it sent. Only the latest state matters, so a
+        /// slow link merges updates (a newer shape replaces one not sent yet) instead of queueing them.
+        /// </summary>
+        private void QueueCursor(GuestCursor cursor)
+        {
+            if (cursor.Shape is { } s && (s.Width is <= 0 or > 512 || s.Height is <= 0 or > 512 || s.Bgra.Length != s.Width * s.Height * 4)) return;
+            lock (_cursorLock)
+            {
+                if (cursor.Shape != null) _cursorShape = cursor.Shape;
+                _cursorVisible = cursor.Visible;
+                if (_cursorSending) return;
+                _cursorSending = true;
+            }
+            _ = Task.Run(SendCursorAsync);
+        }
+
+        private async Task SendCursorAsync()
+        {
+            for (;;)
+            {
+                var header = new AgentMessage { Type = AgentMessageType.Cursor };
+                byte[] payload = Array.Empty<byte>();
+                lock (_cursorLock)
+                {
+                    if (_cursorVisible is not { } visible) { _cursorSending = false; return; }
+                    header.Visible = visible;
+                    if (_cursorShape is { } shape)
+                    {
+                        header.Width = shape.Width;
+                        header.Height = shape.Height;
+                        header.HotX = shape.HotX;
+                        header.HotY = shape.HotY;
+                        payload = shape.Bgra;
+                    }
+                    _cursorShape = null;
+                    _cursorVisible = null;
+                }
+                try { await SendAsync(header, payload, CancellationToken.None).ConfigureAwait(false); }
+                catch (Exception)
+                {
+                    lock (_cursorLock) _cursorSending = false; // the session is going away
+                    return;
+                }
+            }
+        }
+
+        // ---- remote control (viewer to agent)
+
+        private int _buttons; // what this viewer holds down; the read loop is the only thread that touches these
+        private (double X, double Y, ScreenArea? Area) _pointer = (0.5, 0.5, null);
+        private readonly HashSet<(int Scan, int Vk)> _keysDown = new();
+        private string? _lastInputError;
+
+        private void HandlePointer(AgentMessage req)
+        {
+            var input = _server._input;
+            if (input is not { SupportsPointerAndKeys: true }) return; // not announced: ignore, as for scroll
+            if (req.X is not { } x || req.Y is not { } y || req.Width is not { } width || req.Height is not { } height || width <= 0 || height <= 0) return;
+            // The middle of the pixel: with an unscaled picture that lands on exactly the same pixel of the guest's screen.
+            double fx = Math.Clamp((x + 0.5) / width, 0, 1), fy = Math.Clamp((y + 0.5) / height, 0, 1);
+            int buttons = (req.Buttons ?? 0) & AgentButton.All;
+            int pressed = buttons & ~_buttons, released = _buttons & ~buttons;
+            ScreenArea? area;
+            lock (_videoLock) area = _videoSession?.Area;
+            _buttons = buttons;
+            _pointer = (fx, fy, area);
+            try { input.Pointer(fx, fy, area, pressed, released); }
+            catch (Exception ex) { InputFailed("Pointer", ex); }
+        }
+
+        private void HandleKey(AgentMessage req)
+        {
+            var input = _server._input;
+            if (input is not { SupportsPointerAndKeys: true }) return;
+            int scan = req.ScanCode ?? 0, vk = req.VirtualKey ?? 0;
+            if (req.Down is not { } down || scan is < 0 or > 0xFFFF || vk is < 0 or > 0xFF || (scan == 0 && vk == 0)) return;
+            if (down) _keysDown.Add((scan, vk));
+            else _keysDown.Remove((scan, vk));
+            try { input.Key(scan, vk, down); }
+            catch (Exception ex) { InputFailed("Key", ex); }
+        }
+
+        /// <summary>Logs an injection failure once until a different one happens: on the secure desktop every event fails.</summary>
+        private void InputFailed(string what, Exception ex)
+        {
+            if (ex.Message == _lastInputError) return;
+            _lastInputError = ex.Message;
+            _server.Log?.Invoke($"{Peer}: {what} injection failed: {ex.Message}");
+        }
+
+        /// <summary>A viewer that goes away mid-press must not leave a key or button down on the guest.</summary>
+        private void ReleaseInput()
+        {
+            var input = _server._input;
+            if (input is not { SupportsPointerAndKeys: true } || (_keysDown.Count == 0 && _buttons == 0)) return;
+            try
+            {
+                foreach (var (scan, vk) in _keysDown) input.Key(scan, vk, false);
+                if (_buttons != 0) input.Pointer(_pointer.X, _pointer.Y, _pointer.Area, 0, _buttons);
+                _server.Log?.Invoke($"{Peer}: released {_keysDown.Count} key(s){(_buttons != 0 ? " and the mouse buttons" : "")} the viewer still held");
+            }
+            catch (Exception ex) { _server.Log?.Invoke($"{Peer}: releasing held input failed: {ex.Message}"); }
+            _keysDown.Clear();
+            _buttons = 0;
+        }
+
         /// <summary>Checks the viewer's proof against its paired key (by viewer id) and then the token. Returns the secret that matched.</summary>
         private (bool ok, string secret, string reason, string code) Authenticate(AgentMessage hello, string nonce)
         {
@@ -697,6 +818,12 @@ public sealed class AgentServer : IAsyncDisposable
                 case AgentMessageType.Scroll:
                     _server.HandleScroll(h);
                     return null; // fire and forget: a reply per wheel tick would only add latency
+                case AgentMessageType.Pointer:
+                    HandlePointer(h);
+                    return null;
+                case AgentMessageType.Key:
+                    HandleKey(h);
+                    return null;
                 case AgentMessageType.StartVideo:
                     return HandleStartVideo(h);
                 case AgentMessageType.SetVideo:
@@ -707,8 +834,15 @@ public sealed class AgentServer : IAsyncDisposable
                 case AgentMessageType.Pong:
                     return null; // informational
                 default:
-                    return new AgentFrame(AgentMessage.ErrorReply(h.Id, $"Unknown message type '{h.Type}'."));
+                    // From a newer viewer. A request (it carries an id) gets an error, so the viewer is not left waiting; a
+                    // notification is ignored, the way viewers ignore what they do not know. An error without an id would
+                    // end the viewer's connection.
+                    if (h.Id != null) return new AgentFrame(AgentMessage.ErrorReply(h.Id, $"Unknown message type '{h.Type}'."));
+                    if (_ignoredTypes.Add(h.Type)) _server.Log?.Invoke($"{Peer}: ignoring '{h.Type}' messages (unknown to this agent)");
+                    return null;
             }
         }
+
+        private readonly HashSet<string> _ignoredTypes = new();
     }
 }

@@ -24,9 +24,13 @@ public sealed class FakeAgentStream : IAgentStream
     public int KeyframeRequests => Volatile.Read(ref _keyframeRequests);
     public ConcurrentQueue<(int Width, int Height)> Areas { get; } = new();
 
-    public Task<AgentConnection.VideoStartInfo> StartStreamAsync(int bitrateKbps, int maxFps, (int Width, int Height)? area = null)
+    /// <summary>Whether the last start asked for the pointer's shape (sessions without VNC).</summary>
+    public bool CursorRequested { get; private set; }
+
+    public Task<AgentConnection.VideoStartInfo> StartStreamAsync(int bitrateKbps, int maxFps, (int Width, int Height)? area = null, bool cursor = false)
     {
         Starts++;
+        CursorRequested = cursor;
         StreamInfo = new AgentConnection.VideoStartInfo(AgentVideoCodec.H264, bitrateKbps, maxFps, 64, 48, "fake");
         return Task.FromResult(StreamInfo);
     }
@@ -116,6 +120,11 @@ public sealed class FakeVideoSurface : IVideoSurface
         Interlocked.Increment(ref _framesShown);
         release?.Invoke(bgrx);
     }
+
+    public CursorShape? RemoteCursor { get; private set; }
+    public bool RemoteCursorVisible { get; private set; } = true;
+    public void SetRemoteCursor(CursorShape shape) => RemoteCursor = shape;
+    public void SetRemoteCursorVisible(bool visible) => RemoteCursorVisible = visible;
 
     public void ChangePictureArea(int width, int height)
     {
@@ -272,7 +281,13 @@ public sealed class FakeSessionView : ISessionView
     public void SetStatistics(string text) => Statistics = text;
     public void SetTitle(string text) => Title = text;
     public void AttachSession(VncClient client) => Attached = client;
-    public void DetachSession() => Attached = null;
+    public IAgentInput? AgentInput { get; private set; }
+    public (int Width, int Height)? AgentPictureSize { get; private set; }
+    public int Focused { get; private set; }
+    public void AttachAgent(IAgentInput input) => AgentInput = input;
+    public void SetAgentPictureSize(int width, int height) => AgentPictureSize = (width, height);
+    public void FocusPicture() => Focused++;
+    public void DetachSession() { Attached = null; AgentInput = null; }
     public void FitToRemote(int width, int height) { }
     public void SetScrollInjector(IScrollInjector? injector) => ScrollInjector = injector;
     public void UseMacKeyboard() => MacKeyboard = true;
@@ -290,4 +305,60 @@ public sealed class FakeSessionView : ISessionView
     }
 
     public void ShowMessage(string title, string text, bool warning) => Messages.Add((title, text));
+}
+
+/// <summary>The guest's keyboard and mouse, for an in-process agent that may be controlled; ignores what it gets.</summary>
+public sealed class FakeGuestInput : IGuestInput
+{
+    public bool SupportsPointerAndKeys => true;
+    public void Scroll(double dx, double dy, double? wheelDx, double? wheelDy, string? phase) { }
+    public void Pointer(double x, double y, ScreenArea? area, int pressed, int released) { }
+    public void Key(int scanCode, int virtualKey, bool down) { }
+}
+
+/// <summary>The guest's screen for an in-process agent: an H.264 stream of 1280×720 that the test ends or sends pointers on.</summary>
+public sealed class FakeGuestScreen : IGuestVideoSource
+{
+    private Action<string?>? _onEnded;
+    private Action<GuestCursor>? _onCursor;
+
+    public IReadOnlyList<string> Codecs { get; } = new[] { AgentVideoCodec.H264 };
+    public bool SupportsCursor => true;
+    public int Starts { get; private set; }
+    /// <summary>The viewer asked for the pointer's shape with the last start.</summary>
+    public bool CursorRequested { get; private set; }
+
+    public IVideoSession Start(VideoRequest request, Action<VideoFrame> onFrame, Action<string?> onEnded) => Start(request, onFrame, onEnded, null);
+
+    public IVideoSession Start(VideoRequest request, Action<VideoFrame> onFrame, Action<string?> onEnded, Action<GuestCursor>? onCursor)
+    {
+        Starts++;
+        _onEnded = onEnded;
+        _onCursor = onCursor;
+        CursorRequested = onCursor != null;
+        return new Session(request);
+    }
+
+    public void SendCursor(GuestCursor cursor) => _onCursor?.Invoke(cursor);
+    public void End(string reason) => _onEnded?.Invoke(reason);
+
+    private sealed class Session : IVideoSession
+    {
+        public Session(VideoRequest request)
+        {
+            Codec = request.Codec;
+            BitrateKbps = request.BitrateKbps;
+            MaxFps = request.MaxFps;
+        }
+
+        public string Codec { get; }
+        public int BitrateKbps { get; private set; }
+        public int MaxFps { get; private set; }
+        public int Width => 1280;
+        public int Height => 720;
+        public string EncoderKind => AgentVideoEncoder.Software;
+        public void Set(int? bitrateKbps, int? maxFps) { BitrateKbps = bitrateKbps ?? BitrateKbps; MaxFps = maxFps ?? MaxFps; }
+        public void RequestKeyframe() { }
+        public void Dispose() { }
+    }
 }

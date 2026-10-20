@@ -27,11 +27,8 @@ public sealed class AgentHost : IAsyncDisposable
         LogPath = Path.Combine(Path.GetDirectoryName(Path.GetFullPath(configPath)) ?? ".", "bettervnc-agent.log");
         Version = typeof(AgentHost).Assembly.GetName().Version?.ToString(3) ?? "?";
         Clipboard = CreateClipboard();
-        if (config.EnableScroll)
-        {
-            try { Input = CreateInput(config); }
-            catch (Exception ex) { Log("Scroll injection unavailable: " + ex.Message); }
-        }
+        try { Input = CreateInput(config); }
+        catch (Exception ex) { Log("Input injection unavailable: " + ex.Message); }
         if (config.EnableVideo)
         {
             try { Video = CreateVideo(); }
@@ -97,6 +94,14 @@ public sealed class AgentHost : IAsyncDisposable
     {
         if (_server != null) return;
         if (!IPAddress.TryParse(Config.Listen, out var address)) throw new InvalidOperationException($"'{Config.Listen}' is not an IP address.");
+#if WINDOWS
+        // So the settings window's switches apply with the restart it does, without restarting the agent.
+        if (Input is WindowsInput windowsInput)
+        {
+            windowsInput.SupportsScroll = Config.EnableScroll;
+            windowsInput.SupportsPointerAndKeys = Config.EnableInput;
+        }
+#endif
         var server = new AgentServer(Clipboard, new AgentServerOptions
         {
             Token = string.IsNullOrWhiteSpace(Config.Token) ? null : Config.Token.Trim(),
@@ -215,8 +220,9 @@ public sealed class AgentHost : IAsyncDisposable
     private IGuestInput? CreateInput(AgentConfig cfg)
     {
 #if WINDOWS
-        return new WindowsInput(cfg.ScrollScale);
+        return cfg.EnableScroll || cfg.EnableInput ? new WindowsInput(cfg.ScrollScale, cfg.EnableScroll, cfg.EnableInput) : null;
 #else
+        if (!cfg.EnableScroll) return null; // pointer and keys are Windows only so far
         if (OperatingSystem.IsMacOS())
             return new MacInput(cfg.ScrollScale, cfg.ScrollInvert, cfg.ScrollPhases) { Log = Log, AccessibilityMissing = PermissionsNeededHandler };
         if (OperatingSystem.IsLinux() || OperatingSystem.IsFreeBSD()) return LinuxInput.TryCreate(cfg.ScrollScale, Log);

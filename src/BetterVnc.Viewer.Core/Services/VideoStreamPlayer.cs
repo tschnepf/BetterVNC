@@ -18,11 +18,20 @@ namespace BetterVnc.Viewer.Core.Services;
 /// When the agent sends nothing for a moment (the screen is still) the view switches back to the RFB framebuffer and
 /// a full lossless update is requested, so a quiet desktop is always shown pixel-exact; the first new frame switches
 /// back to the stream.
+/// In a session without VNC (no <see cref="IRfbPicture"/>) the stream is the only picture and the agent also sends the
+/// pointer's shape. There is no lossless picture to fall back to, so when the screen goes still the player asks for
+/// one key frame instead: the last delta frame can carry compression residue (a faint trace where a window was), which
+/// would otherwise stay until that part of the screen changes.
 /// </summary>
 public sealed class VideoStreamPlayer : IDisposable
 {
     /// <summary>No frame for this long means the screen is still: show the lossless RFB picture instead.</summary>
     public static readonly TimeSpan IdleAfter = TimeSpan.FromMilliseconds(700);
+    /// <summary>
+    /// Without VNC: no frame for this long means the screen is still, and one key frame redraws it. Longer than any
+    /// caret blink (Windows allows up to 1.2 s), so a blinking caret does not cost a key frame per blink.
+    /// </summary>
+    public static readonly TimeSpan StillRedrawAfter = TimeSpan.FromMilliseconds(1500);
     /// <summary>RFB update pacing while the stream carries the picture: enough for cursor shapes and resizes, little pixel traffic.</summary>
     public static readonly TimeSpan RfbIntervalWhileStreaming = TimeSpan.FromSeconds(1);
     /// <summary>
@@ -32,7 +41,7 @@ public sealed class VideoStreamPlayer : IDisposable
     public static readonly TimeSpan AreaSettleTime = TimeSpan.FromMilliseconds(300);
 
     private readonly IAgentStream _agent;
-    private readonly IRfbPicture _client;
+    private readonly IRfbPicture? _client;
     private readonly IVideoSurface _view;
     private readonly IUiThread _ui;
     private readonly Channel<AgentFrame> _frames;
@@ -47,6 +56,9 @@ public sealed class VideoStreamPlayer : IDisposable
     private int _generation;
     private volatile bool _lostFrames;
     private long _lastKeyframeRequest;
+    // Sessions without VNC: the still screen was redrawn by a key frame since the last change; and when that was asked.
+    private bool _stillRefreshed;
+    private long _stillRefreshAskedAt;
     private bool _disposed;
 
     // statistics (read from the UI thread, written from the decode thread; slightly stale is fine)
@@ -54,8 +66,9 @@ public sealed class VideoStreamPlayer : IDisposable
     private long _bytesAtRate;
     private DateTime _rateTime = DateTime.UtcNow;
 
+    /// <param name="client">The VNC connection under the stream; null for a session through the agent alone.</param>
     /// <param name="jpeg">Decodes motion JPEG frames; <paramref name="jpegName"/> names it in the status bar ("WIC").</param>
-    public VideoStreamPlayer(IAgentStream agent, IRfbPicture client, IVideoSurface view, IUiThread ui, IJpegDecoder jpeg, string jpegName)
+    public VideoStreamPlayer(IAgentStream agent, IRfbPicture? client, IVideoSurface view, IUiThread ui, IJpegDecoder jpeg, string jpegName)
     {
         _agent = agent;
         _client = client;
@@ -118,7 +131,8 @@ public sealed class VideoStreamPlayer : IDisposable
         _view.EnableGpuVideo();
         // The agent encodes at most the size the picture is shown at (a Mac scales on its GPU), so it lands here 1:1.
         var area = _view.PictureArea;
-        var info = await _agent.StartStreamAsync(mode.BitrateKbps, mode.MaxFps, area).ConfigureAwait(true);
+        // Without VNC nothing else tells this side what the pointer looks like.
+        var info = await _agent.StartStreamAsync(mode.BitrateKbps, mode.MaxFps, area, cursor: _client == null).ConfigureAwait(true);
         _sentArea = area;
         Mode = mode;
         DecodePath = null;
@@ -129,12 +143,16 @@ public sealed class VideoStreamPlayer : IDisposable
         Interlocked.Exchange(ref _framesSkipped, 0);
         _bytesAtRate = 0;
         _decodeLoop ??= Task.Run(() => DecodeLoopAsync(_cts.Token));
-        // RFB keeps running at a trickle: cursor shapes and resizes still arrive, pixels mostly come from the stream.
-        _client.UpdateInterval = RfbIntervalWhileStreaming;
         IdleFallbackActive = false;
+        _stillRefreshed = false;
+        // RFB keeps running at a trickle: cursor shapes and resizes still arrive, pixels mostly come from the stream.
+        if (_client != null) _client.UpdateInterval = RfbIntervalWhileStreaming;
+        _idleTimer.Interval = _client != null ? IdleAfter : StillRedrawAfter;
         _idleTimer.Start();
         if (_view.PictureArea != area) _areaTimer.Start(); // resized while the agent was starting
-        string where = info.OffsetX is { } ox ? $" (the primary display, at {ox},{info.OffsetY ?? 0} of the desktop; the other displays stay on VNC)" : "";
+        string where = info.OffsetX is not { } ox ? ""
+            : _client != null ? $" (the primary display, at {ox},{info.OffsetY ?? 0} of the desktop; the other displays stay on VNC)"
+            : " (the primary display only: the desktop is too large to stream whole)";
         Message?.Invoke($"Streaming {info.Codec} {info.Width}×{info.Height}{where} from the guest agent ({info.EncoderKind} encoder, {info.BitrateKbps / 1000.0:0.#} Mbit/s, {info.MaxFps} fps max)");
     }
 
@@ -153,6 +171,7 @@ public sealed class VideoStreamPlayer : IDisposable
     private void BackToRfb()
     {
         IdleFallbackActive = false;
+        if (_client == null) return; // no RFB picture to go back to: the last frame stays
         _view.ShowFramebuffer();
         _client.RefreshPicture();
         _client.UpdateInterval = TimeSpan.Zero;
@@ -165,7 +184,7 @@ public sealed class VideoStreamPlayer : IDisposable
         _idleTimer.Stop();
         _areaTimer.Stop();
         BackToRfb();
-        Message?.Invoke($"Stream ended: {reason ?? "stopped by the agent"}; back to VNC");
+        Message?.Invoke($"Stream ended: {reason ?? "stopped by the agent"}" + (_client != null ? "; back to VNC" : ""));
         Ended?.Invoke(reason);
     }
 
@@ -262,7 +281,9 @@ public sealed class VideoStreamPlayer : IDisposable
                 var info = _agent.StreamInfo;
                 string codec = h.Codec ?? info?.Codec ?? AgentVideoCodec.Jpeg;
                 // Where the frame sits in the desktop when it shows only part of it (the frame header wins over videoStarted).
-                (int X, int Y)? offset = h.OffsetX is { } hx ? (hx, h.OffsetY ?? 0) : info?.OffsetX is { } ix ? (ix, info.OffsetY ?? 0) : null;
+                // Without VNC there is no desktop around it: the frame is the whole picture.
+                (int X, int Y)? offset = _client == null ? null
+                    : h.OffsetX is { } hx ? (hx, h.OffsetY ?? 0) : info?.OffsetX is { } ix ? (ix, info.OffsetY ?? 0) : null;
                 int gen = Volatile.Read(ref _generation);
                 if (gen != generation)
                 {
@@ -383,6 +404,16 @@ public sealed class VideoStreamPlayer : IDisposable
     private void OnFramePresented()
     {
         if (!IsStreaming) return;
+        if (_client == null)
+        {
+            // The first frame after asking is (most likely) the key frame that redraws the still screen; anything later
+            // is a change, after which the screen gets redrawn again once it is still.
+            if (_stillRefreshAskedAt != 0 && Environment.TickCount64 - _stillRefreshAskedAt < 2000) _stillRefreshAskedAt = 0;
+            else _stillRefreshed = false;
+            _idleTimer.Stop();
+            _idleTimer.Start();
+            return;
+        }
         if (IdleFallbackActive)
         {
             // Movement again: the stream is on screen and RFB goes back to its trickle.
@@ -396,12 +427,29 @@ public sealed class VideoStreamPlayer : IDisposable
     private void OnIdle()
     {
         _idleTimer.Stop();
+        if (_client == null)
+        {
+            if (IsStreaming && !_stillRefreshed) _ = RedrawStillScreenAsync();
+            return;
+        }
         if (!IsStreaming || IdleFallbackActive) return;
         // Nothing moved for a while: show the exact pixels from RFB until the next frame arrives.
         IdleFallbackActive = true;
         _view.ShowFramebuffer();
         _client.RefreshPicture();
         _client.UpdateInterval = TimeSpan.Zero;
+    }
+
+    /// <summary>Sessions without VNC: one key frame of the still screen, so no compression residue stays on it.</summary>
+    private async Task RedrawStillScreenAsync()
+    {
+        _stillRefreshed = true;
+        _stillRefreshAskedAt = Environment.TickCount64;
+        try { await _agent.SetStreamAsync(null, null, keyframe: true); }
+        catch (Exception)
+        {
+            _stillRefreshAskedAt = 0; // the stream is going away, or the next change brings a frame anyway
+        }
     }
 
     public void Dispose()
@@ -419,7 +467,7 @@ public sealed class VideoStreamPlayer : IDisposable
         {
             Mode = null;
             _ = _agent.StopStreamAsync();
-            if (_client.IsConnected) BackToRfb();
+            if (_client?.IsConnected == true) BackToRfb();
         }
         _cts.Dispose();
     }

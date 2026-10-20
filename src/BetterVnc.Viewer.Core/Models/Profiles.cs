@@ -116,6 +116,12 @@ public sealed class ConnectionProfile : ObservableBase
 
     // Guest agent (rich clipboard: images, files, HTML)
     public bool AgentEnabled { get; set; }
+    /// <summary>
+    /// No VNC server: the picture is the agent's stream and keyboard and mouse go through the agent, for a Windows
+    /// machine that runs only the agent. Host and port above are then not used; the agent's host (or the VNC host
+    /// field, when that is empty) is. For Unraid VMs this ignores the VNC console.
+    /// </summary>
+    public bool AgentOnly { get; set; }
     /// <summary>Host the agent listens on; null means the VNC host. Unraid VMs need the guest's own address here.</summary>
     public string? AgentHost { get; set; }
     public int AgentPort { get; set; } = 5970;
@@ -155,9 +161,9 @@ public sealed class ConnectionProfile : ObservableBase
     [JsonIgnore]
     public string KindLabel => Kind switch
     {
-        ConnectionKind.UnraidVm => "Unraid VM",
+        ConnectionKind.UnraidVm => AgentOnly ? "Unraid VM, agent" : "Unraid VM",
         ConnectionKind.Mac => "macOS",
-        _ => "VNC",
+        _ => AgentOnly ? "Agent" : "VNC",
     };
 
     [JsonIgnore]
@@ -167,6 +173,7 @@ public sealed class ConnectionProfile : ObservableBase
         {
             var target = Kind == ConnectionKind.UnraidVm && !string.IsNullOrEmpty(UnraidVmName)
                 ? $"{UnraidVmName} on {Host}"
+                : AgentOnly ? $"{(string.IsNullOrWhiteSpace(AgentHost) ? Host : AgentHost)}:{AgentPort}"
                 : $"{Host}:{Port}";
             return LastConnected is { } t ? $"{target}  ·  last used {t:g}" : target;
         }

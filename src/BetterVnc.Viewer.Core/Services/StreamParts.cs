@@ -19,7 +19,8 @@ public interface IAgentStream
     event Action<string?>? StreamStopped;
 
     /// <param name="area">Where the picture is shown, in device pixels (see <see cref="AgentMessage.Width"/>); null for no limit.</param>
-    Task<AgentConnection.VideoStartInfo> StartStreamAsync(int bitrateKbps, int maxFps, (int Width, int Height)? area = null);
+    /// <param name="cursor">Also have the agent send the pointer's shape: for a session without VNC.</param>
+    Task<AgentConnection.VideoStartInfo> StartStreamAsync(int bitrateKbps, int maxFps, (int Width, int Height)? area = null, bool cursor = false);
     /// <summary>The area the picture is shown in changed (device pixels); an agent that can scale encodes no larger than that.</summary>
     Task SetStreamAreaAsync(int width, int height);
     Task SetStreamAsync(int? bitrateKbps, int? maxFps, bool keyframe = false);
@@ -103,6 +104,12 @@ public interface IVideoSurface
     /// has been copied.
     /// </summary>
     void PresentExternalFrame(byte[] bgrx, int width, int height, Action<byte[]>? release = null, (int X, int Y)? offset = null);
+
+    /// <summary>The pointer's shape from the guest agent, for sessions without VNC. Any thread.</summary>
+    void SetRemoteCursor(CursorShape shape);
+
+    /// <summary>Hides the pointer over the picture while the remote hides its own (typing, a game). Any thread.</summary>
+    void SetRemoteCursorVisible(bool visible);
 }
 
 /// <summary>
@@ -114,4 +121,16 @@ public interface IVideoSurface
 public interface IScrollInjector
 {
     bool TrySendScroll(double dx, double dy, int x, int y, string phase, double wheelDx, double wheelDy);
+}
+
+/// <summary>
+/// Keyboard and mouse for a session without a VNC server, injected by the guest agent. Pointer positions are pixels in
+/// the picture the view shows (the stream's frames), which is <c>width</c>×<c>height</c>; buttons are
+/// <see cref="AgentButton"/> bits. Keys carry the set 1 scan code (0xE000 added for extended keys, 0 for none) and the
+/// virtual key. Both return false when the agent cannot take the event right now.
+/// </summary>
+public interface IAgentInput
+{
+    bool TrySendPointer(int x, int y, int width, int height, int buttons);
+    bool TrySendKey(int scanCode, int virtualKey, bool down);
 }

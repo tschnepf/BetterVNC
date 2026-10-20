@@ -27,6 +27,15 @@ public interface ISessionView
 
     /// <summary>Shows <paramref name="client"/>'s framebuffer, takes its input, and gives the picture keyboard focus.</summary>
     void AttachSession(VncClient client);
+    /// <summary>
+    /// A session without VNC: the picture comes only from the agent's stream, and pointer and keys go to
+    /// <paramref name="input"/>. Black until <see cref="SetAgentPictureSize"/> or the first frame.
+    /// </summary>
+    void AttachAgent(IAgentInput input);
+    /// <summary>A session without VNC: the stream's picture size, known at its start.</summary>
+    void SetAgentPictureSize(int width, int height);
+    /// <summary>Gives the picture keyboard focus.</summary>
+    void FocusPicture();
     /// <summary>Stops showing and feeding the previous connection.</summary>
     void DetachSession();
     /// <summary>Sizes the window so a remote screen of this size shows 1:1 when it fits.</summary>

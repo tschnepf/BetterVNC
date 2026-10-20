@@ -33,6 +33,8 @@ public interface IUiThread
 /// <summary>A repeating timer on the UI thread; use it from the UI thread only.</summary>
 public interface IUiTimer
 {
+    /// <summary>Time between ticks; a change applies from the next start.</summary>
+    TimeSpan Interval { get; set; }
     bool IsEnabled { get; }
     void Start();
     void Stop();

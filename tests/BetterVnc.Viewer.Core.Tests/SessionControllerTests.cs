@@ -60,6 +60,21 @@ public sealed class SessionControllerTests : IAsyncDisposable
         return profile;
     }
 
+    /// <summary>A guest agent that streams and takes keyboard and mouse: what a session without VNC needs.</summary>
+    private ConnectionProfile WithControllableAgent(ConnectionProfile profile, FakeGuestScreen screen)
+    {
+        _agentServer = new AgentServer(new FakeLocalClipboard(), new AgentServerOptions { Token = AgentToken, ListenAddress = IPAddress.Loopback, Port = 0 },
+            new FakeGuestInput(), screen);
+        _agentServer.Start();
+        profile.AgentOnly = true;
+        profile.AgentEnabled = true;
+        profile.AgentAuth = AgentAuthMode.Token;
+        profile.AgentProtectedToken = _profiles.Protect(AgentToken);
+        profile.AgentHost = "127.0.0.1";
+        profile.AgentPort = _agentServer.Port;
+        return profile;
+    }
+
     private async Task<SessionController> ConnectAsync(ConnectionProfile profile)
     {
         var controller = await _ui.RunAsync(() => new SessionController(profile, _view, new SessionServices
@@ -280,6 +295,72 @@ public sealed class SessionControllerTests : IAsyncDisposable
 
         Assert.Equal("again", CutText(_server.WaitFor(ClientMessage.ClientCutText)));
         Assert.Contains("Clipboard text sent to remote", _view.StatusLog);
+    }
+
+    // ------------------------------------------------------------------ sessions without VNC
+
+    [Fact]
+    public async Task A_session_without_VNC_streams_through_the_agent_and_restarts_a_stream_that_ended()
+    {
+        var screen = new FakeGuestScreen();
+        var profile = WithControllableAgent(Profile(PictureMode.VncLossless), screen);
+        var c = await ConnectAsync(profile);
+
+        // A VNC mode in the profile means the best stream; the agent's stream is the picture, with its pointer.
+        Assert.Equal(PictureMode.StreamQuality, c.WantedPicture.Mode);
+        await _ui.UntilAsync(() => c.IsConnected, "the agent's stream");
+        Assert.Null(c.Client);
+        Assert.Same(c.Agent, _view.AgentInput);
+        Assert.Equal((1280, 720), _view.AgentPictureSize);
+        Assert.False(_view.OverlayVisible);
+        Assert.Equal("test  ·  fake through the guest agent", _view.Title);
+        Assert.Equal(1, _connectionChanges);
+        Assert.True(screen.CursorRequested);
+        Assert.Equal("This connection has no VNC server: the picture is the guest agent's stream.",
+            await _ui.RunAsync(() => c.WhyUnavailable(PictureModes.Get(PictureMode.VncLossless))));
+
+        // The pointer's shape arrives straight from the receive thread.
+        screen.SendCursor(new GuestCursor(true, new CursorImage(2, 2, 1, 1, new byte[16])));
+        await _ui.UntilAsync(() => _view.Surface.RemoteCursor != null, "the pointer shape");
+
+        // The remote stops streaming (capture failed): no picture, then a retry that brings it back.
+        screen.End("capture failed");
+        await _ui.UntilAsync(() => !c.IsConnected, "the stream to end");
+        Assert.Equal("No picture", _view.OverlayTitle);
+        Assert.Contains("capture failed", _view.OverlayDetail);
+        await _ui.Timer(TimeSpan.FromSeconds(3)).FireAsync();
+        await _ui.UntilAsync(() => c.IsConnected, "the stream to start again");
+        Assert.Equal(2, screen.Starts);
+        Assert.Equal(3, _connectionChanges);
+        _ui.ThrowIfFailed();
+    }
+
+    [Fact]
+    public async Task A_session_without_VNC_says_why_an_agent_that_cannot_stream_cannot_be_controlled()
+    {
+        var profile = WithAgentThatCannotStream(Profile());
+        profile.AgentOnly = true;
+        var c = await ConnectAsync(profile);
+
+        await _ui.UntilAsync(() => _view.OverlayTitle == "Cannot control this computer", "the overlay to say why");
+        Assert.Contains("does not stream its screen", _view.OverlayDetail);
+        Assert.True(_view.OverlayButtons);
+        Assert.False(c.IsConnected);
+        Assert.Equal(0, _connectionChanges);
+    }
+
+    [Fact]
+    public async Task A_session_without_VNC_or_an_agent_cannot_connect()
+    {
+        var profile = Profile();
+        profile.AgentOnly = true;
+
+        var c = await ConnectAsync(profile);
+
+        Assert.Equal("Cannot connect", _view.OverlayTitle);
+        Assert.True(_view.OverlayVisible && _view.OverlayButtons);
+        Assert.Null(c.Agent);
+        Assert.Null(c.Client);
     }
 
     // ------------------------------------------------------------------ files

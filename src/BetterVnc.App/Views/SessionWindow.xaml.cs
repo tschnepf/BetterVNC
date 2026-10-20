@@ -36,7 +36,10 @@ public partial class SessionWindow : Window, ISessionView
     /// <summary>The profile this window was opened for.</summary>
     public ConnectionProfile Profile => _profile;
 
-    /// <summary>True while the VNC connection is up (false while connecting, after a disconnect, or on the error overlay).</summary>
+    /// <summary>
+    /// True while the VNC connection is up (false while connecting, after a disconnect, or on the error overlay); for a
+    /// session without VNC, while the agent's stream shows.
+    /// </summary>
     public bool IsConnected => _controller.IsConnected;
 
     /// <param name="hostOverride">Resolved host/port/password for Unraid VMs (looked up over SSH before opening the window).</param>
@@ -74,6 +77,12 @@ public partial class SessionWindow : Window, ISessionView
         // The stream's GPU surface is a child window that WPF cannot draw over: it steps aside while the overlay shows.
         Overlay.IsVisibleChanged += (_, _) => View.VideoSurfaceBlocked = Overlay.IsVisible;
         SendFilesButton.IsEnabled = PasteButton.IsEnabled = true;
+        if (profile.AgentOnly)
+        {
+            CadButton.IsEnabled = false;
+            CadButton.ToolTip = "Ctrl+Alt+Del needs a VNC connection (or, later, the agent's system service): Windows ignores it from an app.";
+            AudioToggle.IsEnabled = false;
+        }
 
         _pictureUpdating = true;
         foreach (var info in PictureModes.All)
@@ -152,6 +161,15 @@ public partial class SessionWindow : Window, ISessionView
     void ISessionView.AttachSession(VncClient client)
     {
         View.Attach(client);
+        View.Focus();
+        Keyboard.Focus(View);
+    }
+
+    void ISessionView.AttachAgent(IAgentInput input) => View.AttachAgent(input);
+    void ISessionView.SetAgentPictureSize(int width, int height) => View.SetAgentPictureSize(width, height);
+
+    void ISessionView.FocusPicture()
+    {
         View.Focus();
         Keyboard.Focus(View);
     }
@@ -235,7 +253,7 @@ public partial class SessionWindow : Window, ISessionView
             case WM_SYSKEYDOWN:
             case WM_KEYUP:
             case WM_SYSKEYUP:
-                if (_controller.Client != null && View.IsKeyboardFocused)
+                if (View.IsAttached && View.IsKeyboardFocused)
                 {
                     int vk = (int)wParam;
                     long lp = lParam.ToInt64();
@@ -257,7 +275,7 @@ public partial class SessionWindow : Window, ISessionView
                 if (View.IsKeyboardFocused) handled = true;
                 break;
             case WM_MOUSEHWHEEL:
-                if (_controller.Client != null)
+                if (View.IsAttached)
                 {
                     int delta = (short)((wParam.ToInt64() >> 16) & 0xFFFF);
                     View.SendWheel(delta, horizontal: true, Mouse.GetPosition(View));
@@ -282,7 +300,7 @@ public partial class SessionWindow : Window, ISessionView
 
     private void UpdateHook()
     {
-        bool wantHook = _controller.Client != null && IsActive && (GrabToggle.IsChecked == true || _fullscreen);
+        bool wantHook = View.IsAttached && IsActive && (GrabToggle.IsChecked == true || _fullscreen);
         if (wantHook)
         {
             _llHook ??= new LowLevelKeyboardHook(

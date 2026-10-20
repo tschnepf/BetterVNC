@@ -23,6 +23,7 @@ internal static unsafe class D3D
     public const int DXGI_ERROR_ACCESS_LOST = unchecked((int)0x887A0026);
     public const int DXGI_ERROR_WAIT_TIMEOUT = unchecked((int)0x887A0027);
     public const int E_ACCESSDENIED = unchecked((int)0x80070005);
+    public const uint DXGI_OUTDUPL_POINTER_SHAPE_TYPE_MONOCHROME = 1, DXGI_OUTDUPL_POINTER_SHAPE_TYPE_COLOR = 2, DXGI_OUTDUPL_POINTER_SHAPE_TYPE_MASKED_COLOR = 4;
 
     [DllImport("d3d11.dll")]
     public static extern int D3D11CreateDevice(IntPtr adapter, int driverType, IntPtr software, uint flags, IntPtr featureLevels, uint featureLevelCount, uint sdkVersion,
@@ -87,6 +88,18 @@ internal struct DXGI_OUTDUPL_FRAME_INFO
     public int PointerVisible;
     public uint TotalMetadataBufferSize;
     public uint PointerShapeBufferSize;
+}
+
+/// <summary>What <c>GetFramePointerShape</c> says about the shape it wrote; see <see cref="D3D.DXGI_OUTDUPL_POINTER_SHAPE_TYPE_COLOR"/>.</summary>
+[StructLayout(LayoutKind.Sequential)]
+internal struct DXGI_OUTDUPL_POINTER_SHAPE_INFO
+{
+    public uint Type;
+    public uint Width;
+    /// <summary>Rows in the buffer: for a monochrome pointer twice its height (AND mask, then XOR mask).</summary>
+    public uint Height;
+    public uint Pitch;
+    public POINT HotSpot;
 }
 
 /// <summary>A region the compositor moved (scrolling, a dragged window): drawn at the destination from the source point.</summary>
@@ -185,7 +198,8 @@ internal interface IDXGIOutputDuplication
     [PreserveSig] int AcquireNextFrame(uint timeoutMs, out DXGI_OUTDUPL_FRAME_INFO info, out IDXGIResource? resource);
     [PreserveSig] int GetFrameDirtyRects(uint bufferSize, IntPtr rects, out uint required);
     [PreserveSig] int GetFrameMoveRects(uint bufferSize, IntPtr rects, out uint required);
-    void _GetFramePointerShape(); void _MapDesktopSurface(); void _UnMapDesktopSurface();
+    [PreserveSig] int GetFramePointerShape(uint bufferSize, IntPtr buffer, out uint required, out DXGI_OUTDUPL_POINTER_SHAPE_INFO info);
+    void _MapDesktopSurface(); void _UnMapDesktopSurface();
     [PreserveSig] int ReleaseFrame();
 }
 

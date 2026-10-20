@@ -30,8 +30,13 @@ public sealed class ProfileStore
         FilePath = Path.Combine(Directory, "profiles.json");
     }
 
-    /// <summary>%AppData%\BetterVNC on Windows; the same folder under the user's application data elsewhere.</summary>
-    public static string DefaultDirectory { get; } = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "BetterVNC");
+    /// <summary>
+    /// %AppData%\BetterVNC on Windows (the same folder under the user's application data elsewhere), or the folder in
+    /// BETTERVNC_PROFILE_DIR, for test runs that must not touch the real profiles.
+    /// </summary>
+    public static string DefaultDirectory { get; } = Environment.GetEnvironmentVariable("BETTERVNC_PROFILE_DIR") is { Length: > 0 } dir
+        ? Path.GetFullPath(dir)
+        : Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "BetterVNC");
 
     public string Directory { get; }
     public string FilePath { get; }
