@@ -52,6 +52,10 @@ public sealed class AgentConnection : IDisposable
     public bool SupportsScroll => RemoteFeatures.Contains(AgentFeature.Scroll);
     /// <summary>True when the agent can stream its screen (<see cref="StartVideoAsync"/>); <see cref="RemoteCodecs"/> says in what.</summary>
     public bool SupportsVideo => RemoteFeatures.Contains(AgentFeature.Video) && RemoteCodecs.Length > 0;
+    /// <summary>True when the agent takes pointer and key messages (<see cref="SendPointerAsync"/>, <see cref="SendKeyAsync"/>).</summary>
+    public bool SupportsInput => RemoteFeatures.Contains(AgentFeature.Input);
+    /// <summary>True when the agent can send the pointer's shape with a stream (see <see cref="StartVideoAsync(IEnumerable{string}, int, int, ValueTuple{int, int}?, bool, CancellationToken)"/>).</summary>
+    public bool SupportsCursor => RemoteFeatures.Contains(AgentFeature.Cursor);
     /// <summary>Codecs the agent can encode, most preferred first; empty when it cannot stream.</summary>
     public string[] RemoteCodecs { get; private set; } = Array.Empty<string>();
     public bool IsConnected => _stream != null && _disposed == 0 && !_closed;
@@ -62,6 +66,11 @@ public sealed class AgentConnection : IDisposable
     public event Action<AgentFrame>? VideoFrameReceived;
     /// <summary>The agent ended the stream by itself; the string says why (may be null).</summary>
     public event Action<string?>? VideoStopped;
+    /// <summary>
+    /// The guest pointer changed (<see cref="AgentMessageType.Cursor"/>): a new shape when the payload is not empty, and
+    /// its visibility. Raised on the receive thread, only while a stream started with the cursor option runs.
+    /// </summary>
+    public event Action<AgentFrame>? CursorReceived;
     /// <summary>The connection ended; the exception is null for a clean close by the agent.</summary>
     public event Action<Exception?>? Disconnected;
 
@@ -244,6 +253,9 @@ public sealed class AgentConnection : IDisposable
                     case AgentMessageType.VideoStopped:
                         VideoStopped?.Invoke(h.Message);
                         break;
+                    case AgentMessageType.Cursor:
+                        CursorReceived?.Invoke(frame);
+                        break;
                     case AgentMessageType.Ping:
                         await SendAsync(AgentMessage.Of(AgentMessageType.Pong, h.Id), default, ct).ConfigureAwait(false);
                         break;
@@ -323,11 +335,34 @@ public sealed class AgentConnection : IDisposable
     }
 
     /// <summary>
+    /// Moves the guest pointer and sets its buttons (no reply): (<paramref name="x"/>, <paramref name="y"/>) in the
+    /// picture this side shows, which is <paramref name="width"/>×<paramref name="height"/> pixels;
+    /// <paramref name="buttons"/> holds <see cref="AgentButton"/> bits. Throws <see cref="NotSupportedException"/> when
+    /// the agent did not announce <see cref="AgentFeature.Input"/>. Messages go out in the order of the calls.
+    /// </summary>
+    public Task SendPointerAsync(int x, int y, int width, int height, int buttons, CancellationToken ct)
+    {
+        if (!SupportsInput) throw new NotSupportedException("The agent does not take pointer and key input.");
+        return SendAsync(new AgentMessage { Type = AgentMessageType.Pointer, X = x, Y = y, Width = width, Height = height, Buttons = buttons }, default, ct);
+    }
+
+    /// <summary>
+    /// Presses or releases a key in the guest (no reply). <paramref name="scanCode"/> is the set 1 make code with
+    /// 0xE000 added for extended keys, 0 for keys without one; <paramref name="virtualKey"/> the Windows virtual-key code.
+    /// </summary>
+    public Task SendKeyAsync(int scanCode, int virtualKey, bool down, CancellationToken ct)
+    {
+        if (!SupportsInput) throw new NotSupportedException("The agent does not take pointer and key input.");
+        return SendAsync(new AgentMessage { Type = AgentMessageType.Key, ScanCode = scanCode, VirtualKey = virtualKey, Down = down }, default, ct);
+    }
+
+    /// <summary>
     /// The negotiated parameters of a stream, from the agent's <see cref="AgentMessageType.VideoStarted"/> reply.
     /// <paramref name="OffsetX"/>/<paramref name="OffsetY"/> say where the frames sit in the desktop when they show only
-    /// part of it (see <see cref="AgentMessage.OffsetX"/>); null when they show the whole desktop.
+    /// part of it (see <see cref="AgentMessage.OffsetX"/>); null when they show the whole desktop. <paramref name="Cursor"/>
+    /// is true when the agent sends the pointer's shape with this stream (<see cref="CursorReceived"/>).
     /// </summary>
-    public sealed record VideoStartInfo(string Codec, int BitrateKbps, int MaxFps, int Width, int Height, string EncoderKind, int? OffsetX = null, int? OffsetY = null);
+    public sealed record VideoStartInfo(string Codec, int BitrateKbps, int MaxFps, int Width, int Height, string EncoderKind, int? OffsetX = null, int? OffsetY = null, bool Cursor = false);
 
     /// <summary>
     /// Asks the agent to stream its screen. <paramref name="codecs"/> lists what this side can decode, most preferred
@@ -343,7 +378,15 @@ public sealed class AgentConnection : IDisposable
     /// shows the picture in, in device pixels (see <see cref="AgentMessage.Width"/>): an agent that can scale encodes no
     /// larger than that. Null, or 0 for a side, means no limit.
     /// </summary>
-    public async Task<VideoStartInfo> StartVideoAsync(IEnumerable<string> codecs, int bitrateKbps, int maxFps, (int Width, int Height)? area, CancellationToken ct)
+    public Task<VideoStartInfo> StartVideoAsync(IEnumerable<string> codecs, int bitrateKbps, int maxFps, (int Width, int Height)? area, CancellationToken ct) =>
+        StartVideoAsync(codecs, bitrateKbps, maxFps, area, false, ct);
+
+    /// <summary>
+    /// The same, and with <paramref name="cursor"/> the agent also sends the pointer's shape and visibility while the
+    /// stream runs (<see cref="CursorReceived"/>), when it can (<see cref="SupportsCursor"/>; the reply's
+    /// <see cref="VideoStartInfo.Cursor"/> says). For a viewer without a VNC connection to take them from.
+    /// </summary>
+    public async Task<VideoStartInfo> StartVideoAsync(IEnumerable<string> codecs, int bitrateKbps, int maxFps, (int Width, int Height)? area, bool cursor, CancellationToken ct)
     {
         if (!SupportsVideo) throw new NotSupportedException("The agent does not stream video.");
         var reply = await RequestAsync(new AgentMessage
@@ -354,11 +397,12 @@ public sealed class AgentConnection : IDisposable
             MaxFps = maxFps,
             Width = area?.Width,
             Height = area?.Height,
+            Cursor = cursor ? true : null,
         }, default, ct).ConfigureAwait(false);
         var h = reply.Header;
         if (h.Type != AgentMessageType.VideoStarted || string.IsNullOrEmpty(h.Codec))
             throw new AgentProtocolException($"Unexpected reply '{h.Type}' to startVideo.");
-        return new VideoStartInfo(h.Codec, h.Bitrate ?? bitrateKbps, h.MaxFps ?? maxFps, h.Width ?? 0, h.Height ?? 0, h.Encoder ?? AgentVideoEncoder.Software, h.OffsetX, h.OffsetY);
+        return new VideoStartInfo(h.Codec, h.Bitrate ?? bitrateKbps, h.MaxFps ?? maxFps, h.Width ?? 0, h.Height ?? 0, h.Encoder ?? AgentVideoEncoder.Software, h.OffsetX, h.OffsetY, h.Cursor == true);
     }
 
     /// <summary>Changes the running stream's bitrate and/or frame-rate cap (null keeps a value), optionally asking for a key frame.</summary>

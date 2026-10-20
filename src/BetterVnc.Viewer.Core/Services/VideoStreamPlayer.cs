@@ -1,0 +1,474 @@
+using System.Collections.Concurrent;
+using System.Threading.Channels;
+using BetterVnc.Agent.Protocol;
+using BetterVnc.Media;
+using BetterVnc.Protocol.Decoders;
+using BetterVnc.Viewer.Core.Models;
+
+namespace BetterVnc.Viewer.Core.Services;
+
+/// <summary>
+/// Plays the guest agent's video stream into the session's <see cref="IVideoSurface"/> while the RFB connection goes on carrying input,
+/// cursor shapes and resizes at a trickle. Frames are decoded off the UI thread with a latest-frame-wins policy for
+/// what is shown: motion JPEG frames stand alone, so a slow decoder simply skips to the newest; H.264 delta frames
+/// all go through the decoder (they are each other's reference) but only the newest picture is shown.
+/// Where it can, H.264 is decoded on the GPU (on Windows DXVA, on the view's Direct3D device) and presented from there by
+/// the view's swap chain, never touching the CPU or the UI thread; otherwise the decoder runs in software and the view
+/// converts on the GPU, or, without a GPU surface, the frame is converted here and drawn through the view's CPU path.
+/// When the agent sends nothing for a moment (the screen is still) the view switches back to the RFB framebuffer and
+/// a full lossless update is requested, so a quiet desktop is always shown pixel-exact; the first new frame switches
+/// back to the stream.
+/// In a session without VNC (no <see cref="IRfbPicture"/>) the stream is the only picture and the agent also sends the
+/// pointer's shape. There is no lossless picture to fall back to, so when the screen goes still the player asks for
+/// one key frame instead: the last delta frame can carry compression residue (a faint trace where a window was), which
+/// would otherwise stay until that part of the screen changes.
+/// </summary>
+public sealed class VideoStreamPlayer : IDisposable
+{
+    /// <summary>No frame for this long means the screen is still: show the lossless RFB picture instead.</summary>
+    public static readonly TimeSpan IdleAfter = TimeSpan.FromMilliseconds(700);
+    /// <summary>
+    /// Without VNC: no frame for this long means the screen is still, and one key frame redraws it. Longer than any
+    /// caret blink (Windows allows up to 1.2 s), so a blinking caret does not cost a key frame per blink.
+    /// </summary>
+    public static readonly TimeSpan StillRedrawAfter = TimeSpan.FromMilliseconds(1500);
+    /// <summary>RFB update pacing while the stream carries the picture: enough for cursor shapes and resizes, little pixel traffic.</summary>
+    public static readonly TimeSpan RfbIntervalWhileStreaming = TimeSpan.FromSeconds(1);
+    /// <summary>
+    /// The picture area is sent to the agent once it has not changed for this long, so dragging a window edge costs one
+    /// rescale (and one key frame) on the agent rather than one per mouse move.
+    /// </summary>
+    public static readonly TimeSpan AreaSettleTime = TimeSpan.FromMilliseconds(300);
+
+    private readonly IAgentStream _agent;
+    private readonly IRfbPicture? _client;
+    private readonly IVideoSurface _view;
+    private readonly IUiThread _ui;
+    private readonly Channel<AgentFrame> _frames;
+    private readonly CancellationTokenSource _cts = new();
+    private readonly IUiTimer _idleTimer;
+    private readonly IUiTimer _areaTimer;
+    private (int Width, int Height)? _sentArea; // the picture area the agent last heard of; UI thread only
+    private readonly IJpegDecoder _jpeg;
+    private readonly string _jpegName;
+    private readonly ConcurrentBag<byte[]> _pool = new();
+    private Task? _decodeLoop;
+    private int _generation;
+    private volatile bool _lostFrames;
+    private long _lastKeyframeRequest;
+    // Sessions without VNC: the still screen was redrawn by a key frame since the last change; and when that was asked.
+    private bool _stillRefreshed;
+    private long _stillRefreshAskedAt;
+    private bool _disposed;
+
+    // statistics (read from the UI thread, written from the decode thread; slightly stale is fine)
+    private long _bytesReceived, _framesReceived, _framesDecoded, _framesSkipped;
+    private long _bytesAtRate;
+    private DateTime _rateTime = DateTime.UtcNow;
+
+    /// <param name="client">The VNC connection under the stream; null for a session through the agent alone.</param>
+    /// <param name="jpeg">Decodes motion JPEG frames; <paramref name="jpegName"/> names it in the status bar ("WIC").</param>
+    public VideoStreamPlayer(IAgentStream agent, IRfbPicture? client, IVideoSurface view, IUiThread ui, IJpegDecoder jpeg, string jpegName)
+    {
+        _agent = agent;
+        _client = client;
+        _view = view;
+        _ui = ui;
+        _jpeg = jpeg;
+        _jpegName = jpegName;
+        // Room for a burst of H.264 delta frames; when even that overflows the oldest go and a key frame is requested.
+        _frames = Channel.CreateBounded<AgentFrame>(new BoundedChannelOptions(32) { FullMode = BoundedChannelFullMode.DropOldest, SingleReader = true },
+            _ => { Interlocked.Increment(ref _framesSkipped); _lostFrames = true; });
+        _idleTimer = ui.CreateTimer(IdleAfter, OnIdle);
+        _areaTimer = ui.CreateTimer(AreaSettleTime, () => _ = SendAreaAsync());
+        _agent.StreamFrame += OnFrame;
+        _agent.StreamStopped += OnAgentStopped;
+        _view.PictureAreaChanged += OnPictureAreaChanged;
+    }
+
+    /// <summary>The stream mode in effect; null while the picture comes from RFB alone.</summary>
+    public PictureModes.Info? Mode { get; private set; }
+    public bool IsStreaming => Mode != null;
+    public AgentConnection.VideoStartInfo? Info => _agent.StreamInfo;
+    /// <summary>True while the screen is still and the lossless RFB picture is shown in place of the stream.</summary>
+    public bool IdleFallbackActive { get; private set; }
+    public long FramesReceived => Interlocked.Read(ref _framesReceived);
+    public long FramesDecoded => Interlocked.Read(ref _framesDecoded);
+    public long FramesSkipped => Interlocked.Read(ref _framesSkipped);
+    public long BytesReceived => Interlocked.Read(ref _bytesReceived);
+    /// <summary>How the current stream is decoded and shown, for the status bar ("DXVA → GPU", "software → WPF"); null before the first picture.</summary>
+    public string? DecodePath { get; private set; }
+
+    /// <summary>Short status for the status bar.</summary>
+    public event Action<string>? Message;
+    /// <summary>The stream ended without <see cref="StopAsync"/> (agent gone, capture failed); the player is back on RFB. On the UI thread.</summary>
+    public event Action<string?>? Ended;
+
+    /// <summary>Bytes per second since the previous call (call about once a second).</summary>
+    public double TakeRate()
+    {
+        var now = DateTime.UtcNow;
+        var bytes = BytesReceived;
+        double seconds = Math.Max(0.001, (now - _rateTime).TotalSeconds);
+        double rate = (bytes - _bytesAtRate) / seconds;
+        _bytesAtRate = bytes;
+        _rateTime = now;
+        return rate;
+    }
+
+    /// <summary>Starts (or re-tunes) the stream for a stream mode. Throws when the agent refuses; the picture then stays on RFB.</summary>
+    public async Task StartAsync(PictureModes.Info mode)
+    {
+        if (!mode.IsStream) throw new ArgumentException("Not a stream mode.", nameof(mode));
+        if (IsStreaming)
+        {
+            await _agent.SetStreamAsync(mode.BitrateKbps, mode.MaxFps).ConfigureAwait(true);
+            Mode = mode;
+            Message?.Invoke($"Stream re-tuned to {mode.BitrateKbps / 1000.0:0.#} Mbit/s, {mode.MaxFps} fps max");
+            return;
+        }
+        // The decoder of this stream needs the view's Direct3D device to decode on the GPU; set it up before frames come.
+        _view.EnableGpuVideo();
+        // The agent encodes at most the size the picture is shown at (a Mac scales on its GPU), so it lands here 1:1.
+        var area = _view.PictureArea;
+        // Without VNC nothing else tells this side what the pointer looks like.
+        var info = await _agent.StartStreamAsync(mode.BitrateKbps, mode.MaxFps, area, cursor: _client == null).ConfigureAwait(true);
+        _sentArea = area;
+        Mode = mode;
+        DecodePath = null;
+        Interlocked.Increment(ref _generation);
+        Interlocked.Exchange(ref _bytesReceived, 0);
+        Interlocked.Exchange(ref _framesReceived, 0);
+        Interlocked.Exchange(ref _framesDecoded, 0);
+        Interlocked.Exchange(ref _framesSkipped, 0);
+        _bytesAtRate = 0;
+        _decodeLoop ??= Task.Run(() => DecodeLoopAsync(_cts.Token));
+        IdleFallbackActive = false;
+        _stillRefreshed = false;
+        // RFB keeps running at a trickle: cursor shapes and resizes still arrive, pixels mostly come from the stream.
+        if (_client != null) _client.UpdateInterval = RfbIntervalWhileStreaming;
+        _idleTimer.Interval = _client != null ? IdleAfter : StillRedrawAfter;
+        _idleTimer.Start();
+        if (_view.PictureArea != area) _areaTimer.Start(); // resized while the agent was starting
+        string where = info.OffsetX is not { } ox ? ""
+            : _client != null ? $" (the primary display, at {ox},{info.OffsetY ?? 0} of the desktop; the other displays stay on VNC)"
+            : " (the primary display only: the desktop is too large to stream whole)";
+        Message?.Invoke($"Streaming {info.Codec} {info.Width}×{info.Height}{where} from the guest agent ({info.EncoderKind} encoder, {info.BitrateKbps / 1000.0:0.#} Mbit/s, {info.MaxFps} fps max)");
+    }
+
+    /// <summary>Stops the stream and returns the picture to RFB with a full lossless update.</summary>
+    public async Task StopAsync()
+    {
+        if (!IsStreaming) return;
+        Mode = null;
+        _idleTimer.Stop();
+        _areaTimer.Stop();
+        try { await _agent.StopStreamAsync().ConfigureAwait(true); }
+        catch (Exception ex) { Message?.Invoke("Stop stream: " + ex.Message); }
+        BackToRfb();
+    }
+
+    private void BackToRfb()
+    {
+        IdleFallbackActive = false;
+        if (_client == null) return; // no RFB picture to go back to: the last frame stays
+        _view.ShowFramebuffer();
+        _client.RefreshPicture();
+        _client.UpdateInterval = TimeSpan.Zero;
+    }
+
+    private void OnAgentStopped(string? reason)
+    {
+        if (!IsStreaming) return;
+        Mode = null;
+        _idleTimer.Stop();
+        _areaTimer.Stop();
+        BackToRfb();
+        Message?.Invoke($"Stream ended: {reason ?? "stopped by the agent"}" + (_client != null ? "; back to VNC" : ""));
+        Ended?.Invoke(reason);
+    }
+
+    private void OnPictureAreaChanged()
+    {
+        if (!IsStreaming) return;
+        // Restarted on every change: the area goes out once the window has settled.
+        _areaTimer.Stop();
+        _areaTimer.Start();
+    }
+
+    /// <summary>Tells the agent the picture area, when it differs from what the agent last heard.</summary>
+    private async Task SendAreaAsync()
+    {
+        _areaTimer.Stop();
+        if (!IsStreaming || _view.PictureArea is not { } area || area == _sentArea) return;
+        _sentArea = area;
+        try { await _agent.SetStreamAreaAsync(area.Width, area.Height).ConfigureAwait(true); }
+        catch (Exception ex)
+        {
+            _sentArea = null; // try again with the next change
+            Message?.Invoke("Stream size change failed: " + ex.Message);
+        }
+    }
+
+    private void OnFrame(AgentFrame frame)
+    {
+        if (!IsStreaming) return;
+        Interlocked.Increment(ref _framesReceived);
+        Interlocked.Add(ref _bytesReceived, frame.Payload.Length);
+        _frames.Writer.TryWrite(frame);
+    }
+
+    private byte[] Rent(int size)
+    {
+        while (_pool.TryTake(out var buffer))
+            if (buffer.Length == size) return buffer;
+        return new byte[size];
+    }
+
+    private void Return(byte[] buffer)
+    {
+        if (_pool.Count < 4) _pool.Add(buffer);
+    }
+
+    /// <summary>Asks the agent for a key frame (at most twice a second) after frames were lost on the way or dropped here.</summary>
+    private void RequestKeyframe()
+    {
+        long now = Environment.TickCount64;
+        if (now - Interlocked.Read(ref _lastKeyframeRequest) < 500) return;
+        Interlocked.Exchange(ref _lastKeyframeRequest, now);
+        _ui.Post(() => _ = SendKeyframeRequestAsync());
+    }
+
+    private async Task SendKeyframeRequestAsync()
+    {
+        try { await _agent.SetStreamAsync(null, null, keyframe: true); }
+        catch (Exception ex) { Message?.Invoke("Key frame request failed: " + ex.Message); }
+    }
+
+    /// <summary>Puts a line in the status bar and the trace log (the decoder and presentation path in use, fallbacks).</summary>
+    private void Report(string line)
+    {
+        System.Diagnostics.Trace.WriteLine("BetterVNC stream: " + line);
+        _ui.Post(() => Message?.Invoke(line));
+    }
+
+    /// <summary>Says which decoder runs and how its pictures reach the screen, from the first picture it delivered.</summary>
+    private void DescribeDecoder(IH264Decoder decoder, bool texture)
+    {
+        bool gpu = _view.HasGpuVideo;
+        string decode = texture ? "hardware (DXVA)"
+            : decoder.HardwareFailure is { } why ? $"software (hardware refused: {why})"
+            : "software";
+        DecodePath = (texture ? "DXVA" : "software") + (gpu ? " → GPU" : " → " + _view.CpuPathName);
+        Report($"H.264 decoder: {decoder.Name}, {decode}; {_view.GpuVideoStatus}");
+    }
+
+    private async Task DecodeLoopAsync(CancellationToken ct)
+    {
+        IH264Decoder? h264 = null;
+        int generation = -1;
+        int? lastSequence = null;
+        bool awaitingKeyframe = false;
+        bool softwareOnly = false;     // the GPU path failed on this stream: decode on the CPU from then on
+        bool reportDecoder = false;    // describe the decode path once the first picture shows what it really is
+        bool reportedJpeg = false;
+        try
+        {
+            await foreach (var frame in _frames.Reader.ReadAllAsync(ct).ConfigureAwait(false))
+            {
+                if (!IsStreaming) continue;
+                var h = frame.Header;
+                var info = _agent.StreamInfo;
+                string codec = h.Codec ?? info?.Codec ?? AgentVideoCodec.Jpeg;
+                // Where the frame sits in the desktop when it shows only part of it (the frame header wins over videoStarted).
+                // Without VNC there is no desktop around it: the frame is the whole picture.
+                (int X, int Y)? offset = _client == null ? null
+                    : h.OffsetX is { } hx ? (hx, h.OffsetY ?? 0) : info?.OffsetX is { } ix ? (ix, info.OffsetY ?? 0) : null;
+                int gen = Volatile.Read(ref _generation);
+                if (gen != generation)
+                {
+                    // A new stream: decoder state from the previous one is meaningless.
+                    generation = gen;
+                    lastSequence = null;
+                    awaitingKeyframe = false;
+                    softwareOnly = false;
+                    reportedJpeg = false;
+                    _lostFrames = false;
+                    h264?.Dispose();
+                    h264 = null;
+                }
+
+                try
+                {
+                    if (string.Equals(codec, AgentVideoCodec.H264, StringComparison.OrdinalIgnoreCase))
+                    {
+                        if (h264 == null)
+                        {
+                            // On the view's GPU device the decoder uses DXVA; it falls back to software by itself if refused.
+                            h264 = _view.CreateH264Decoder(hardware: !softwareOnly);
+                            reportDecoder = true;
+                        }
+                        // Delta frames need every frame before them since the last key frame. A gap in the sequence
+                        // (the agent dropped frames on a slow link) or a drop here means: wait for the next key frame.
+                        if (_lostFrames) { _lostFrames = false; awaitingKeyframe = true; }
+                        if (h.Sequence is { } seq)
+                        {
+                            if (lastSequence is { } last && seq != last + 1) awaitingKeyframe = true;
+                            lastSequence = seq;
+                        }
+                        if (awaitingKeyframe)
+                        {
+                            if (h.Keyframe != true)
+                            {
+                                Interlocked.Increment(ref _framesSkipped);
+                                RequestKeyframe();
+                                continue;
+                            }
+                            awaitingKeyframe = false;
+                        }
+                        bool show = _frames.Reader.Count == 0; // latest picture wins; older ones are decoded for their references only
+                        bool shown = false, gpuRefused = false;
+                        var decoder = h264;
+                        h264.Decode(frame.Payload.Span, h.Timestamp ?? 0, (in DecodedFrame picture) =>
+                        {
+                            if (reportDecoder)
+                            {
+                                reportDecoder = false;
+                                DescribeDecoder(decoder, picture.IsTexture);
+                            }
+                            if (!show) return;
+                            // GPU: the texture (or the NV12 planes) goes to the view's swap chain from this thread, no queue.
+                            if (_view.PresentVideoFrame(in picture, offset)) { shown = true; return; }
+                            if (picture.IsTexture) { gpuRefused = true; return; }
+                            var bgrx = Rent(picture.Width * picture.Height * 4);
+                            picture.ToBgrx(bgrx);
+                            _view.PresentExternalFrame(bgrx, picture.Width, picture.Height, Return, offset);
+                            shown = true;
+                        });
+                        if (gpuRefused)
+                        {
+                            // The GPU surface gave up on a hardware picture: decode in software from the next key frame.
+                            h264.Dispose();
+                            h264 = null;
+                            softwareOnly = true;
+                            awaitingKeyframe = true;
+                            RequestKeyframe();
+                            Report($"{_view.GpuVideoStatus}; H.264 now decodes in software");
+                        }
+                        if (!shown) { Interlocked.Increment(ref _framesSkipped); continue; }
+                    }
+                    else
+                    {
+                        if (_frames.Reader.Count > 0) { Interlocked.Increment(ref _framesSkipped); continue; } // every JPEG stands alone: skip to the newest
+                        int w = h.Width ?? info?.Width ?? 0;
+                        int hgt = h.Height ?? info?.Height ?? 0;
+                        var bgrx = _jpeg.DecodeToBgrx(frame.Payload.Span, w, hgt);
+                        bool gpu = _view.PresentVideoFrame(bgrx, w, hgt, offset);
+                        if (!gpu) _view.PresentExternalFrame(bgrx, w, hgt, null, offset);
+                        if (!reportedJpeg)
+                        {
+                            reportedJpeg = true;
+                            DecodePath = gpu ? "JPEG → GPU" : "JPEG → " + _view.CpuPathName;
+                            Report($"Motion JPEG decoder: {_jpegName}; {_view.GpuVideoStatus}");
+                        }
+                    }
+                }
+                catch (Exception ex)
+                {
+                    Interlocked.Increment(ref _framesSkipped);
+                    _ui.Post(() => Message?.Invoke("Frame decode failed: " + ex.Message));
+                    if (h264 != null)
+                    {
+                        if (h264.IsHardware)
+                        {
+                            // Never fight a failing GPU decoder: the CPU path decodes everything the agent sends.
+                            h264.Dispose();
+                            h264 = null;
+                            softwareOnly = true;
+                            Report($"Hardware H.264 decode failed ({ex.Message}); decoding in software");
+                        }
+                        awaitingKeyframe = true;
+                        RequestKeyframe();
+                    }
+                    continue;
+                }
+                Interlocked.Increment(ref _framesDecoded);
+                _ui.Post(OnFramePresented, UiPriority.Background);
+            }
+        }
+        catch (OperationCanceledException) { }
+        catch (ChannelClosedException) { }
+        finally { h264?.Dispose(); }
+    }
+
+    private void OnFramePresented()
+    {
+        if (!IsStreaming) return;
+        if (_client == null)
+        {
+            // The first frame after asking is (most likely) the key frame that redraws the still screen; anything later
+            // is a change, after which the screen gets redrawn again once it is still.
+            if (_stillRefreshAskedAt != 0 && Environment.TickCount64 - _stillRefreshAskedAt < 2000) _stillRefreshAskedAt = 0;
+            else _stillRefreshed = false;
+            _idleTimer.Stop();
+            _idleTimer.Start();
+            return;
+        }
+        if (IdleFallbackActive)
+        {
+            // Movement again: the stream is on screen and RFB goes back to its trickle.
+            IdleFallbackActive = false;
+            _client.UpdateInterval = RfbIntervalWhileStreaming;
+        }
+        _idleTimer.Stop();
+        _idleTimer.Start();
+    }
+
+    private void OnIdle()
+    {
+        _idleTimer.Stop();
+        if (_client == null)
+        {
+            if (IsStreaming && !_stillRefreshed) _ = RedrawStillScreenAsync();
+            return;
+        }
+        if (!IsStreaming || IdleFallbackActive) return;
+        // Nothing moved for a while: show the exact pixels from RFB until the next frame arrives.
+        IdleFallbackActive = true;
+        _view.ShowFramebuffer();
+        _client.RefreshPicture();
+        _client.UpdateInterval = TimeSpan.Zero;
+    }
+
+    /// <summary>Sessions without VNC: one key frame of the still screen, so no compression residue stays on it.</summary>
+    private async Task RedrawStillScreenAsync()
+    {
+        _stillRefreshed = true;
+        _stillRefreshAskedAt = Environment.TickCount64;
+        try { await _agent.SetStreamAsync(null, null, keyframe: true); }
+        catch (Exception)
+        {
+            _stillRefreshAskedAt = 0; // the stream is going away, or the next change brings a frame anyway
+        }
+    }
+
+    public void Dispose()
+    {
+        if (_disposed) return;
+        _disposed = true;
+        _agent.StreamFrame -= OnFrame;
+        _agent.StreamStopped -= OnAgentStopped;
+        _view.PictureAreaChanged -= OnPictureAreaChanged;
+        _idleTimer.Stop();
+        _areaTimer.Stop();
+        _cts.Cancel();
+        _frames.Writer.TryComplete();
+        if (IsStreaming)
+        {
+            Mode = null;
+            _ = _agent.StopStreamAsync();
+            if (_client?.IsConnected == true) BackToRfb();
+        }
+        _cts.Dispose();
+    }
+}

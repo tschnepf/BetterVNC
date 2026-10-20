@@ -6,7 +6,6 @@ using System.Numerics;
 using System.Text;
 using BetterVnc.Protocol;
 using BetterVnc.Protocol.Security;
-using ICSharpCode.SharpZipLib.Zip.Compression;
 
 namespace BetterVnc.Protocol.Tests;
 
@@ -272,24 +271,28 @@ public sealed class FakeRfbServer : IDisposable
         return ms.ToArray();
     }
 
-    /// <summary>A persistent zlib stream with sync flush after each chunk, as real servers use.</summary>
+    /// <summary>
+    /// A persistent zlib stream with a sync flush after each chunk, as real servers use. Uses the
+    /// real zlib via <see cref="System.IO.Compression.ZLibStream"/> so every chunk ends with the same
+    /// empty stored block (<c>00 00 FF FF</c>) that QEMU and TigerVNC emit; SharpZipLib's own
+    /// <c>Deflater.Flush</c> lays the tail out differently and hid a decoder bug.
+    /// </summary>
     public sealed class ZlibStreamEncoder
     {
-        private readonly Deflater _deflater = new(Deflater.DEFAULT_COMPRESSION, false);
+        private readonly MemoryStream _out = new();
+        private readonly System.IO.Compression.ZLibStream _z;
+
+        public ZlibStreamEncoder()
+        {
+            _z = new System.IO.Compression.ZLibStream(_out, System.IO.Compression.CompressionLevel.Optimal, leaveOpen: true);
+        }
 
         public byte[] Compress(byte[] data)
         {
-            _deflater.SetInput(data);
-            _deflater.Flush();
-            using var ms = new MemoryStream();
-            var buf = new byte[4096];
-            while (true)
-            {
-                int n = _deflater.Deflate(buf);
-                if (n == 0) break;
-                ms.Write(buf, 0, n);
-            }
-            return ms.ToArray();
+            _out.SetLength(0);
+            _z.Write(data);
+            _z.Flush(); // Z_SYNC_FLUSH
+            return _out.ToArray();
         }
     }
 

@@ -1,5 +1,5 @@
-using BetterVnc.Agent.Clipboards;
 using BetterVnc.Agent.Protocol;
+using BetterVnc.Platform;
 
 namespace BetterVnc.Agent.Pairing;
 

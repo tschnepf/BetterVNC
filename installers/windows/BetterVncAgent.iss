@@ -5,7 +5,7 @@
 ; The agent runs in the signed-in user's session (tray icon, clipboard, screen capture), so it lives in that user's
 ; per-user Programs folder, exactly where "bettervnc-agent install" puts it. After copying the file the installer runs
 ; that same "install" command as the signed-in user: it writes the config (keeping an existing one with its pairings
-; and token), registers the scheduled task that starts the agent at sign-in, and starts it now. The installer asks
+; and token), adds the per-user Run entry that starts the agent at sign-in, and starts it now. The installer asks
 ; for administrator rights by default only to add the firewall rule; "for me only" skips that and Windows asks once
 ; when the agent first listens.
 
@@ -57,11 +57,14 @@ Source: "{#Source}\bettervnc-agent.exe"; DestDir: "{app}"; Flags: ignoreversion
 [Run]
 ; Elevated installs add the inbound rule here; the agent's own attempt in "install" needs elevation too and only
 ; prints a note when it cannot.
-Filename: "{sys}\netsh.exe"; Parameters: "advfirewall firewall add rule name=""BetterVNC agent"" dir=in action=allow protocol=TCP program=""{app}\bettervnc-agent.exe"" enable=yes"; Flags: runhidden waituntilterminated; Check: IsAdminInstallMode; StatusMsg: "Adding the firewall rule…"
+; profile=any because VMs on a bridged network often sit on a "Public" network profile; the delete keeps a reinstall
+; from stacking up duplicate rules.
+Filename: "{sys}\netsh.exe"; Parameters: "advfirewall firewall delete rule name=""BetterVNC agent"" program=""{app}\bettervnc-agent.exe"""; Flags: runhidden waituntilterminated; Check: IsAdminInstallMode
+Filename: "{sys}\netsh.exe"; Parameters: "advfirewall firewall add rule name=""BetterVNC agent"" dir=in action=allow protocol=TCP program=""{app}\bettervnc-agent.exe"" profile=any enable=yes"; Flags: runhidden waituntilterminated; Check: IsAdminInstallMode; StatusMsg: "Adding the firewall rule…"
 Filename: "{app}\bettervnc-agent.exe"; Parameters: "install"; Flags: runhidden waituntilterminated runasoriginaluser; StatusMsg: "Registering the agent to start at sign-in and starting it…"
 
 [UninstallRun]
-; Stops the agent, removes the scheduled task, firewall rule, config and log; Inno then removes the program file.
+; Stops the agent, removes the Run entry, firewall rule, config and log; Inno then removes the program file.
 Filename: "{app}\bettervnc-agent.exe"; Parameters: "uninstall"; Flags: runhidden waituntilterminated; RunOnceId: "AgentUninstall"
 
 [Code]
@@ -69,7 +72,6 @@ procedure StopAgent();
 var
   R: Integer;
 begin
-  Exec(ExpandConstant('{sys}\schtasks.exe'), '/end /tn "BetterVNC agent"', '', SW_HIDE, ewWaitUntilTerminated, R);
   Exec(ExpandConstant('{sys}\taskkill.exe'), '/f /im bettervnc-agent.exe', '', SW_HIDE, ewWaitUntilTerminated, R);
 end;
 

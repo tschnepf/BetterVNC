@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using System.Text;
-using BetterVnc.Agent.Clipboards;
+using BetterVnc.Platform;
+using Microsoft.Win32;
 using BetterVnc.Agent.Protocol;
 
 namespace BetterVnc.Agent;
@@ -15,6 +16,7 @@ namespace BetterVnc.Agent;
 public static class Installer
 {
     private const string TaskName = "BetterVNC agent";
+    private const string RunKey = @"Software\Microsoft\Windows\CurrentVersion\Run";
     private const string LaunchLabel = "com.bettervnc.agent";
     private const string ServiceName = "bettervnc-agent";
 
@@ -184,12 +186,12 @@ public static class Installer
 
     // ------------------------------------------------------------------ autostart
 
-    /// <summary>Whether the agent is registered to start at login (scheduled task, LaunchAgent plist or systemd user unit).</summary>
+    /// <summary>Whether the agent is registered to start at login (Run entry, LaunchAgent plist or systemd user unit).</summary>
     public static bool IsAutostartEnabled()
     {
         try
         {
-            if (OperatingSystem.IsWindows()) return ProcessRunner.Run("schtasks", new[] { "/query", "/tn", TaskName }).Ok;
+            if (OperatingSystem.IsWindows()) return Registry.CurrentUser.OpenSubKey(RunKey)?.GetValue(TaskName) != null;
             if (OperatingSystem.IsMacOS()) return File.Exists(Layout.ForThisOs().Autostart);
             if (ProcessRunner.Exists("systemctl")) return ProcessRunner.Run("systemctl", new[] { "--user", "is-enabled", ServiceName }).Ok;
             return File.Exists(Path.Combine(Home, ".config", "autostart", "bettervnc-agent.desktop"));
@@ -204,18 +206,28 @@ public static class Installer
         var dir = Path.GetDirectoryName(exe)!;
         if (OperatingSystem.IsWindows())
         {
-            if (!enable) { Quiet("schtasks", "/delete", "/tn", TaskName, "/f"); return; }
-            // A scheduled task at logon, started hidden through wscript so no console window flashes.
-            var vbs = Path.Combine(dir, "run-hidden.vbs");
-            File.WriteAllText(vbs, $"CreateObject(\"WScript.Shell\").Run \"\"\"{exe}\"\" --config \"\"{configPath}\"\"\", 0, False\r\n");
-            Run("schtasks", "/create", "/f", "/tn", TaskName, "/sc", "onlogon", "/rl", "limited", "/tr", $"wscript.exe //B \"{vbs}\"");
+            // A per-user Run entry: no administrator rights, and the Windows build is a GUI-subsystem program, so no
+            // console window appears at sign-in. Older versions used a logon task that started a hidden VBS through
+            // wscript; Microsoft Defender blocks creating that task as Trojan:Win32/Commando.A!ml (the usual shape of
+            // malware persistence), so remove it if an older install left one behind.
+            Quiet("schtasks", "/delete", "/tn", TaskName, "/f");
+            TryDelete(Path.Combine(dir, "run-hidden.vbs"));
+            using (var run = Registry.CurrentUser.CreateSubKey(RunKey))
+            {
+                if (!enable) { run.DeleteValue(TaskName, throwOnMissingValue: false); return; }
+                run.SetValue(TaskName, $"\"{exe}\" --config \"{configPath}\"");
+            }
             if (addFirewallRule)
             {
-                var fw = ProcessRunner.Run("netsh", new[] { "advfirewall", "firewall", "add", "rule", $"name={TaskName}", "dir=in", "action=allow", "protocol=TCP", $"program={exe}", "enable=yes" });
+                // profile=any: VMs on a bridged network often sit on a "Public" network profile. Delete first so a
+                // reinstall does not stack up duplicate rules.
+                Quiet("netsh", "advfirewall", "firewall", "delete", "rule", $"name={TaskName}", $"program={exe}");
+                var fw = ProcessRunner.Run("netsh", new[] { "advfirewall", "firewall", "add", "rule", $"name={TaskName}", "dir=in", "action=allow", "protocol=TCP", $"program={exe}", "profile=any", "enable=yes" });
                 if (!fw.Ok)
                 {
-                    Console.WriteLine("  firewall : could not add a rule (needs an elevated prompt). Windows will ask once when the agent first listens, or run:");
-                    Console.WriteLine($"             netsh advfirewall firewall add rule name=\"{TaskName}\" dir=in action=allow protocol=TCP program=\"{exe}\" enable=yes");
+                    Console.WriteLine("  firewall : could not add a rule (needs an elevated prompt). Windows asks once when the agent first listens;");
+                    Console.WriteLine("             tick Public networks there too if this machine's network is Public, or run elevated:");
+                    Console.WriteLine($"             netsh advfirewall firewall add rule name=\"{TaskName}\" dir=in action=allow protocol=TCP program=\"{exe}\" profile=any enable=yes");
                 }
             }
         }
@@ -281,14 +293,10 @@ public static class Installer
         }
     }
 
-    /// <summary>Starts the installed agent through the autostart mechanism (so it runs the same way as after a login).</summary>
+    /// <summary>Starts the installed agent the way it starts after a login (through launchd or systemd where those are used).</summary>
     private static void StartNow(Layout l)
     {
-        if (OperatingSystem.IsWindows())
-        {
-            Run("schtasks", "/run", "/tn", TaskName);
-        }
-        else if (OperatingSystem.IsMacOS())
+        if (OperatingSystem.IsMacOS())
         {
             var uid = ProcessRunner.Run("id", new[] { "-u" }).Text.Trim();
             Quiet("launchctl", "bootout", $"gui/{uid}/{LaunchLabel}");
@@ -301,7 +309,8 @@ public static class Installer
         }
         else
         {
-            var psi = new ProcessStartInfo(l.Exe) { UseShellExecute = false };
+            // Windows (the same command line as the Run entry) and Linux without systemd.
+            var psi = new ProcessStartInfo(l.Exe) { UseShellExecute = false, WorkingDirectory = l.Dir };
             psi.ArgumentList.Add("--config"); psi.ArgumentList.Add(l.Config);
             Process.Start(psi);
         }
@@ -311,7 +320,6 @@ public static class Installer
     {
         if (OperatingSystem.IsWindows())
         {
-            Quiet("schtasks", "/end", "/tn", TaskName);
             foreach (var p in Process.GetProcessesByName("bettervnc-agent"))
             {
                 if (p.Id == Environment.ProcessId) continue;
@@ -339,7 +347,7 @@ public static class Installer
             {
                 var dir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Programs", "BetterVNC Agent");
                 return new Layout(dir, Path.Combine(dir, "bettervnc-agent.exe"), Path.Combine(dir, AgentConfig.FileName), "",
-                    $"scheduled task \"{TaskName}\" (at logon, hidden window)");
+                    $"Run entry \"{TaskName}\" in HKEY_CURRENT_USER (at sign-in)");
             }
             if (OperatingSystem.IsMacOS())
             {

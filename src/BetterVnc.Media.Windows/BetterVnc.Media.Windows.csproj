@@ -1,0 +1,28 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    Windows media plumbing shared by the viewer and the Windows build of the guest agent: Media Foundation H.264
+    encoder and decoder wrappers, DXGI Desktop Duplication capture, and the Direct3D 11 swap chain that presents the
+    stream. Plain COM interop over mfplat/d3d11/dxgi; no NuGet packages, so the agent's single-file publish stays simple.
+    The types keep the BetterVnc.Media namespace of the portable half (BetterVnc.Media) they build on.
+  -->
+
+  <PropertyGroup>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <RootNamespace>BetterVnc.Media</RootNamespace>
+    <LangVersion>latest</LangVersion>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- The GPU tests create devices and textures through the interop layer. -->
+    <InternalsVisibleTo Include="BetterVnc.Media.Windows.Tests" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\BetterVnc.Media\BetterVnc.Media.csproj" />
+  </ItemGroup>
+
+</Project>

@@ -19,7 +19,7 @@ public sealed class TrayApp : ApplicationContext
 
     public static void Run(AgentHost host)
     {
-        FreeConsole(); // started from a terminal or a scheduled task: no console window from here on
+        FreeConsole(); // attached to the terminal it was started from (Program.AttachToParentConsole): let it go
         Console.SetOut(TextWriter.Null);
         Console.SetError(TextWriter.Null);
         Application.EnableVisualStyles();

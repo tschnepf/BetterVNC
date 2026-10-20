@@ -6,67 +6,62 @@ using System.Windows.Interop;
 using System.Windows.Media.Imaging;
 using System.Windows.Threading;
 using BetterVnc.App.Input;
-using BetterVnc.App.Models;
 using BetterVnc.App.Services;
 using BetterVnc.Protocol;
+using BetterVnc.Viewer.Core.Models;
+using BetterVnc.Viewer.Core.Services;
+using BetterVnc.Viewer.Core.Sessions;
 using Microsoft.Win32;
 using static BetterVnc.App.Input.NativeMethods;
 
 namespace BetterVnc.App.Views;
 
-public partial class SessionWindow : Window
+/// <summary>
+/// The window of one session: the toolbar, the picture, the overlay and the status bar, keyboard capture and fullscreen.
+/// What the session does lives in its <see cref="SessionController"/>; this window is its <see cref="ISessionView"/>.
+/// </summary>
+public partial class SessionWindow : Window, ISessionView
 {
     private readonly ConnectionProfile _profile;
-    private readonly string _host;
-    private readonly int _port;
-    private readonly string? _passwordOverride;
-    private VncClient? _client;
+    private readonly SessionController _controller;
     private HwndSource? _hwndSource;
     private LowLevelKeyboardHook? _llHook;
-    private readonly AudioPlayer _audio = new();
-    private readonly DispatcherTimer _statusTimer = new() { Interval = TimeSpan.FromSeconds(1) };
-    private readonly FileTransferService _files;
-    private AgentClient? _agent;
-    private string? _sessionUsername;
-    private string? _sessionPassword;
-    private string? _lastRemoteClipboard;
-    private string? _lastLocalClipboard;
-    private bool _audioRequested;
-    private bool _clipboardListening;
     private bool _fullscreen;
     private WindowState _restoreState;
     private Rect _restoreBounds;
-    private long _lastBytes;
-    private DateTime _lastBytesTime = DateTime.UtcNow;
     private readonly DispatcherTimer _toolbarHideTimer = new() { Interval = TimeSpan.FromSeconds(2) };
     private readonly bool _startFullscreen;
-    private VideoStreamPlayer? _player;
-    /// <summary>The picture mode chosen for this session (profile default until changed in the toolbar).</summary>
-    private PictureModes.Info _wantedPicture;
-    /// <summary>The Tight quality the RFB connection is currently asked for.</summary>
-    private PictureModes.Info _activeVnc = PictureModes.StreamFallback;
     private bool _pictureUpdating;
-    private long _jpegRectsAtQualityChange;
 
     /// <summary>The profile this window was opened for.</summary>
     public ConnectionProfile Profile => _profile;
 
-    /// <summary>True while the VNC connection is up (false while connecting, after a disconnect, or on the error overlay).</summary>
-    public bool IsConnected { get; private set; }
+    /// <summary>
+    /// True while the VNC connection is up (false while connecting, after a disconnect, or on the error overlay); for a
+    /// session without VNC, while the agent's stream shows.
+    /// </summary>
+    public bool IsConnected => _controller.IsConnected;
 
     /// <param name="hostOverride">Resolved host/port/password for Unraid VMs (looked up over SSH before opening the window).</param>
     /// <param name="fullscreen">Start in fullscreen for this session only, without changing the profile's StartFullscreen setting.</param>
-    public SessionWindow(ConnectionProfile profile, string? hostOverride = null, int? portOverride = null, string? passwordOverride = null, bool fullscreen = false)
+    /// <param name="guestAddress">An Unraid VM's own address, where its guest agent listens; null when not known yet.</param>
+    /// <param name="profiles">The store <paramref name="profile"/> belongs to; <see cref="App.Profiles"/> when null.</param>
+    public SessionWindow(ConnectionProfile profile, string? hostOverride = null, int? portOverride = null, string? passwordOverride = null,
+        bool fullscreen = false, string? guestAddress = null, ProfileStore? profiles = null)
     {
         InitializeComponent();
         _profile = profile;
         _startFullscreen = fullscreen || profile.StartFullscreen;
-        // Profiles saved by older builds may still hold a "vnc://host" style value.
-        var (parsedHost, parsedPort) = HostParser.Parse(hostOverride ?? profile.Host);
-        _host = parsedHost;
-        _port = portOverride ?? parsedPort ?? profile.Port;
-        _passwordOverride = passwordOverride;
-        _files = new FileTransferService(profile);
+        _controller = new SessionController(profile, this, new SessionServices
+        {
+            Profiles = profiles ?? App.Profiles,
+            Ui = new WpfUiThread(Dispatcher),
+            Clipboard = App.LocalClipboard,
+            Audio = new AudioPlayer(),
+            CreateJpegDecoder = () => new WicJpegDecoder(),
+            JpegDecoderName = "WIC",
+        }, hostOverride, portOverride, passwordOverride, guestAddress);
+        _controller.ConnectionChanged += OnConnectionChanged;
 
         Title = $"{profile.Name} - BetterVNC";
         TitleText.Text = profile.Name;
@@ -78,20 +73,24 @@ public partial class SessionWindow : Window
         View.ScrollClicksPerNotch = profile.ScrollClicksPerNotch;
         View.Translator.MacMode = profile.Kind == ConnectionKind.Mac;
         View.Translator.MacModifiers = profile.MacModifiers;
-        View.RenderedFrame += OnRenderedFrame;
+        View.RenderedFrame += _controller.OnRenderedFrame;
         // The stream's GPU surface is a child window that WPF cannot draw over: it steps aside while the overlay shows.
         Overlay.IsVisibleChanged += (_, _) => View.VideoSurfaceBlocked = Overlay.IsVisible;
         SendFilesButton.IsEnabled = PasteButton.IsEnabled = true;
+        if (profile.AgentOnly)
+        {
+            CadButton.IsEnabled = false;
+            CadButton.ToolTip = "Ctrl+Alt+Del needs a VNC connection (or, later, the agent's system service): Windows ignores it from an app.";
+            AudioToggle.IsEnabled = false;
+        }
 
-        _wantedPicture = PictureModes.Get(profile.PictureMode);
         _pictureUpdating = true;
         foreach (var info in PictureModes.All)
             PictureBox.Items.Add(new ComboBoxItem { Content = info.Label, Tag = info, ToolTip = info.Description });
-        PictureBox.SelectedIndex = Array.IndexOf(PictureModes.All, _wantedPicture);
+        PictureBox.SelectedIndex = Array.IndexOf(PictureModes.All, _controller.WantedPicture);
         _pictureUpdating = false;
         RefreshPictureMenu();
 
-        _statusTimer.Tick += (_, _) => UpdateStatus();
         _toolbarHideTimer.Tick += (_, _) => { if (_fullscreen && !Toolbar.IsMouseOver) Toolbar.Visibility = Visibility.Collapsed; _toolbarHideTimer.Stop(); };
 
         Loaded += OnLoaded;
@@ -100,7 +99,7 @@ public partial class SessionWindow : Window
         Deactivated += (_, _) => { View.ReleaseAllKeys(); UpdateHook(); };
         PreviewKeyDown += OnPreviewKeyDown;
         Drop += OnDrop;
-        DragOver += (_, e) => { e.Effects = e.Data.GetDataPresent(DataFormats.FileDrop) && CanSendFiles ? DragDropEffects.Copy : DragDropEffects.None; e.Handled = true; };
+        DragOver += (_, e) => { e.Effects = e.Data.GetDataPresent(DataFormats.FileDrop) && _controller.CanSendFiles ? DragDropEffects.Copy : DragDropEffects.None; e.Handled = true; };
         MouseMove += OnWindowMouseMove;
 
         SessionManager.PlaceNewWindow(this);
@@ -112,25 +111,22 @@ public partial class SessionWindow : Window
         _hwndSource.AddHook(WndProc);
         SessionManager.Register(this);
         if (_startFullscreen) FullscreenToggle.IsChecked = true;
-        _ = ConnectAsync();
+        _ = _controller.ConnectAsync();
     }
 
     private void OnClosed(object? sender, EventArgs e)
     {
         SessionManager.Unregister(this);
-        _statusTimer.Stop();
         _llHook?.Dispose();
-        if (_clipboardListening && _hwndSource != null) RemoveClipboardFormatListener(_hwndSource.Handle);
         _hwndSource?.RemoveHook(WndProc);
-        View.Detach();
-        _player?.Dispose();
-        _agent?.Dispose();
-        _client?.Dispose();
-        _audio.Dispose();
+        _controller.Dispose();
     }
 
-    /// <summary>Files can go through the guest agent (preferred) or the SFTP/SMB drop folder.</summary>
-    private bool CanSendFiles => _agent?.IsConnected == true || _files.IsConfigured;
+    private void OnConnectionChanged()
+    {
+        SessionManager.NotifyStateChanged(this);
+        UpdateHook();
+    }
 
     /// <summary>Restores the window if it is minimised and brings it in front of the other windows.</summary>
     public void BringToFront()
@@ -144,236 +140,83 @@ public partial class SessionWindow : Window
         View.Focus();
     }
 
-    // ------------------------------------------------------------------ connection
+    // ------------------------------------------------------------------ ISessionView
 
-    private async Task ConnectAsync()
+    IVideoSurface ISessionView.Video => View;
+    double ISessionView.FramesPerSecond => View.Fps;
+
+    public void ShowOverlay(string title, string detail, bool showButtons)
     {
-        ShowOverlay("Connecting…", $"{_host}:{_port}", showButtons: false);
-        View.Detach();
-        View.ScrollInjector = null;
-        _player?.Dispose();
-        _player = null;
-        _agent?.Dispose();
-        _agent = null;
-        _client?.Dispose();
-        _audioRequested = false;
+        OverlayTitle.Text = title;
+        OverlayDetail.Text = detail;
+        ReconnectButton.Visibility = CloseButton.Visibility = showButtons ? Visibility.Visible : Visibility.Collapsed;
+        Overlay.Visibility = Visibility.Visible;
+    }
 
-        var password = _sessionPassword ?? _passwordOverride ?? ProfileStore.Unprotect(_profile.ProtectedPassword);
-        // A stream mode starts out on lossless VNC; the stream takes over once the agent is up (see ApplyPictureAsync).
-        var initialVnc = _wantedPicture.IsStream ? PictureModes.StreamFallback : _wantedPicture;
-        var options = new VncConnectionOptions
-        {
-            Host = _host,
-            Port = _port,
-            Username = _sessionUsername ?? _profile.Username,
-            Password = password,
-            CompressionLevel = initialVnc.CompressionLevel,
-            JpegQuality = initialVnc.JpegQuality,
-            EnableLocalCursor = _profile.LocalCursor,
-            EnableQemuAudio = true,
-            JpegDecoder = new WicJpegDecoder(),
-            CredentialProvider = (kind, prompt) => Dispatcher.Invoke(() => PromptCredentials(kind, prompt)),
-        };
-        var client = new VncClient(options);
-        client.Log += m => Dispatcher.BeginInvoke(() => StatusLeft.Text = m);
-        client.Disconnected += ex => Dispatcher.BeginInvoke(() => OnDisconnected(ex));
-        client.ClipboardTextReceived += t => Dispatcher.BeginInvoke(() => OnRemoteClipboard(t));
-        client.ClipboardRequested += () => Dispatcher.BeginInvoke(PushLocalClipboard);
-        client.Bell += () => Dispatcher.BeginInvoke(() => System.Media.SystemSounds.Beep.Play());
-        client.DesktopNameChanged += n => Dispatcher.BeginInvoke(() => TitleText.Text = $"{_profile.Name}  ·  {n}");
-        client.AudioBegin += (fmt, ch, hz) => Dispatcher.BeginInvoke(() => _audio.Start(hz, ch, 16));
-        client.AudioData += data => _audio.Feed(data);
-        client.AudioEnd += () => Dispatcher.BeginInvoke(() => _audio.Stop());
+    void ISessionView.HideOverlay() => Overlay.Visibility = Visibility.Collapsed;
+    void ISessionView.SetStatus(string text) => StatusLeft.Text = text;
+    void ISessionView.SetStatistics(string text) => StatusRight.Text = text;
+    void ISessionView.SetTitle(string text) => TitleText.Text = text;
 
-        try
-        {
-            await client.ConnectAsync();
-        }
-        catch (VncAuthenticationException ex)
-        {
-            bool apple = client.Capabilities.SecurityTypeUsed == SecurityType.AppleArd;
-            client.Dispose();
-            ShowOverlay("Authentication failed", ex.Message, showButtons: true);
-            // Ask again right away, like RDP does, instead of leaving the person at a dead overlay.
-            var prompt = apple
-                ? $"The Mac rejected the sign-in ({ex.Message}).\n\nUse the macOS account's short name (the name of its home folder, not the full name) and that account's login password. The account must be allowed under Screen Sharing in the Mac's Sharing settings."
-                : $"The server rejected the password ({ex.Message}). Enter it again.";
-            var creds = PromptCredentials(apple ? CredentialKind.UsernameAndPassword : CredentialKind.Password, prompt);
-            if (creds == null) return;
-            _sessionUsername = creds.Username ?? _profile.Username;
-            _sessionPassword = creds.Password;
-            _ = ConnectAsync();
-            return;
-        }
-        catch (Exception ex)
-        {
-            client.Dispose();
-            ShowOverlay("Could not connect", ex.Message, showButtons: true);
-            return;
-        }
-
-        _client = client;
-        _activeVnc = initialVnc;
-        _jpegRectsAtQualityChange = 0;
-        IsConnected = true;
-        SessionManager.NotifyStateChanged(this);
-        if (client.Capabilities.IsApple && _profile.Kind != ConnectionKind.Mac)
-            View.Translator.MacMode = true;
+    void ISessionView.AttachSession(VncClient client)
+    {
         View.Attach(client);
         View.Focus();
         Keyboard.Focus(View);
-        Overlay.Visibility = Visibility.Collapsed;
-        FitWindowToRemote(client.Framebuffer.Width, client.Framebuffer.Height);
-        TitleText.Text = $"{_profile.Name}  ·  {client.DesktopName}";
-        StatusLeft.Text = $"Connected  ·  {client.Capabilities}";
-        _profile.LastConnected = DateTime.Now;
-        try { App.Profiles.Save(); } catch { }
-
-        if (!_clipboardListening && _hwndSource != null)
-        {
-            AddClipboardFormatListener(_hwndSource.Handle);
-            _clipboardListening = true;
-        }
-        _statusTimer.Start();
-        UpdateHook();
-        StartAgent();
-        RefreshPictureMenu();
-        UpdateStatus();
-        if (_wantedPicture.IsStream && _agent == null)
-            StatusLeft.Text = "Stream mode needs the guest agent; showing VNC lossless because this connection has none configured";
     }
 
-    // ------------------------------------------------------------------ guest agent
+    void ISessionView.AttachAgent(IAgentInput input) => View.AttachAgent(input);
+    void ISessionView.SetAgentPictureSize(int width, int height) => View.SetAgentPictureSize(width, height);
 
-    /// <summary>Connects to the BetterVNC guest agent (rich clipboard, scrolling, screen stream) once the VNC session is up, if the profile has one.</summary>
-    private void StartAgent()
+    void ISessionView.FocusPicture()
     {
-        if (!AgentClient.IsConfigured(_profile) || _client == null) return;
-        var agent = new AgentClient(_profile, _host, Dispatcher);
-        agent.StateChanged += () => { if (_agent == agent) OnAgentStateChanged(agent); };
-        agent.Message += m => { if (_agent == agent) StatusLeft.Text = m; };
-        agent.RemoteTextReceived += t => { if (_agent == agent) OnRemoteClipboard(t); };
-        _agent = agent;
-        View.ScrollInjector = agent;
-        var player = new VideoStreamPlayer(agent, _client, View, Dispatcher);
-        player.Message += m => { if (_player == player) StatusLeft.Text = m; };
-        player.Ended += _ => { if (_player == player) { RefreshPictureMenu(); UpdateStatus(); } };
-        _player = player;
-        StatusLeft.Text = $"Connecting to guest agent at {agent.Target}…";
-        agent.Start();
+        View.Focus();
+        Keyboard.Focus(View);
     }
 
-    private void OnAgentStateChanged(AgentClient agent)
+    void ISessionView.DetachSession() => View.Detach();
+    void ISessionView.FitToRemote(int width, int height) => FitWindowToRemote(width, height);
+    void ISessionView.SetScrollInjector(IScrollInjector? injector) => View.ScrollInjector = injector;
+    void ISessionView.UseMacKeyboard() => View.Translator.MacMode = true;
+    void ISessionView.ReleaseKeys() => View.ReleaseAllKeys();
+    void ISessionView.SetAudioAvailable(bool available) => AudioToggle.IsEnabled = available;
+    void ISessionView.Beep() => System.Media.SystemSounds.Beep.Play();
+
+    VncCredentials? ISessionView.PromptCredentials(CredentialKind kind, string prompt, string? username, out bool remember)
     {
-        RefreshPictureMenu();
-        UpdateStatus();
-        // The agent came up (or back) and the person wants a stream: start it now, the same way clipboard features light up.
-        if (_wantedPicture.IsStream && agent.CanStream && _player is { IsStreaming: false })
-            _ = ApplyPictureAsync();
+        var dlg = new CredentialsDialog(kind, prompt, username) { Owner = this };
+        remember = false;
+        if (dlg.ShowDialog() != true) return null;
+        remember = dlg.Remember;
+        return new VncCredentials(dlg.Username, dlg.Password);
     }
+
+    void ISessionView.ShowMessage(string title, string text, bool warning) =>
+        MessageBox.Show(this, text, title, MessageBoxButton.OK, warning ? MessageBoxImage.Warning : MessageBoxImage.Information);
 
     // ------------------------------------------------------------------ picture mode
 
     /// <summary>Enables each picture entry the current server and agent can deliver, with the reason on the disabled ones.</summary>
-    private void RefreshPictureMenu()
+    public void RefreshPictureMenu()
     {
-        var client = _client;
-        var caps = client?.Capabilities;
         foreach (ComboBoxItem item in PictureBox.Items)
         {
             var info = (PictureModes.Info)item.Tag;
-            string? why = null;
-            if (info.IsStream)
-            {
-                if (_agent == null || _player == null)
-                    why = "This connection has no guest agent. Enable the agent in the connection settings; the stream modes need it.";
-                else if (!_agent.CanStream)
-                    why = _agent.StreamUnavailableReason;
-            }
-            else if (info.IsLossy && caps is { IsApple: true })
-            {
-                why = "macOS Screen Sharing offers no lossy encoding (Raw, Hextile, Zlib, ZRLE only).";
-            }
+            string? why = _controller.WhyUnavailable(info);
             item.IsEnabled = why == null;
             item.ToolTip = why == null ? info.Description : $"{info.Description}\n\nNot available: {why}";
         }
-        PictureDefaultItem.IsEnabled = _wantedPicture.Mode != _profile.PictureMode;
+        PictureDefaultItem.IsEnabled = _controller.CanMakePictureDefault;
     }
 
     private void OnPictureSelected(object sender, SelectionChangedEventArgs e)
     {
         if (_pictureUpdating || PictureBox.SelectedItem is not ComboBoxItem { Tag: PictureModes.Info info }) return;
-        _wantedPicture = info;
-        _ = ApplyPictureAsync();
+        _controller.SelectPicture(info);
         View.Focus();
     }
 
-    private void OnPictureMakeDefault(object sender, RoutedEventArgs e)
-    {
-        _profile.PictureMode = _wantedPicture.Mode;
-        var vnc = _wantedPicture.IsStream ? PictureModes.StreamFallback : _wantedPicture;
-        _profile.JpegQuality = vnc.JpegQuality;
-        _profile.CompressionLevel = vnc.CompressionLevel;
-        try { App.Profiles.Save(); } catch { }
-        RefreshPictureMenu();
-        StatusLeft.Text = $"\"{_wantedPicture.Label}\" is now the default picture for {_profile.Name}";
-    }
-
-    /// <summary>
-    /// Makes the picture match <see cref="_wantedPicture"/>: a VNC mode changes the Tight encodings on the live connection; a
-    /// stream mode starts (or re-tunes) the agent stream, or falls back to lossless VNC while the agent cannot stream.
-    /// </summary>
-    private async Task ApplyPictureAsync()
-    {
-        var client = _client;
-        if (client == null) return;
-        var mode = _wantedPicture;
-        try
-        {
-            if (mode.IsStream)
-            {
-                if (_player != null && _agent?.CanStream == true)
-                {
-                    SetVncQuality(client, PictureModes.StreamFallback);
-                    await _player.StartAsync(mode);
-                }
-                else
-                {
-                    if (_player?.IsStreaming == true) await _player.StopAsync();
-                    SetVncQuality(client, PictureModes.StreamFallback);
-                    StatusLeft.Text = _agent == null
-                        ? "Stream mode needs the guest agent; showing VNC lossless because this connection has none configured"
-                        : $"Showing VNC lossless until the guest agent can stream: {_agent.StreamUnavailableReason}";
-                }
-            }
-            else
-            {
-                if (_player?.IsStreaming == true) await _player.StopAsync();
-                SetVncQuality(client, mode);
-                StatusLeft.Text = mode.IsLossy
-                    ? $"Picture: {mode.Label} (Tight JPEG {mode.JpegQuality}). If the status bar never shows JPEG, the server ignores lossy requests (QEMU needs lossy=on)."
-                    : $"Picture: {mode.Label}";
-            }
-        }
-        catch (Exception ex)
-        {
-            StatusLeft.Text = "Picture: " + ex.Message;
-        }
-        RefreshPictureMenu();
-        UpdateStatus();
-    }
-
-    private void SetVncQuality(VncClient client, PictureModes.Info quality)
-    {
-        if (client.Options.JpegQuality == quality.JpegQuality && client.Options.CompressionLevel == quality.CompressionLevel)
-        {
-            _activeVnc = quality;
-            return;
-        }
-        _activeVnc = quality;
-        _jpegRectsAtQualityChange = client.Statistics.TightJpegRects;
-        client.SetPictureQuality(quality.CompressionLevel, quality.JpegQuality);
-    }
+    private void OnPictureMakeDefault(object sender, RoutedEventArgs e) => _controller.MakePictureDefault();
 
     /// <summary>Sizes the window so the remote screen shows 1:1 when it fits, otherwise fills most of the work area.</summary>
     private void FitWindowToRemote(int fbWidth, int fbHeight)
@@ -391,53 +234,12 @@ public partial class SessionWindow : Window
         Top = Math.Max(work.Top, Math.Min(Top, work.Bottom - Height));
     }
 
-    private VncCredentials? PromptCredentials(CredentialKind kind, string prompt)
-    {
-        var dlg = new CredentialsDialog(kind, prompt, _profile.Username) { Owner = this };
-        if (dlg.ShowDialog() != true) return null;
-        if (dlg.Remember)
-        {
-            if (kind == CredentialKind.UsernameAndPassword) _profile.Username = dlg.Username;
-            _profile.ProtectedPassword = ProfileStore.Protect(dlg.Password);
-            try { App.Profiles.Save(); } catch { }
-        }
-        return new VncCredentials(dlg.Username, dlg.Password);
-    }
-
-    private void OnDisconnected(Exception? ex)
-    {
-        IsConnected = false;
-        SessionManager.NotifyStateChanged(this);
-        _statusTimer.Stop();
-        _audio.Stop();
-        View.ScrollInjector = null;
-        _player?.Dispose();
-        _player = null;
-        _agent?.Dispose();
-        _agent = null;
-        RefreshPictureMenu();
-        View.ReleaseAllKeys();
-        UpdateHook();
-        if (ex == null)
-            ShowOverlay("Disconnected", "The session ended.", showButtons: true);
-        else
-            ShowOverlay("Connection lost", ex.Message, showButtons: true);
-    }
-
-    private void ShowOverlay(string title, string detail, bool showButtons)
-    {
-        OverlayTitle.Text = title;
-        OverlayDetail.Text = detail;
-        ReconnectButton.Visibility = CloseButton.Visibility = showButtons ? Visibility.Visible : Visibility.Collapsed;
-        Overlay.Visibility = Visibility.Visible;
-    }
-
-    private void OnReconnect(object sender, RoutedEventArgs e) => _ = ConnectAsync();
+    private void OnReconnect(object sender, RoutedEventArgs e) => _ = _controller.ConnectAsync();
     private void OnCloseClick(object sender, RoutedEventArgs e) => Close();
 
     private void OnDisconnectClick(object sender, RoutedEventArgs e)
     {
-        _client?.Disconnect();
+        _controller.Disconnect();
         Close();
     }
 
@@ -451,7 +253,7 @@ public partial class SessionWindow : Window
             case WM_SYSKEYDOWN:
             case WM_KEYUP:
             case WM_SYSKEYUP:
-                if (_client != null && View.IsKeyboardFocused)
+                if (View.IsAttached && View.IsKeyboardFocused)
                 {
                     int vk = (int)wParam;
                     long lp = lParam.ToInt64();
@@ -473,15 +275,12 @@ public partial class SessionWindow : Window
                 if (View.IsKeyboardFocused) handled = true;
                 break;
             case WM_MOUSEHWHEEL:
-                if (_client != null)
+                if (View.IsAttached)
                 {
                     int delta = (short)((wParam.ToInt64() >> 16) & 0xFFFF);
                     View.SendWheel(delta, horizontal: true, Mouse.GetPosition(View));
                     handled = true;
                 }
-                break;
-            case WM_CLIPBOARDUPDATE:
-                OnLocalClipboardChanged();
                 break;
         }
         return IntPtr.Zero;
@@ -501,7 +300,7 @@ public partial class SessionWindow : Window
 
     private void UpdateHook()
     {
-        bool wantHook = _client != null && IsActive && (GrabToggle.IsChecked == true || _fullscreen);
+        bool wantHook = View.IsAttached && IsActive && (GrabToggle.IsChecked == true || _fullscreen);
         if (wantHook)
         {
             _llHook ??= new LowLevelKeyboardHook(
@@ -515,175 +314,29 @@ public partial class SessionWindow : Window
         }
     }
 
-    // ------------------------------------------------------------------ clipboard
+    // ------------------------------------------------------------------ clipboard and files
 
-    private void OnLocalClipboardChanged()
-    {
-        if (_client == null || ClipboardToggle.IsChecked != true) return;
-        if (_agent?.IsOwnClipboardChange() == true) return; // the agent just put guest content here
-        PushLocalClipboard();
-        if (_agent?.IsConnected == true) _ = MirrorLocalImageAsync();
-    }
+    private void OnClipboardToggled(object sender, RoutedEventArgs e) => _controller.SyncClipboard = ClipboardToggle.IsChecked == true;
 
-    /// <summary>An image copied locally (screenshot, browser, Paint) goes straight to the guest clipboard through the agent.</summary>
-    private async Task MirrorLocalImageAsync()
-    {
-        var agent = _agent;
-        if (agent == null) return;
-        try
-        {
-            bool hasText = false, hasFiles = false, hasImage = false;
-            for (int attempt = 0; attempt < 3; attempt++)
-            {
-                try
-                {
-                    hasText = Clipboard.ContainsText();
-                    hasFiles = Clipboard.ContainsFileDropList();
-                    hasImage = Clipboard.ContainsImage() || Clipboard.ContainsData("PNG");
-                    break;
-                }
-                catch (System.Runtime.InteropServices.COMException) { await Task.Delay(30); }
-            }
-            // Text travels over VNC; a copy that carries text and a picture (Excel, Word) is almost always meant as text.
-            if (!hasImage || hasText || hasFiles) return;
-            await agent.PushClipboardImageAsync();
-        }
-        catch (Exception ex)
-        {
-            StatusLeft.Text = "Guest clipboard: " + ex.Message;
-        }
-    }
-
-    private void PushLocalClipboard()
-    {
-        if (_client == null) return;
-        string? text = null;
-        for (int attempt = 0; attempt < 3 && text == null; attempt++)
-        {
-            try
-            {
-                if (Clipboard.ContainsText()) text = Clipboard.GetText();
-                else return;
-            }
-            catch (System.Runtime.InteropServices.COMException) { Thread.Sleep(30); }
-        }
-        if (string.IsNullOrEmpty(text) || text == _lastRemoteClipboard || text == _lastLocalClipboard) return;
-        _lastLocalClipboard = text;
-        _client.SendClipboardText(text);
-    }
-
-    private void OnRemoteClipboard(string text)
-    {
-        if (ClipboardToggle.IsChecked != true || string.IsNullOrEmpty(text) || text == _lastRemoteClipboard) return;
-        _lastRemoteClipboard = text;
-        for (int attempt = 0; attempt < 3; attempt++)
-        {
-            try
-            {
-                Clipboard.SetDataObject(text, true);
-                StatusLeft.Text = "Clipboard received from remote";
-                return;
-            }
-            catch (System.Runtime.InteropServices.COMException) { Thread.Sleep(30); }
-        }
-    }
-
-    private async void OnPasteToRemote(object sender, RoutedEventArgs e)
-    {
-        if (_client == null) return;
-        try
-        {
-            if (Clipboard.ContainsFileDropList())
-            {
-                var files = Clipboard.GetFileDropList().Cast<string>().ToList();
-                await UploadAsync(files);
-            }
-            else if (Clipboard.ContainsImage())
-            {
-                if (_agent?.IsConnected == true)
-                {
-                    if (await _agent.PushClipboardImageAsync()) return;
-                }
-                var image = Clipboard.GetImage();
-                if (image == null) return;
-                var tmp = Path.Combine(Path.GetTempPath(), $"clipboard-{DateTime.Now:yyyyMMdd-HHmmss}.png");
-                SavePng(image, tmp);
-                await UploadAsync(new[] { tmp });
-                try { File.Delete(tmp); } catch { }
-            }
-            else if (Clipboard.ContainsText())
-            {
-                _lastLocalClipboard = null;
-                PushLocalClipboard();
-                StatusLeft.Text = "Clipboard text sent to remote";
-            }
-        }
-        catch (Exception ex)
-        {
-            MessageBox.Show(this, ex.Message, "Paste to remote", MessageBoxButton.OK, MessageBoxImage.Warning);
-        }
-    }
-
-    // ------------------------------------------------------------------ files
+    private async void OnPasteToRemote(object sender, RoutedEventArgs e) => await _controller.PasteToRemoteAsync();
 
     private async void OnSendFiles(object sender, RoutedEventArgs e)
     {
-        if (!CanSendFiles)
+        if (!_controller.CanSendFiles)
         {
-            MessageBox.Show(this, NoFileChannelMessage, "Send files", MessageBoxButton.OK, MessageBoxImage.Information);
+            MessageBox.Show(this, SessionController.NoFileChannelMessage, "Send files", MessageBoxButton.OK, MessageBoxImage.Information);
             return;
         }
         var dlg = new OpenFileDialog { Multiselect = true, Title = "Send files to remote" };
         if (dlg.ShowDialog(this) != true) return;
-        await UploadAsync(dlg.FileNames);
+        await _controller.UploadAsync(dlg.FileNames);
     }
 
     private async void OnDrop(object sender, DragEventArgs e)
     {
         if (!e.Data.GetDataPresent(DataFormats.FileDrop)) return;
         var files = (string[])e.Data.GetData(DataFormats.FileDrop)!;
-        await UploadAsync(files);
-    }
-
-    private const string NoFileChannelMessage =
-        "VNC itself cannot carry files. Either run the BetterVNC guest agent in the remote machine and enable it in the connection " +
-        "(files land directly on the remote clipboard), or configure an SFTP/SMB drop folder.";
-
-    private async Task UploadAsync(IReadOnlyList<string> files)
-    {
-        if (_agent?.IsConnected == true)
-        {
-            try
-            {
-                await _agent.PushFilesAsync(files, new Progress<string>(m => StatusLeft.Text = m));
-                StatusLeft.Text = $"{files.Count} item(s) placed on the guest clipboard; paste them in the remote";
-            }
-            catch (Exception ex)
-            {
-                StatusLeft.Text = "Send failed";
-                MessageBox.Show(this, ex.Message, "Send files to guest", MessageBoxButton.OK, MessageBoxImage.Warning);
-            }
-            return;
-        }
-        if (!_files.IsConfigured)
-        {
-            MessageBox.Show(this, NoFileChannelMessage, "Send files", MessageBoxButton.OK, MessageBoxImage.Information);
-            return;
-        }
-        var progress = new Progress<(string file, double fraction)>(p => StatusLeft.Text = $"Uploading {p.file}  {p.fraction:P0}");
-        try
-        {
-            var written = await _files.UploadAsync(files, progress, CancellationToken.None);
-            StatusLeft.Text = $"Uploaded {written.Count} file(s) via {_files.Description}";
-            // Put the remote path on the remote clipboard so it can be pasted straight away.
-            if (written.Count > 0 && _client != null && ClipboardToggle.IsChecked == true)
-                _client.SendClipboardText(string.Join("\n", written));
-        }
-        catch (Exception ex)
-        {
-            StatusLeft.Text = "Upload failed";
-            MessageBox.Show(this, ex.Message, "Upload failed", MessageBoxButton.OK, MessageBoxImage.Warning);
-        }
+        await _controller.UploadAsync(files);
     }
 
     // ------------------------------------------------------------------ toolbar actions
@@ -730,12 +383,7 @@ public partial class SessionWindow : Window
             View.ScaleMode == ScaleMode.Fit ? ScrollBarVisibility.Disabled : ScrollBarVisibility.Auto;
     }
 
-    private void OnAudioToggled(object sender, RoutedEventArgs e)
-    {
-        if (_client == null) return;
-        if (AudioToggle.IsChecked == true) { _client.SetAudioEnabled(true); _audioRequested = true; }
-        else { _client.SetAudioEnabled(false); _audio.Stop(); }
-    }
+    private void OnAudioToggled(object sender, RoutedEventArgs e) => _controller.SetAudio(AudioToggle.IsChecked == true);
 
     private void OnFullscreenToggled(object sender, RoutedEventArgs e)
     {
@@ -782,70 +430,4 @@ public partial class SessionWindow : Window
             _toolbarHideTimer.Start();
         }
     }
-
-    // ------------------------------------------------------------------ status
-
-    private void OnRenderedFrame()
-    {
-        var client = _client;
-        if (client == null) return;
-        if (!_audioRequested && client.Capabilities.QemuAudio && AudioToggle.IsChecked == true)
-        {
-            _audioRequested = true;
-            client.SetAudioEnabled(true);
-        }
-        if (!AudioToggle.IsEnabled && client.Capabilities.QemuAudio) AudioToggle.IsEnabled = true;
-    }
-
-    private void UpdateStatus()
-    {
-        var client = _client;
-        if (client == null) return;
-        var s = client.Statistics;
-        var now = DateTime.UtcNow;
-        double seconds = Math.Max(0.001, (now - _lastBytesTime).TotalSeconds);
-        double rate = (s.BytesReceived - _lastBytes) / seconds;
-        _lastBytes = s.BytesReceived;
-        _lastBytesTime = now;
-
-        var caps = client.Capabilities;
-        var enc = s.TightRects > 0 ? "Tight" : s.ZrleRects > 0 ? "ZRLE" : s.HextileRects > 0 ? "Hextile" : s.ZlibRects > 0 ? "Zlib" : s.RawRects > 0 ? "Raw" : "-";
-        var features = new List<string>();
-        if (caps.QemuExtendedKeyEvents) features.Add("raw keys");
-        if (caps.ExtendedClipboard) features.Add("ext clipboard");
-        if (caps.QemuAudio) features.Add("audio");
-        if (caps.LocalCursor) features.Add("local cursor");
-        if (_agent != null) features.Add(_agent.IsConnected ? "agent" : _agent.Status);
-        AudioToggle.IsEnabled = caps.QemuAudio;
-
-        string picture;
-        string traffic;
-        if (_player is { IsStreaming: true } player)
-        {
-            var info = player.Info;
-            double streamRate = player.TakeRate();
-            picture = player.IdleFallbackActive
-                ? $"stream idle, {enc} lossless"
-                : $"stream {info?.Codec} {info?.Width}×{info?.Height}" + (player.DecodePath is { } path ? $" ({path})" : "") + (player.FramesSkipped > 0 ? $" ({player.FramesSkipped} skipped)" : "");
-            traffic = $"{FormatRate(streamRate)} stream + {FormatRate(rate)} VNC";
-        }
-        else
-        {
-            var q = _activeVnc;
-            picture = !q.IsLossy ? $"{enc} lossless"
-                : s.TightJpegRects > _jpegRectsAtQualityChange ? $"{enc} JPEG {q.JpegQuality}"
-                : $"{enc}, JPEG {q.JpegQuality} requested (none received yet)";
-            traffic = FormatRate(rate);
-        }
-        if (_wantedPicture.IsStream && _player is not { IsStreaming: true }) picture += "  (waiting for agent stream)";
-
-        StatusRight.Text = $"{client.Framebuffer.Width}×{client.Framebuffer.Height}  ·  {View.Fps:0} fps  ·  {picture}  ·  {traffic}  ·  {string.Join(", ", features)}";
-    }
-
-    private static string FormatRate(double bytesPerSecond) => bytesPerSecond switch
-    {
-        >= 1 << 20 => $"{bytesPerSecond / (1 << 20):0.0} MB/s",
-        >= 1 << 10 => $"{bytesPerSecond / (1 << 10):0} KB/s",
-        _ => $"{bytesPerSecond:0} B/s",
-    };
 }

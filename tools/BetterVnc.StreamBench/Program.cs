@@ -47,7 +47,7 @@ internal static class Program
         int port = StartFakeServer();
 
         var app = new Application { ShutdownMode = ShutdownMode.OnExplicitShutdown };
-        var view = new VncView { ScaleMode = BetterVnc.App.Models.ScaleMode.Fit };
+        var view = new VncView { ScaleMode = BetterVnc.Viewer.Core.Models.ScaleMode.Fit };
         Scroller = new System.Windows.Controls.ScrollViewer
         {
             Content = view, Background = Brushes.Black, Focusable = false,
@@ -232,7 +232,7 @@ internal static class Program
         // 1:1 in a smaller window, scrolled: the surface must cover the scroll viewport only, not the whole picture.
         window.Dispatcher.Invoke(() =>
         {
-            view.ScaleMode = BetterVnc.App.Models.ScaleMode.OneToOne;
+            view.ScaleMode = BetterVnc.Viewer.Core.Models.ScaleMode.OneToOne;
             Scroller.HorizontalScrollBarVisibility = Scroller.VerticalScrollBarVisibility = System.Windows.Controls.ScrollBarVisibility.Auto;
             window.Width = Width * 2 / 3 / dpi.DpiScaleX;
             window.Height = Height * 2 / 3 / dpi.DpiScaleY;

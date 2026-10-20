@@ -37,6 +37,33 @@ public static class AgentMessageType
     /// </summary>
     public const string Scroll = "scroll";
 
+    // ---- remote control (only when the agent advertised AgentFeature.Input); fire and forget, like scroll
+    /// <summary>
+    /// Viewer to agent, no reply: move the guest pointer and set its buttons. <see cref="AgentMessage.X"/>/<see cref="AgentMessage.Y"/>
+    /// are pixels in the picture the viewer shows (the stream's frames) and <see cref="AgentMessage.Width"/>/<see cref="AgentMessage.Height"/>
+    /// that picture's size; <see cref="AgentMessage.Buttons"/> holds the buttons that are down (<see cref="AgentButton"/>).
+    /// The agent maps the picture onto the part of its screen the stream shows (the whole desktop while nothing streams),
+    /// so the viewer needs to know nothing about the guest's displays or how the frames were scaled. Wheel movement
+    /// travels as <see cref="Scroll"/> and applies at the position the last pointer message set.
+    /// </summary>
+    public const string Pointer = "pointer";
+    /// <summary>
+    /// Viewer to agent, no reply: a key went down (<see cref="AgentMessage.Down"/> true) or up. <see cref="AgentMessage.ScanCode"/>
+    /// is the PC/AT set 1 make code with 0xE000 added for extended keys (Right Ctrl is 0xE01D, the Delete key 0xE053),
+    /// so the guest applies its own keyboard layout; <see cref="AgentMessage.VirtualKey"/> is the Windows virtual-key code,
+    /// used when the scan code is 0 (keys without one, such as Pause). Auto-repeat arrives as repeated presses.
+    /// </summary>
+    public const string Key = "key";
+    /// <summary>
+    /// Agent to viewer, unsolicited, while a stream that asked for it (<see cref="AgentMessage.Cursor"/> on
+    /// <see cref="StartVideo"/>) runs: the guest pointer changed. With a payload it carries a new shape,
+    /// <see cref="AgentMessage.Width"/>×<see cref="AgentMessage.Height"/> pixels of B, G, R, A (straight alpha, top row
+    /// first, no padding) with the hot spot at <see cref="AgentMessage.HotX"/>/<see cref="AgentMessage.HotY"/>; without
+    /// one the shape is the one sent before. <see cref="AgentMessage.Visible"/> says whether the pointer shows at all
+    /// (apps hide it while typing, games for good). The viewer draws it at its own mouse position, so it never lags.
+    /// </summary>
+    public const string Cursor = "cursor";
+
     // ---- video (only when the agent advertised AgentFeature.Video)
     /// <summary>
     /// Viewer to agent: start streaming the screen. Carries the <see cref="AgentMessage.Codecs"/> the viewer can decode in
@@ -99,6 +126,27 @@ public static class AgentFeature
     public const string Scroll = "scroll";
     /// <summary>The agent can stream its screen (<see cref="AgentMessageType.StartVideo"/>); the welcome lists the <see cref="AgentMessage.Codecs"/>.</summary>
     public const string Video = "video";
+    /// <summary>
+    /// The agent accepts <see cref="AgentMessageType.Pointer"/> and <see cref="AgentMessageType.Key"/> messages, so a
+    /// viewer can control the guest without a VNC server: picture from the stream, input through the agent.
+    /// </summary>
+    public const string Input = "input";
+    /// <summary>The agent sends the pointer's shape (<see cref="AgentMessageType.Cursor"/>) with a stream that asks for it.</summary>
+    public const string Cursor = "cursor";
+}
+
+/// <summary>Bits of <see cref="AgentMessage.Buttons"/> in a pointer message.</summary>
+public static class AgentButton
+{
+    public const int Left = 1 << 0;
+    public const int Middle = 1 << 1;
+    public const int Right = 1 << 2;
+    /// <summary>The first side button (XBUTTON1, "back" in browsers).</summary>
+    public const int Back = 1 << 3;
+    /// <summary>The second side button (XBUTTON2, "forward").</summary>
+    public const int Forward = 1 << 4;
+
+    public const int All = Left | Middle | Right | Back | Forward;
 }
 
 /// <summary>Values of <see cref="AgentMessage.Phase"/> in a scroll message.</summary>
@@ -180,7 +228,10 @@ public sealed class AgentMessage
     public double? Dx { get; set; }
     /// <summary>Vertical scroll in pixels; positive scrolls up (wheel rotated away from the user), negative scrolls down.</summary>
     public double? Dy { get; set; }
-    /// <summary>Pointer position in framebuffer pixels when the scroll happened (optional, informational).</summary>
+    /// <summary>
+    /// Scroll: pointer position in framebuffer pixels when the scroll happened (optional, informational). Pointer: the
+    /// position in the viewer's picture, which is <see cref="Width"/>×<see cref="Height"/> pixels.
+    /// </summary>
     public int? X { get; set; }
     public int? Y { get; set; }
     /// <summary>Gesture phase; see <see cref="AgentScrollPhase"/>.</summary>
@@ -188,6 +239,26 @@ public sealed class AgentMessage
     /// <summary>The same movement in Windows wheel units (120 per notch, same signs as <see cref="Dx"/>/<see cref="Dy"/>), when known.</summary>
     public double? WheelDx { get; set; }
     public double? WheelDy { get; set; }
+
+    // ---- pointer, keys and cursor (AgentFeature.Input, AgentFeature.Cursor)
+    /// <summary>Pointer: the buttons held down, a combination of <see cref="AgentButton"/> bits.</summary>
+    public int? Buttons { get; set; }
+    /// <summary>Key: set 1 make code, 0xE000 added for extended keys; 0 when the key has none (see <see cref="VirtualKey"/>).</summary>
+    public int? ScanCode { get; set; }
+    /// <summary>Key: Windows virtual-key code.</summary>
+    public int? VirtualKey { get; set; }
+    /// <summary>Key: true for a press (and auto-repeat), false for a release.</summary>
+    public bool? Down { get; set; }
+    /// <summary>Cursor: the hot spot (the pixel that points) within the shape.</summary>
+    public int? HotX { get; set; }
+    public int? HotY { get; set; }
+    /// <summary>Cursor: false while the guest hides its pointer.</summary>
+    public bool? Visible { get; set; }
+    /// <summary>
+    /// startVideo: also send the pointer's shape and visibility (<see cref="AgentMessageType.Cursor"/>) while the stream
+    /// runs, for a viewer with no VNC connection to get them from. videoStarted: true when the agent will.
+    /// </summary>
+    public bool? Cursor { get; set; }
 
     // ---- video
     /// <summary>Welcome: codecs the agent can encode. startVideo: codecs the viewer can decode, most preferred first.</summary>
@@ -206,6 +277,7 @@ public sealed class AgentMessage
     /// encoding sends a picture no larger than that, keeping the desktop's shape, so the viewer shows it 1:1 and no bits go
     /// to detail it would scale away. Absent or 0 means no limit in that direction; setVideo without either leaves the
     /// limit as it is. Agents that cannot scale, and agents older than this field, ignore it.
+    /// Pointer: the size of the picture <see cref="X"/>/<see cref="Y"/> refer to. Cursor: the size of the shape.
     /// </summary>
     public int? Width { get; set; }
     public int? Height { get; set; }

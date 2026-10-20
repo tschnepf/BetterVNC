@@ -1,5 +1,5 @@
 using System.Windows;
-using BetterVnc.App.Models;
+using BetterVnc.Viewer.Core.Models;
 using BetterVnc.App.Views;
 
 namespace BetterVnc.App.Services;

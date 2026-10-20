@@ -3,8 +3,9 @@ using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Data;
 using System.Windows.Input;
-using BetterVnc.App.Models;
 using BetterVnc.App.Services;
+using BetterVnc.Viewer.Core.Models;
+using BetterVnc.Viewer.Core.Services;
 
 namespace BetterVnc.App.Views;
 
@@ -121,6 +122,7 @@ public partial class MainWindow : Window
         string? host = null;
         int? port = null;
         string? password = null;
+        string? guestAddress = null;
 
         if (profile.Kind == ConnectionKind.UnraidVm && App.Profiles.FindServer(profile.UnraidServerId) is { } server && !string.IsNullOrEmpty(profile.UnraidVmName))
         {
@@ -128,7 +130,7 @@ public partial class MainWindow : Window
             try
             {
                 Cursor = Cursors.Wait;
-                var svc = new UnraidService(server);
+                var svc = new UnraidService(server, App.Profiles.Secrets);
                 var vm = await svc.GetVmAsync(profile.UnraidVmName);
                 if (!vm.IsRunning)
                 {
@@ -137,7 +139,7 @@ public partial class MainWindow : Window
                     if (answer != MessageBoxResult.Yes) return;
                     Cursor = Cursors.Wait;
                     await svc.StartVmAsync(vm.Name);
-                    for (int i = 0; i < 20 && vm.VncPort == null; i++)
+                    for (int i = 0; i < 20 && vm.VncPort == null && !profile.AgentOnly; i++)
                     {
                         await Task.Delay(1000);
                         vm = await svc.GetVmAsync(profile.UnraidVmName);
@@ -146,7 +148,8 @@ public partial class MainWindow : Window
                 host = server.Host;
                 port = vm.VncPort;
                 password = vm.VncPassword;
-                if (port == null)
+                guestAddress = vm.GuestAddress;
+                if (port == null && !profile.AgentOnly) // without VNC (a passthrough GPU) the agent is all it takes
                 {
                     MessageBox.Show(this, $"VM \"{vm.Name}\" has no VNC display (is it using a passthrough GPU?).", "BetterVNC", MessageBoxButton.OK, MessageBoxImage.Warning);
                     return;
@@ -162,7 +165,7 @@ public partial class MainWindow : Window
             }
         }
 
-        var win = new SessionWindow(profile, host, port, password, fullscreen: fullscreen == true);
+        var win = new SessionWindow(profile, host, port, password, fullscreen: fullscreen == true, guestAddress: guestAddress);
         win.Show();
     }
 

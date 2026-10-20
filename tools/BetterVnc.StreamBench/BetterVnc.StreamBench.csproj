@@ -20,7 +20,7 @@
 
   <ItemGroup>
     <ProjectReference Include="..\..\src\BetterVnc.App\BetterVnc.App.csproj" />
-    <ProjectReference Include="..\..\src\BetterVnc.Media\BetterVnc.Media.csproj" />
+    <ProjectReference Include="..\..\src\BetterVnc.Media.Windows\BetterVnc.Media.Windows.csproj" />
     <ProjectReference Include="..\..\src\BetterVnc.Protocol\BetterVnc.Protocol.csproj" />
   </ItemGroup>
 

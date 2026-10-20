@@ -38,6 +38,13 @@ public sealed class VncClient : IDisposable
     public string DesktopName { get; private set; } = "";
     public ServerCapabilities Capabilities { get; } = new();
     public VncStatistics Statistics { get; } = new();
+
+    /// <summary>
+    /// The last cursor shape the server sent. Servers send it right after SetEncodings, usually before a view has
+    /// subscribed to <see cref="CursorChanged"/>, so a view applies this when it attaches.
+    /// </summary>
+    public CursorShape? CurrentCursor { get; private set; }
+
     public bool IsConnected => _stream != null && !_closing;
     public VncConnectionOptions Options => _options;
 
@@ -611,9 +618,15 @@ public sealed class VncClient : IDisposable
                         fb.MarkDirty(rect);
                         break;
                     case RfbEncoding.Cursor:
+                    {
                         Capabilities.LocalCursor = true;
-                        CursorChanged?.Invoke(CursorShape.ReadRichCursor(r, rect));
+                        // Read the payload outside the event call: `CursorChanged?.Invoke(Read(...))` skips the read when
+                        // nobody is subscribed yet, and the rest of the stream is then parsed out of step.
+                        var shape = CursorShape.ReadRichCursor(r, rect);
+                        CurrentCursor = shape;
+                        CursorChanged?.Invoke(shape);
                         break;
+                    }
                     case RfbEncoding.DesktopSize:
                         Capabilities.DesktopResize = true;
                         fb.Resize(w, h);
@@ -653,9 +666,14 @@ public sealed class VncClient : IDisposable
                         Capabilities.QemuAudio = true;
                         break;
                     case RfbEncoding.QemuLedState:
+                    {
                         Capabilities.QemuLedState = true;
-                        LedStateChanged?.Invoke(r.ReadU8());
+                        // QEMU sends this on connect and whenever the guest toggles Caps/Num/Scroll Lock; the byte has to
+                        // be consumed even when nobody listens (see the cursor case above).
+                        int leds = r.ReadU8();
+                        LedStateChanged?.Invoke(leds);
                         break;
+                    }
                     default:
                         throw new VncException($"Server used unsupported encoding {RfbEncoding.Name(enc)} ({enc})");
                 }

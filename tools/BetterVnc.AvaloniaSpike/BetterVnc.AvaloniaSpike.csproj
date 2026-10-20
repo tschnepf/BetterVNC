@@ -1,0 +1,36 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    Phase 0 of docs/CROSS-PLATFORM-VIEWER.md: a throwaway Avalonia app that measures what the viewer port depends on
+    (framebuffer drawing, the two GPU video paths, keyboard messages, UI Automation). Results: docs/AVALONIA-SPIKE.md.
+    Dev tool, not shipped. Run as `dotnet BetterVnc.AvaloniaSpike.dll <mode> ...` (see Program.cs).
+  -->
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <RootNamespace>BetterVnc.AvaloniaSpike</RootNamespace>
+    <ApplicationManifest>..\..\src\BetterVnc.App\app.manifest</ApplicationManifest>
+    <AvaloniaUseCompiledBindingsByDefault>true</AvaloniaUseCompiledBindingsByDefault>
+    <!-- A new hash per build: Smart App Control on the dev PC blocks some builds by hash, and a rebuild then gets another chance. -->
+    <Deterministic>false</Deterministic>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Avalonia" Version="12.1.4" />
+    <PackageReference Include="Avalonia.Desktop" Version="12.1.4" />
+    <PackageReference Include="Avalonia.Themes.Fluent" Version="12.1.4" />
+    <PackageReference Include="Vortice.Direct3D11" Version="3.8.3" />
+    <PackageReference Include="Vortice.DXGI" Version="3.8.3" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- The Windows video backend (H.264 encoder and decoder, Direct3D 11 device, swap chain); it brings BetterVnc.Media. -->
+    <ProjectReference Include="..\..\src\BetterVnc.Media.Windows\BetterVnc.Media.Windows.csproj" />
+    <ProjectReference Include="..\..\src\BetterVnc.Protocol\BetterVnc.Protocol.csproj" />
+  </ItemGroup>
+
+</Project>

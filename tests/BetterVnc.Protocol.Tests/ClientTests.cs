@@ -353,6 +353,37 @@ public class ClientTests
         }
     }
 
+    [Theory]
+    [InlineData(0)] // all LEDs off: an unread byte would parse as a FramebufferUpdate header
+    [InlineData(2)] // Num Lock: an unread byte would parse as a Bell and hide the bug
+    [InlineData(6)] // Caps + Num Lock: an unread byte would be an unknown message type
+    public async Task Led_state_and_cursor_without_subscribers_keep_the_stream_in_step(int leds)
+    {
+        // QEMU sends the LED state and the cursor shape right after SetEncodings, before the viewer has attached
+        // its handlers; their payloads must be consumed regardless.
+        var (server, client) = await ConnectAsync();
+        using (server) using (client)
+        {
+            Exception? error = null;
+            client.Disconnected += ex => error = ex;
+            var cursor = Bgrx(0x00FF00, 4).Concat(new byte[] { 0b11000000, 0b11000000 }).ToArray();
+            server.SendUpdate(new FakeRfbServer.Rect(0, 0, 1, 1, RfbEncoding.QemuLedState, new[] { (byte)leds }));
+            server.SendUpdate(new FakeRfbServer.Rect(1, 1, 2, 2, RfbEncoding.Cursor, cursor));
+            // The same pair inside one update, followed by pixels.
+            server.SendUpdate(
+                new FakeRfbServer.Rect(0, 0, 1, 1, RfbEncoding.QemuLedState, new[] { (byte)leds }),
+                new FakeRfbServer.Rect(0, 0, 2, 2, RfbEncoding.Cursor, cursor),
+                new FakeRfbServer.Rect(4, 4, 2, 1, RfbEncoding.Raw, Bgrx(0x123456, 2)));
+            // A fresh framebuffer reports itself dirty in full, so update events alone do not show the pixels landed.
+            for (int i = 0; i < 100 && client.IsConnected && Pixel(client, 5, 4) != 0x123456u; i++)
+                await Task.Delay(50);
+            Assert.True(client.IsConnected, error?.Message);
+            Assert.Equal(0x123456u, Pixel(client, 5, 4));
+            Assert.True(client.Capabilities.QemuLedState);
+            Assert.Equal(2, client.CurrentCursor?.Width);
+        }
+    }
+
     [Fact]
     public async Task Desktop_size_resizes_framebuffer_and_requests_full_update()
     {
@@ -454,6 +485,30 @@ public class ClientTests
             Assert.Equal(1, BinaryPrimitives.ReadUInt16BigEndian(ext.Payload.AsSpan(1)));
             Assert.Equal(Keysym.ControlR, BinaryPrimitives.ReadUInt32BigEndian(ext.Payload.AsSpan(3)));
             Assert.Equal(0x9Du, BinaryPrimitives.ReadUInt32BigEndian(ext.Payload.AsSpan(7)));
+        }
+    }
+
+    [Fact]
+    public async Task NumLock_and_Pause_reach_qemu_with_their_own_key_numbers()
+    {
+        var (server, client) = await ConnectAsync();
+        using (server) using (client)
+        {
+            var upd = NextUpdate(client);
+            server.SendUpdate(
+                new FakeRfbServer.Rect(0, 0, 64, 48, RfbEncoding.QemuExtendedKeyEvent, Array.Empty<byte>()),
+                new FakeRfbServer.Rect(0, 0, 1, 1, RfbEncoding.Raw, Bgrx(1, 1)));
+            await upd;
+
+            client.SendKeyEvent(Keysym.NumLock, true, XtScancode.FromWindows(0x45, extended: true));
+            var numLock = server.WaitFor(ClientMessage.Qemu);
+            Assert.Equal(Keysym.NumLock, BinaryPrimitives.ReadUInt32BigEndian(numLock.Payload.AsSpan(3)));
+            Assert.Equal(0x45u, BinaryPrimitives.ReadUInt32BigEndian(numLock.Payload.AsSpan(7)));
+
+            client.SendKeyEvent(Keysym.Pause, true, XtScancode.FromWindows(0x45, extended: false));
+            var pause = server.WaitFor(ClientMessage.Qemu);
+            Assert.Equal(Keysym.Pause, BinaryPrimitives.ReadUInt32BigEndian(pause.Payload.AsSpan(3)));
+            Assert.Equal(0xC6u, BinaryPrimitives.ReadUInt32BigEndian(pause.Payload.AsSpan(7)));
         }
     }
 

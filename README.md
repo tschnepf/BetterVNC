@@ -82,8 +82,14 @@ dotnet build tests/BetterVnc.Protocol.Tests && tests/BetterVnc.Protocol.Tests/bi
 The tests are executables rather than `dotnet test` projects for two reasons: with Smart App Control
 on, Windows refuses to load the unsigned test DLL into Microsoft's signed `testhost.exe`, and the
 .NET 10 SDK's `dotnet test` no longer drives xunit.v3 projects in its default (VSTest) mode. The
-release workflow runs the three executables the same way. `tests/BetterVnc.Agent.Tests` and
-`tests/BetterVnc.Media.Tests` (the latter under `net10.0-windows`) are built and run alike.
+release workflow runs every test executable the same way, and the others are built and run alike:
+
+| Project | Covers | Target |
+|---|---|---|
+| `tests/BetterVnc.Agent.Tests` | agent protocol, pairing, scrolling, video channel, Mac helper reader | `net10.0` |
+| `tests/BetterVnc.Media.Tests` | pixel conversion, Annex B, dirty regions, pacing, video layout | `net10.0` |
+| `tests/BetterVnc.Media.Windows.Tests` | Media Foundation encode and decode, Desktop Duplication, DXVA and the swap chain | `net10.0-windows` |
+| `tests/BetterVnc.Viewer.Core.Tests` | the session controller and stream player, with fakes and no GUI | `net10.0` |
 
 ### Demo server
 
@@ -154,6 +160,7 @@ to VNC. With it connected the clipboard behaves like an RDP session:
 | Copy text | Still travels over VNC. When the agent is connected the viewer also receives it through the agent, which keeps full Unicode on Macs (Apple's VNC server is Latin-1 only). |
 | Scroll | The wheel is sent as pixel deltas and injected natively (see [Smooth scrolling](#smooth-scrolling)). |
 | Picture | The agent can stream its screen as video so a moving picture costs a few Mbit/s instead of tens (see [Picture modes and screen streaming](#picture-modes-and-screen-streaming)). |
+| Keyboard and mouse | A Windows machine with no VNC server can be controlled through the agent alone: picture, keyboard, mouse and pointer shapes (see [Connections without VNC](#connections-without-vnc)). |
 
 The status bar shows `agent` among the session features once the connection is up, and the
 `Files…`, `Paste` and drag-and-drop paths prefer the agent over the SFTP/SMB drop folder.
@@ -297,6 +304,35 @@ bettervnc-agent probe <guest-ip> <token or pair> video 8000 60 6 - h264 1600x100
 The last one acts as a viewer whose picture area is 1600×1000 and shrinks to 800×500 halfway; the
 per-second lines and the closing `Frame sizes:` line show what the agent sent.
 
+### Connections without VNC
+
+A plain Windows PC has no VNC server, and an Unraid VM's QEMU console is not always wanted. For those,
+tick **No VNC server: picture, keyboard and mouse through the agent** in the connection's guest agent
+settings. The session then opens the agent connection only (to the agent host, or the host above when
+that is empty; for an Unraid VM linked to a server, the VM's own address as usual) and starts the stream
+at once:
+
+* **Picture**: the agent's stream, always; the Picture box offers the stream modes only. There is no
+  lossless VNC picture to fall back to while the screen is still, so after 1.5 s without a frame the
+  viewer asks for one key frame, which redraws the still screen from scratch.
+* **Mouse**: positions are pixels of the picture you see; the agent maps them onto the part of its
+  screen the stream shows and moves the pointer with `SendInput` over the whole virtual desktop, so
+  every display is reachable. Left, middle, right and both side buttons; the wheel goes through the
+  same smooth scrolling as with VNC.
+* **Keyboard**: keys travel as scan codes, so the remote's own keyboard layout turns them into
+  characters, as for a keyboard plugged into it; the Win key, Alt+Tab and the rest follow the
+  "Win keys" toggle as before.
+* **Pointer**: the agent reports the pointer's shape from Desktop Duplication (GDI when duplication is
+  unavailable) and whether it shows; the viewer draws it as a real Windows cursor, so it never lags.
+  Pointers that invert the screen, such as the text I-beam, are drawn black with a white outline.
+* Clipboard, files and paste work through the agent as in any agent session.
+
+What still needs VNC (or, later, a system service for the agent): the sign-in and lock screens, UAC
+prompts and Ctrl+Alt+Del, because Windows does not let an app in the user's session see or control
+the secure desktop. If the agent goes away the session shows "Connection lost" and carries on when it
+is back. The agent's settings window has a checkbox (`enableInput` in its config) to refuse keyboard and
+mouse control; old agents and agents on macOS or Linux do not offer it, and the session then says so.
+
 ### How it works
 
 The agent listens on TCP **5970** (configurable) inside the guest. Frames are a JSON header plus
@@ -315,6 +351,18 @@ to viewer when its capture ends). In `startVideo` and `setVideo`, `width`/`heigh
 agent that can scale before encoding sends a picture that fits in them, keeping the desktop's shape, and frames
 say the size they have; an absent or 0 side means no limit, and a `setVideo` without either keeps the area. Old
 agents ignore the fields and old viewers do not send them, so both keep streaming at the desktop's size.
+
+Control without VNC adds the features `input` and `cursor`. With `input` the viewer may send `pointer` (no reply:
+`x`/`y` in the picture it shows, that picture's `width`/`height`, and the `buttons` held down: 1 left, 2 middle,
+4 right, 8 back, 16 forward) and `key` (no reply: `scanCode`, the set 1 make code with 0xE000 added for extended
+keys or 0 for none, the Windows `virtualKey`, and `down`). The agent maps the picture onto the part of its screen
+the stream shows, so the viewer needs to know nothing about the guest's displays or scaling, and releases any key
+or button a viewer still holds when it disconnects. A `startVideo` with `cursor: true` (answered with `cursor: true`
+in `videoStarted` by an agent that has the feature) also brings `cursor` messages while the stream runs: `visible`,
+and with a new shape `width`, `height`, `hotX`, `hotY` and the pixels as B, G, R, A with straight alpha in the
+payload; only the newest state is sent when the link is slow. Protocol version 1 stays: both sides skip header
+fields they do not know and ignore notifications they do not know, and the agent answers an unknown request (one
+with an `id`) with an error carrying that id, so neither side stalls or disconnects on something newer.
 
 **Who may connect.** Two ways, both usable at the same time:
 
@@ -371,7 +419,7 @@ connections), registers it to start at login with the OS's own mechanism and sta
 
 | Remote | Program and config | Autostart | Log |
 |---|---|---|---|
-| Windows | `%LOCALAPPDATA%\Programs\BetterVNC Agent\` | scheduled task "BetterVNC agent" at logon (hidden window); a firewall rule is added if the prompt is elevated, otherwise Windows asks once | next to the program |
+| Windows | `%LOCALAPPDATA%\Programs\BetterVNC Agent\` | "BetterVNC agent" entry under `HKCU\Software\Microsoft\Windows\CurrentVersion\Run` (at sign-in; the program has no console window); a firewall rule for all network profiles is added if the prompt is elevated, otherwise Windows asks once (tick Public networks there if the machine's network is Public) | next to the program |
 | Linux | `~/.local/bin/bettervnc-agent`, `~/.config/bettervnc-agent.json` | systemd user service `bettervnc-agent` (or `~/.config/autostart` without systemd) | `~/.local/state/` |
 | macOS | `~/Library/Application Support/BetterVNC/` (the program as `BetterVNC Agent.app`, with the capture helper inside) | LaunchAgent `~/Library/LaunchAgents/com.bettervnc.agent.plist` | `~/Library/Logs/bettervnc-agent.log` |
 
@@ -390,8 +438,8 @@ an active firewall open TCP 5970 (`ufw allow 5970/tcp`).
 On Windows the agent lives in the notification area (tray), on macOS in the menu bar; both show the
 BetterVNC icon. The menu shows the listening address and the connected and paired viewers, and opens
 the settings: port, listen on all networks or only this computer, allow new pairings, the token or
-password (generate, show, clear), the list of paired viewers with a Remove button, start at login, and
-the log. Changes apply immediately (the listener restarts; connected viewers reconnect by themselves).
+password (generate, show, clear), the list of paired viewers with a Remove button, start at login,
+whether viewers may stream the screen and (Windows) use the keyboard and mouse, and the log. Changes apply immediately (the listener restarts; connected viewers reconnect by themselves).
 On Windows the settings are one window; on macOS each menu entry opens a small dialog.
 
 The same settings are available from the command line, which is what a Linux guest uses:
@@ -409,7 +457,8 @@ A running agent picks up command-line changes after a restart; the tray and menu
 `bettervnc-agent` without a command just serves (in the tray or menu bar; `--console` keeps it in the
 terminal instead). On first start it writes `bettervnc-agent.json` next to the executable (or where
 `--config` points) with pairing on and no token. The file also holds `port`, `listen` (`0.0.0.0` or
-`127.0.0.1`), `maxPayloadMb`, `allowPairing`, `token` and `viewers`. The agent must run in the
+`127.0.0.1`), `maxPayloadMb`, `allowPairing`, `token`, `viewers`, `enableVideo`, `enableInput` and the
+scroll settings. The agent must run in the
 logged-in user's desktop session on every OS, because that is where the clipboard and the approval
 dialog live: not as a Windows service, and on Linux with `DISPLAY` or `WAYLAND_DISPLAY` set.
 
@@ -482,9 +531,14 @@ also runs it).
 ```
 src/BetterVnc.Protocol        RFB client library (no UI): handshake, security, decoders, clipboard, QEMU extensions
 src/BetterVnc.Agent.Protocol  Guest agent wire protocol, server core and viewer-side connection (no UI, no OS code)
+src/BetterVnc.Viewer.Core     Viewer without UI: profiles, agent client, stream player, session controller (every OS)
+src/BetterVnc.Media           Portable media code: SIMD pixel conversion, Annex B, dirty regions, pacing, video layout
+src/BetterVnc.Media.Windows   Media Foundation H.264, Desktop Duplication, Direct3D 11 swap chain (viewer and Windows agent)
+src/BetterVnc.Platform        OS services shared by agent and viewer: clipboards, secret store, audio sink interface
 src/BetterVnc.App             WPF viewer
-tests/                        Protocol tests with a fake RFB server; agent tests with a fake clipboard
-tools/BetterVnc.Agent         Guest agent executable (Windows, Linux, macOS clipboard back ends)
+tests/                        Protocol tests with a fake RFB server; agent tests with a fake clipboard; media tests;
+                              viewer core tests with fakes and no GUI
+tools/BetterVnc.Agent         Guest agent executable (Windows, Linux, macOS)
 tools/BetterVnc.Agent.MacCapture  Screen capture helper of the Mac agent (Swift: ScreenCaptureKit, VideoToolbox; build.sh)
 tools/BetterVnc.DemoServer    Development VNC server
 tools/BetterVnc.StreamBench   Plays a 1080p60 H.264 stream into the real session view and measures the viewer's CPU per path
@@ -494,6 +548,8 @@ docs/ANALYSIS.md              Server analysis and design notes
 
 ## Roadmap
 
+* Sign-in, lock screen and UAC prompts without VNC (a system service next to the Windows agent).
+* Finding agents on the LAN.
 * Dynamic resolution through the guest agent (resize the window, the guest display follows).
 * HTML clipboard in the viewer (the agent already carries it).
 * Bonjour (`_rfb._tcp`) discovery of Macs on the LAN.

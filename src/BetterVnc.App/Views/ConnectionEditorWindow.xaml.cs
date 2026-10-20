@@ -1,7 +1,6 @@
 using System.Windows;
 using System.Windows.Controls;
-using BetterVnc.App.Models;
-using BetterVnc.App.Services;
+using BetterVnc.Viewer.Core.Models;
 
 namespace BetterVnc.App.Views;
 
@@ -49,7 +48,8 @@ public partial class ConnectionEditorWindow : Window
         SmbPathBox.Text = profile.SmbPath ?? "";
         SmbUserBox.Text = profile.SmbUsername ?? "";
         if (profile.SmbProtectedPassword != null) SmbPasswordBox.Password = KeepPassword;
-        AgentBox.IsChecked = profile.AgentEnabled;
+        AgentBox.IsChecked = profile.AgentEnabled || profile.AgentOnly;
+        AgentOnlyBox.IsChecked = profile.AgentOnly;
         AgentHostBox.Text = profile.AgentHost ?? "";
         AgentPortBox.Text = profile.AgentPort.ToString();
         AgentPairRadio.IsChecked = profile.AgentAuth == AgentAuthMode.Pair;
@@ -66,7 +66,12 @@ public partial class ConnectionEditorWindow : Window
 
     private void OnAgentChanged(object sender, RoutedEventArgs e)
     {
-        if (!IsInitialized || AgentPanel == null) return;
+        if (!IsInitialized || AgentPanel == null || AgentOnlyBox == null) return;
+        // Without VNC the agent is the connection: it cannot be switched off, and the VNC port means nothing.
+        bool agentOnly = AgentOnlyBox.IsChecked == true;
+        if (agentOnly) AgentBox.IsChecked = true;
+        AgentBox.IsEnabled = !agentOnly;
+        PortBox.IsEnabled = !agentOnly;
         AgentPanel.Visibility = AgentBox.IsChecked == true ? Visibility.Visible : Visibility.Collapsed;
         OnAgentAuthChanged(this, null!);
     }
@@ -131,7 +136,8 @@ public partial class ConnectionEditorWindow : Window
 
     private void OnSave(object sender, RoutedEventArgs e)
     {
-        if (string.IsNullOrWhiteSpace(HostBox.Text) && KindBox.SelectedIndex != (int)ConnectionKind.UnraidVm)
+        bool agentHostOnly = AgentOnlyBox.IsChecked == true && !string.IsNullOrWhiteSpace(AgentHostBox.Text);
+        if (string.IsNullOrWhiteSpace(HostBox.Text) && KindBox.SelectedIndex != (int)ConnectionKind.UnraidVm && !agentHostOnly)
         {
             MessageBox.Show(this, "Enter a host name or IP address.", "Connection", MessageBoxButton.OK, MessageBoxImage.Warning);
             return;
@@ -145,7 +151,7 @@ public partial class ConnectionEditorWindow : Window
         p.Host = cleanHost;
         p.Port = port;
         p.Username = p.Kind == ConnectionKind.Mac && !string.IsNullOrWhiteSpace(UserBox.Text) ? UserBox.Text.Trim() : null;
-        if (PasswordBox.Password != KeepPassword) p.ProtectedPassword = ProfileStore.Protect(PasswordBox.Password);
+        if (PasswordBox.Password != KeepPassword) p.ProtectedPassword = App.Profiles.Protect(PasswordBox.Password);
         p.UnraidServerId = p.Kind == ConnectionKind.UnraidVm ? (ServerBox.SelectedItem as UnraidServer)?.Id : null;
         p.UnraidVmName = p.Kind == ConnectionKind.UnraidVm ? VmBox.Text.Trim() : null;
         if (p.Kind == ConnectionKind.UnraidVm && string.IsNullOrEmpty(p.Host) && ServerBox.SelectedItem is UnraidServer s) p.Host = s.Host;
@@ -166,17 +172,20 @@ public partial class ConnectionEditorWindow : Window
         p.SftpHost = string.IsNullOrWhiteSpace(SftpHostBox.Text) ? null : SftpHostBox.Text.Trim();
         p.SftpPort = int.TryParse(SftpPortBox.Text, out var sp) && sp > 0 ? sp : 22;
         p.SftpUsername = string.IsNullOrWhiteSpace(SftpUserBox.Text) ? null : SftpUserBox.Text.Trim();
-        if (SftpPasswordBox.Password != KeepPassword) p.SftpProtectedPassword = ProfileStore.Protect(SftpPasswordBox.Password);
+        if (SftpPasswordBox.Password != KeepPassword) p.SftpProtectedPassword = App.Profiles.Protect(SftpPasswordBox.Password);
         p.SftpPrivateKeyPath = string.IsNullOrWhiteSpace(SftpKeyBox.Text) ? null : SftpKeyBox.Text.Trim();
         p.RemoteDropFolder = string.IsNullOrWhiteSpace(SftpFolderBox.Text) ? null : SftpFolderBox.Text.Trim();
         p.SmbPath = string.IsNullOrWhiteSpace(SmbPathBox.Text) ? null : SmbPathBox.Text.Trim();
         p.SmbUsername = string.IsNullOrWhiteSpace(SmbUserBox.Text) ? null : SmbUserBox.Text.Trim();
-        if (SmbPasswordBox.Password != KeepPassword) p.SmbProtectedPassword = ProfileStore.Protect(SmbPasswordBox.Password);
-        p.AgentEnabled = AgentBox.IsChecked == true;
+        if (SmbPasswordBox.Password != KeepPassword) p.SmbProtectedPassword = App.Profiles.Protect(SmbPasswordBox.Password);
+        p.AgentOnly = AgentOnlyBox.IsChecked == true;
+        p.AgentEnabled = AgentBox.IsChecked == true || p.AgentOnly;
+        // A stream mode is the only picture there is without VNC.
+        if (p.AgentOnly && !picture.IsStream) p.PictureMode = PictureMode.StreamQuality;
         p.AgentHost = string.IsNullOrWhiteSpace(AgentHostBox.Text) ? null : AgentHostBox.Text.Trim();
         p.AgentPort = int.TryParse(AgentPortBox.Text, out var ap) && ap > 0 && ap <= 65535 ? ap : 5970;
         p.AgentAuth = AgentTokenRadio.IsChecked == true ? AgentAuthMode.Token : AgentAuthMode.Pair;
-        if (AgentTokenBox.Password != KeepPassword) p.AgentProtectedToken = ProfileStore.Protect(AgentTokenBox.Password.Trim());
+        if (AgentTokenBox.Password != KeepPassword) p.AgentProtectedToken = App.Profiles.Protect(AgentTokenBox.Password.Trim());
         if (!_pairKeyKept) p.AgentProtectedPairKey = null;
         if (p.AgentEnabled && p.AgentAuth == AgentAuthMode.Token && string.IsNullOrEmpty(p.AgentProtectedToken))
         {

@@ -18,6 +18,7 @@ public static class Program
     [STAThread]
     public static int Main(string[] args)
     {
+        AttachToParentConsole();
         var a = new Queue<string>(args);
         string? configPath = null;
         int? port = null;
@@ -95,6 +96,25 @@ public static class Program
         }
     }
 
+    /// <summary>
+    /// The Windows build is a GUI-subsystem program, so it gets no console window when it starts at sign-in. Run from a
+    /// terminal it writes to that terminal's console instead; output redirected to a file or pipe needs nothing.
+    /// </summary>
+    private static void AttachToParentConsole()
+    {
+        if (!OperatingSystem.IsWindows()) return;
+        uint type = GetFileType(GetStdHandle(StdOutputHandle));
+        if (type is FileTypeDisk or FileTypePipe) return;
+        AttachConsole(AttachParentProcess);
+    }
+
+    private const int StdOutputHandle = -11;
+    private const int AttachParentProcess = -1;
+    private const uint FileTypeDisk = 1, FileTypePipe = 3;
+    [System.Runtime.InteropServices.DllImport("kernel32.dll")] private static extern nint GetStdHandle(int stdHandle);
+    [System.Runtime.InteropServices.DllImport("kernel32.dll")] private static extern uint GetFileType(nint file);
+    [System.Runtime.InteropServices.DllImport("kernel32.dll")] private static extern bool AttachConsole(int processId);
+
     private static string Need(Queue<string> a, string option)
     {
         if (a.Count == 0) throw new ArgumentException($"{option} needs a value.");
@@ -107,7 +127,7 @@ public static class Program
             BetterVNC guest agent
 
               bettervnc-agent install [--port <n>] [--listen <addr>] [--dry-run]
-                                         copy into place, register to start at login (scheduled task / LaunchAgent /
+                                         copy into place, register to start at login (Run entry / LaunchAgent /
                                          systemd user service) and start now
               bettervnc-agent uninstall [--dry-run]
               bettervnc-agent [--config <file>] [--port <n>] [--listen <addr>] [--token <t>] [--verbose] [--console]
@@ -124,8 +144,9 @@ public static class Program
 
             Without a command the agent starts serving and creates bettervnc-agent.json next to the executable on first
             start. Viewers get in by pairing (you click Allow in a dialog on this screen) or with the token. The file also
-            holds port, listen, maxPayloadMb, enableVideo (screen streaming for the viewer's Stream picture modes) and the
-            scroll settings (enableScroll, scrollScale, scrollInvert, scrollPhases).
+            holds port, listen, maxPayloadMb, enableVideo (screen streaming for the viewer's Stream picture modes),
+            enableInput (keyboard and mouse for viewers without VNC; Windows) and the scroll settings (enableScroll,
+            scrollScale, scrollInvert, scrollPhases).
             """);
     }
 
@@ -174,7 +195,7 @@ public static class Program
 
         Console.WriteLine($"BetterVNC guest agent {Version} on {host.Clipboard.OsName}");
         Console.WriteLine($"Config: {configPath}  ({cfg.AuthSummary})");
-        Console.WriteLine($"Scroll injection: {host.InputDescription}");
+        Console.WriteLine($"Input injection: {host.InputDescription}");
         Console.WriteLine($"Screen streaming: {host.VideoDescription}");
 #if !WINDOWS
         if (host.Input is Input.MacInput mac && !mac.IsTrusted(prompt: false))

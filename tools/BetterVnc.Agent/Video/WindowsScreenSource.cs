@@ -35,11 +35,16 @@ public sealed class WindowsScreenSource : IGuestVideoSource
         ? $"H.264 with {_h264}, Desktop Duplication capture (GDI fallback); or motion JPEG over GDI"
         : "motion JPEG (software) over GDI; Media Foundation has no H.264 encoder here";
 
-    public IVideoSession Start(VideoRequest request, Action<VideoFrame> onFrame, Action<string?> onEnded)
+    /// <summary>Both codecs report the pointer: Desktop Duplication's pointer updates, or GDI's current cursor.</summary>
+    public bool SupportsCursor => true;
+
+    public IVideoSession Start(VideoRequest request, Action<VideoFrame> onFrame, Action<string?> onEnded) => Start(request, onFrame, onEnded, null);
+
+    public IVideoSession Start(VideoRequest request, Action<VideoFrame> onFrame, Action<string?> onEnded, Action<GuestCursor>? onCursor)
     {
         if (string.Equals(request.Codec, AgentVideoCodec.H264, StringComparison.OrdinalIgnoreCase) && _h264 != null)
         {
-            var h264 = new H264ScreenSession(request, onFrame, onEnded, Log);
+            var h264 = new H264ScreenSession(request, onFrame, onEnded, Log, onCursor);
             Log?.Invoke("H.264 stream: " + h264.Description);
             h264.Start();
             return h264;
@@ -56,7 +61,7 @@ public sealed class WindowsScreenSource : IGuestVideoSource
             try { g.CopyFromScreen(bounds.Left, bounds.Top, 0, 0, probe.Size, CopyPixelOperation.SourceCopy); }
             catch (Win32Exception ex) { throw new InvalidOperationException("The screen cannot be read right now (locked, or a different session): " + ex.Message); }
         }
-        var session = new JpegSession(request, bounds, onFrame, onEnded, Log);
+        var session = new JpegSession(request, bounds, onFrame, onEnded, Log, onCursor);
         session.Start();
         return session;
     }
@@ -68,6 +73,8 @@ public sealed class WindowsScreenSource : IGuestVideoSource
 
         private readonly Action<VideoFrame> _onFrame;
         private readonly Action<string?> _onEnded;
+        private readonly Action<GuestCursor>? _onCursor;
+        private readonly CursorReader? _cursor;
         private readonly Action<string>? _log;
         private readonly Thread _thread;
         private readonly ManualResetEventSlim _stop = new();
@@ -76,11 +83,15 @@ public sealed class WindowsScreenSource : IGuestVideoSource
         private volatile bool _keyframe = true;
         private volatile bool _disposed;
         private int _quality = StartQuality;
+        private Rectangle _bounds;
 
-        public JpegSession(VideoRequest request, Rectangle bounds, Action<VideoFrame> onFrame, Action<string?> onEnded, Action<string>? log)
+        public JpegSession(VideoRequest request, Rectangle bounds, Action<VideoFrame> onFrame, Action<string?> onEnded, Action<string>? log, Action<GuestCursor>? onCursor)
         {
             _onFrame = onFrame;
             _onEnded = onEnded;
+            _onCursor = onCursor;
+            _cursor = onCursor != null ? new CursorReader() : null;
+            _bounds = bounds;
             _log = log;
             _bitrateKbps = request.BitrateKbps;
             _maxFps = request.MaxFps;
@@ -95,6 +106,7 @@ public sealed class WindowsScreenSource : IGuestVideoSource
         public int Width { get; private set; }
         public int Height { get; private set; }
         public string EncoderKind => AgentVideoEncoder.Software;
+        public ScreenArea? Area { get { var b = _bounds; return new ScreenArea(b.Left, b.Top, b.Width, b.Height); } }
 
         public void Start() => _thread.Start();
 
@@ -145,11 +157,14 @@ public sealed class WindowsScreenSource : IGuestVideoSource
                         Width = bounds.Width;
                         Height = bounds.Height;
                     }
+                    _bounds = bounds;
 
                     try
                     {
                         g!.CopyFromScreen(bounds.Left, bounds.Top, 0, 0, bounds.Size, CopyPixelOperation.SourceCopy);
                         failures = 0;
+                        if (_cursor != null && _cursor.Poll(out bool visible, out var shape))
+                            _onCursor!(new GuestCursor(visible, shape?.ToImage()));
                     }
                     catch (Win32Exception ex)
                     {

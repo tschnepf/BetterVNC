@@ -109,6 +109,9 @@
                 <TextBlock Style="{StaticResource Muted}" TextWrapping="Wrap" Margin="0,0,0,6"
                            Text="The BetterVNC guest agent runs inside the remote machine and mirrors images and files between the two clipboards, like RDP does (see README, Guest agent). It sits in the remote's tray or menu bar." />
                 <CheckBox x:Name="AgentBox" Content="Use the guest agent for images, files and text" Checked="OnAgentChanged" Unchecked="OnAgentChanged" />
+                <CheckBox x:Name="AgentOnlyBox" Margin="0,4,0,0" Checked="OnAgentChanged" Unchecked="OnAgentChanged"
+                          Content="No VNC server: picture, keyboard and mouse through the agent (Windows)"
+                          ToolTip="For a Windows PC that runs only the BetterVNC agent, or an Unraid VM whose VNC console you do not need. The host above is the agent's (or set the agent host); the VNC port and password are not used. Sign-in, the lock screen and UAC prompts need VNC for now." />
                 <StackPanel x:Name="AgentPanel">
                     <Grid>
                         <Grid.ColumnDefinitions>
@@ -119,7 +122,7 @@
                             <RowDefinition /><RowDefinition />
                         </Grid.RowDefinitions>
                         <Label Grid.Row="0" Content="Agent host" />
-                        <TextBox Grid.Row="0" Grid.Column="1" x:Name="AgentHostBox" Margin="0,3" ToolTip="Leave empty to use the VNC host. Unraid VMs: enter the VM's own IP address or host name (the VNC host is the Unraid server)." />
+                        <TextBox Grid.Row="0" Grid.Column="1" x:Name="AgentHostBox" Margin="0,3" ToolTip="Leave empty to use the VNC host. Unraid VMs linked to a server: leave empty and the VM's own address is looked up on the server on every connect (needs the QEMU guest agent in the VM), or enter the VM's IP address or host name." />
                         <Label Grid.Row="1" Content="Agent port" />
                         <TextBox Grid.Row="1" Grid.Column="1" x:Name="AgentPortBox" Margin="0,3" Width="100" HorizontalAlignment="Left" />
                     </Grid>

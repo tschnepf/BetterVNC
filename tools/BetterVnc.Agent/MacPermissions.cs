@@ -1,5 +1,5 @@
 using System.Runtime.InteropServices;
-using BetterVnc.Agent.Clipboards;
+using BetterVnc.Platform;
 
 namespace BetterVnc.Agent;
 

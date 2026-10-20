@@ -1,0 +1,33 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    OS services shared by the guest agent and the viewer, one implementation per OS behind each interface: the
+    clipboards (Windows Forms on Windows; xclip / wl-clipboard on Linux; pbcopy, pbpaste and osascript on macOS), the
+    secret store for saved passwords, and the audio sink interface.
+
+    Two target frameworks, as for the agent: net10.0-windows (Windows Forms clipboard, DPAPI) and plain net10.0 for
+    Linux and macOS. No NuGet packages, so the agent's single-file publish stays simple.
+  -->
+
+  <PropertyGroup>
+    <TargetFrameworks>net10.0;net10.0-windows</TargetFrameworks>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <LangVersion>latest</LangVersion>
+    <RootNamespace>BetterVnc.Platform</RootNamespace>
+  </PropertyGroup>
+
+  <PropertyGroup Condition="'$(TargetFramework)' == 'net10.0-windows'">
+    <UseWindowsForms>true</UseWindowsForms>
+  </PropertyGroup>
+
+  <ItemGroup Condition="'$(TargetFramework)' != 'net10.0-windows'">
+    <Compile Remove="Clipboards\WindowsClipboard.cs" />
+    <Compile Remove="DpapiSecretStore.cs" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\BetterVnc.Agent.Protocol\BetterVnc.Agent.Protocol.csproj" />
+  </ItemGroup>
+
+</Project>
