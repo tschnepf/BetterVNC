@@ -60,7 +60,7 @@ public sealed class KeyboardTranslator
 
     public TranslatedKey Translate(int vk, int scancode, bool extended)
     {
-        uint xt = extended ? (uint)(0xE000 | scancode) : (uint)scancode;
+        uint xt = XtScancode.FromWindows(scancode, extended);
         uint keysym = ToKeysym(vk, scancode, extended);
         if (MacMode) keysym = ApplyMacModifiers(keysym);
         return new TranslatedKey(keysym, xt);
