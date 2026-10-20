@@ -822,7 +822,8 @@ public sealed class SessionController : IDisposable
             double streamRate = player.TakeRate();
             picture = player.IdleFallbackActive
                 ? $"stream idle, {enc} lossless"
-                : $"stream {info?.Codec} {info?.Width}×{info?.Height}" + (player.DecodePath is { } path ? $" ({path})" : "") + (player.FramesSkipped > 0 ? $" ({player.FramesSkipped} skipped)" : "");
+                : $"stream {info?.Codec} {info?.Width}×{info?.Height}" + (player.DecodePath is { } path ? $" ({path})" : "") + (player.FramesSkipped > 0 ? $" ({player.FramesSkipped} skipped)" : "")
+                  + (player.ShowingExactPicture ? ", still: exact" : "");
             traffic = $"{FormatRate(streamRate)} stream + {FormatRate(rate)} VNC";
         }
         else

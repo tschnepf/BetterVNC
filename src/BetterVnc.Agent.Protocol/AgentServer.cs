@@ -70,11 +70,12 @@ public sealed class AgentServer : IAsyncDisposable
     {
         get
         {
-            var list = new List<string>(4);
+            var list = new List<string>(5);
             if (_input is { SupportsScroll: true }) list.Add(AgentFeature.Scroll);
             if (_video != null) list.Add(AgentFeature.Video);
             if (_input is { SupportsPointerAndKeys: true }) list.Add(AgentFeature.Input);
             if (_video is { SupportsCursor: true }) list.Add(AgentFeature.Cursor);
+            if (_video is { SupportsRepair: true }) list.Add(AgentFeature.Repair);
             return list.ToArray();
         }
     }
@@ -427,7 +428,7 @@ public sealed class AgentServer : IAsyncDisposable
         private IVideoSession? _videoSession;
         private System.Threading.Channels.Channel<(AgentMessage Header, byte[] Data)>? _frames;
         private Task? _framePump;
-        private int _frameSequence;
+        private int _frameSequence, _repairSequence;
         private long _framesDropped;
 
         public bool IsStreaming { get { lock (_videoLock) return _videoSession != null; } }
@@ -450,6 +451,7 @@ public sealed class AgentServer : IAsyncDisposable
                 MaxFps = Math.Clamp(req.MaxFps ?? 60, 1, 120),
                 MaxWidth = PictureSide(req.Width),
                 MaxHeight = PictureSide(req.Height),
+                Repair = req.Repair == true && source.SupportsRepair,
             };
             // The pointer's shape only for a viewer that asked: one with a VNC connection gets it from there.
             bool cursor = req.Cursor == true && source.SupportsCursor;
@@ -466,10 +468,12 @@ public sealed class AgentServer : IAsyncDisposable
                 {
                     Interlocked.Increment(ref _framesDropped);
                     // With a delta codec the frames after a dropped one cannot be decoded; the next one must be a key frame.
-                    if (dropped.Header.Keyframe != true) { try { started?.RequestKeyframe(); } catch { } }
+                    // A lost repair leaves the viewer's exact picture incomplete: a key frame brings a whole new repair.
+                    if (dropped.Header.Keyframe != true || dropped.Header.Type == AgentMessageType.VideoRepair) { try { started?.RequestKeyframe(); } catch { } }
                 });
                 _frames = frames;
                 _frameSequence = 0;
+                _repairSequence = 0;
                 _framesDropped = 0;
                 IVideoSession session;
                 try
@@ -488,7 +492,7 @@ public sealed class AgentServer : IAsyncDisposable
                 _videoSession = session;
                 started = session;
                 _framePump = Task.Run(() => PumpFramesAsync(frames));
-                _server.Log?.Invoke($"{Peer}: video started ({session.Codec}, {session.BitrateKbps} kbit/s, {session.MaxFps} fps max, {session.Width}x{session.Height}{(session.Offset is { } at ? $" at {at.X},{at.Y}" : "")}, {session.EncoderKind}{(request.MaxWidth > 0 || request.MaxHeight > 0 ? ", viewer area " + Area(request.MaxWidth, request.MaxHeight) : "")}{(cursor ? ", with the pointer's shape" : "")})");
+                _server.Log?.Invoke($"{Peer}: video started ({session.Codec}, {session.BitrateKbps} kbit/s, {session.MaxFps} fps max, {session.Width}x{session.Height}{(session.Offset is { } at ? $" at {at.X},{at.Y}" : "")}, {session.EncoderKind}{(request.MaxWidth > 0 || request.MaxHeight > 0 ? ", viewer area " + Area(request.MaxWidth, request.MaxHeight) : "")}{(cursor ? ", with the pointer's shape" : "")}{(session.Repairs ? ", with repairs of the still screen" : "")})");
                 return new AgentFrame(new AgentMessage
                 {
                     Type = AgentMessageType.VideoStarted,
@@ -502,6 +506,7 @@ public sealed class AgentServer : IAsyncDisposable
                     OffsetY = session.Offset?.Y,
                     Encoder = session.EncoderKind,
                     Cursor = cursor ? true : null,
+                    Repair = session.Repairs ? true : null,
                 });
             }
         }
@@ -510,14 +515,14 @@ public sealed class AgentServer : IAsyncDisposable
         {
             var header = new AgentMessage
             {
-                Type = AgentMessageType.VideoFrame,
+                Type = frame.Repair ? AgentMessageType.VideoRepair : AgentMessageType.VideoFrame,
                 Keyframe = frame.Keyframe,
                 Timestamp = frame.TimestampMicros,
                 Width = frame.Width,
                 Height = frame.Height,
                 OffsetX = frame.OffsetX,
                 OffsetY = frame.OffsetY,
-                Sequence = Interlocked.Increment(ref _frameSequence),
+                Sequence = frame.Repair ? Interlocked.Increment(ref _repairSequence) : Interlocked.Increment(ref _frameSequence),
             };
             // The source may reuse its buffer as soon as we return, so the bytes are copied here, once.
             frames.Writer.TryWrite((header, frame.Data.ToArray()));

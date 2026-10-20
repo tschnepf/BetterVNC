@@ -17,6 +17,8 @@ public sealed class FakeVideoSource : IGuestVideoSource
     public ScreenArea? Area { get; set; }
     /// <summary>Announce that this source reports the pointer.</summary>
     public bool SupportsCursor { get; set; }
+    /// <summary>Announce that this source's sessions repair the still screen when asked.</summary>
+    public bool SupportsRepair { get; set; }
     public int Starts { get; private set; }
     public FakeSession? Last { get; private set; }
     private readonly System.Threading.Channels.Channel<FakeSession> _sessions = System.Threading.Channels.Channel.CreateUnbounded<FakeSession>();
@@ -67,6 +69,7 @@ public sealed class FakeVideoSource : IGuestVideoSource
         /// <summary>What the server passed for the pointer; null when the viewer did not ask for it.</summary>
         public Action<GuestCursor>? OnCursor { get; init; }
         public string EncoderKind => AgentVideoEncoder.Software;
+        public bool Repairs => Request.Repair;
         public int KeyframeRequests { get; private set; }
         public bool IsDisposed => _disposed.Task.IsCompleted;
         public Task Disposed => _disposed.Task.WaitAsync(TimeSpan.FromSeconds(5));
@@ -83,6 +86,12 @@ public sealed class FakeVideoSource : IGuestVideoSource
 
         /// <summary>Pushes one frame as the capture thread would.</summary>
         public void Emit(byte[] data) => _onFrame(new VideoFrame(data, true, ++_n * 16_667L, Width, Height, Offset?.X, Offset?.Y));
+
+        /// <summary>Pushes a delta frame.</summary>
+        public void EmitDelta(byte[] data) => _onFrame(new VideoFrame(data, false, ++_n * 16_667L, Width, Height, Offset?.X, Offset?.Y));
+
+        /// <summary>Pushes a repair of the still screen; <paramref name="whole"/> when it covers all of the picture.</summary>
+        public void EmitRepair(byte[] payload, bool whole) => _onFrame(new VideoFrame(payload, whole, ++_n * 16_667L, Width, Height, Offset?.X, Offset?.Y, Repair: true));
 
         /// <summary>The capture died (locked desktop, ...).</summary>
         public void End(string reason) => _onEnded(reason);

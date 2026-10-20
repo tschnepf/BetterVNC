@@ -296,6 +296,12 @@ stale-frame flash and no second protocol. With Media Foundation, the same effect
 re-encoding the unchanged frame at a lower `CODECAPI_AVEncVideoEncodeQP` (or a raised bitrate)
 for a few frames.
 
+**Done (2026-10-20), losslessly:** the Windows agent sends the exact pixels of what its frames
+showed, 150 ms after the screen goes still, and the viewer shows them instead of switching to
+RFB. Measured in an Unraid VM: the picture is exact about 0.35 s after a scroll stops, instead of
+a stale VNC picture at about 0.85 s and an exact one at 0.9–1.15 s. See
+[STILL-SCREEN-REPAIR.md](STILL-SCREEN-REPAIR.md).
+
 ### 6.4 Make the video channel latency-controlled
 
 On a LAN, most of Jump's transport advantage comes from never letting queues build up. A first
