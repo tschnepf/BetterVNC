@@ -4,14 +4,17 @@ using BetterVnc.Media.Interop;
 namespace BetterVnc.Media;
 
 /// <summary>
-/// Shows streamed pictures from the GPU: a flip-model swap chain on a window, a pixel shader that converts NV12 to RGB
+/// Shows the remote picture from the GPU: a flip-model swap chain on a window, a pixel shader that converts NV12 to RGB
 /// (BT.601 limited range, the same matrix as <see cref="PixelConvert.Nv12ToBgrx"/>) and scales the visible picture
 /// into a destination rectangle, and Present(0) at once for every frame handed in, so the newest frame is what the
 /// compositor shows next (flip-discard keeps no queue; the device's frame latency is one).
 /// <para>
-/// Hardware-decoded frames are copied GPU-to-GPU out of the decoder's surface pool into the renderer's own NV12
-/// texture (the decoder gets its surface back at once and the picture can be redrawn after a resize); system-memory
-/// NV12 (software decode) and BGRX (motion JPEG) frames are uploaded as they are and converted by the same shader.
+/// It holds up to two pictures. The <b>stream</b>: hardware-decoded frames are copied GPU-to-GPU out of the decoder's
+/// surface pool into the renderer's own NV12 texture (the decoder gets its surface back at once and the picture can be
+/// redrawn after a resize); system-memory NV12 (software decode) and BGRX (motion JPEG) frames are uploaded as they
+/// are and converted by the same shader. The <b>framebuffer</b> (optional, see <see cref="UpdateFramebuffer"/>): the
+/// RFB picture as a BGRX texture that only the changed rectangles are uploaded into. While the stream shows it covers
+/// the framebuffer, or, when it shows only part of the desktop (an offset), it is drawn over that part of it.
 /// </para>
 /// Thread safety: every method takes one lock, so the decode thread presents while the UI thread resizes.
 /// </summary>
@@ -74,6 +77,16 @@ public sealed unsafe class VideoRenderer : IDisposable
 
     private enum Source { None, Nv12Texture, Nv12Planes, Bgrx }
 
+    /// <summary>A picture the renderer can draw: its textures and views, and where in them the picture lies.</summary>
+    private sealed class Picture
+    {
+        public Source Kind;
+        public IntPtr Texture0, Texture1, View0, View1;
+        public int TextureWidth, TextureHeight;
+        public int X, Y, Width, Height;
+        public bool HasContent => Kind != Source.None && Width > 0 && Height > 0;
+    }
+
     private readonly object _lock = new();
     private IntPtr _device, _context;
     private IntPtr _vs, _ps, _sampler, _constants;
@@ -83,14 +96,17 @@ public sealed unsafe class VideoRenderer : IDisposable
     private bool _visible;
     private double _destX, _destY, _destWidth, _destHeight;
 
-    private Source _source;
-    private IntPtr _texture0, _texture1, _view0, _view1;
-    private int _textureWidth, _textureHeight;
-    private int _pictureX, _pictureY, _pictureWidth, _pictureHeight;
+    private readonly Picture _stream = new();
+    private readonly Picture _framebuffer = new();
+    /// <summary>The stream picture shows (over the framebuffer when <see cref="_streamOffset"/> is set); false: the framebuffer does.</summary>
+    private bool _streamShown;
+    private (int X, int Y)? _streamOffset;
+    private readonly FramebufferTarget _target;
     private bool _disposed;
 
     public VideoRenderer(D3D11VideoDevice device)
     {
+        _target = new FramebufferTarget(this);
         if (!device.AcquireDevice(out _device, out _context)) throw new ObjectDisposedException(nameof(D3D11VideoDevice));
         try { CreatePipeline(); }
         catch { Dispose(); throw; }
@@ -99,9 +115,12 @@ public sealed unsafe class VideoRenderer : IDisposable
     /// <summary>A Present or a resource call failed (device removed or reset); the renderer then refuses frames and the caller should fall back.</summary>
     public string? Failure { get; private set; }
     public bool IsUsable => !_disposed && Failure == null;
-    /// <summary>Size of the picture last handed in; zero before the first.</summary>
-    public int FrameWidth => _pictureWidth;
-    public int FrameHeight => _pictureHeight;
+    /// <summary>Size of the stream picture last handed in; zero before the first.</summary>
+    public int FrameWidth => _stream.Width;
+    public int FrameHeight => _stream.Height;
+    /// <summary>Size of the framebuffer picture (<see cref="UpdateFramebuffer"/>); zero while there is none.</summary>
+    public int FramebufferWidth => _framebuffer.Width;
+    public int FramebufferHeight => _framebuffer.Height;
     public long FramesPresented { get; private set; }
 
     private void CreatePipeline()
@@ -226,14 +245,16 @@ public sealed unsafe class VideoRenderer : IDisposable
         Com.Release(ref _swapChain);
     }
 
-    // ------------------------------------------------------------------ frames
+    // ------------------------------------------------------------------ stream frames
 
     /// <summary>
-    /// Takes a decoded picture (a decoder texture or system-memory NV12) and presents it at once when the window is
-    /// visible. False when the renderer cannot take it (failed, disposed, unsupported texture format); the caller then
-    /// shows the frame another way. Call inside the decoder's frame callback.
+    /// Takes a decoded picture (a decoder texture or system-memory NV12) as the stream picture and presents it at once
+    /// when the window is visible. <paramref name="offset"/>: the picture shows only the part of the desktop whose
+    /// top-left corner is at that framebuffer position, and is drawn over the framebuffer there (scaled like it,
+    /// clipped to it); null: it is the whole picture. False when the renderer cannot take it (failed, disposed,
+    /// unsupported texture format); the caller then shows the frame another way. Call inside the decoder's frame callback.
     /// </summary>
-    public bool Present(in DecodedFrame frame)
+    public bool Present(in DecodedFrame frame, (int X, int Y)? offset = null)
     {
         lock (_lock)
         {
@@ -245,6 +266,7 @@ public sealed unsafe class VideoRenderer : IDisposable
                     if (!CopyTexture(in frame)) return false;
                 }
                 else UploadPlanes(in frame);
+                ShowStreamLocked(offset);
                 PresentLocked();
                 return IsUsable;
             }
@@ -252,17 +274,18 @@ public sealed unsafe class VideoRenderer : IDisposable
         }
     }
 
-    /// <summary>Takes a BGRX picture (width*4 bytes per row) and presents it like <see cref="Present(in DecodedFrame)"/>.</summary>
-    public bool Present(ReadOnlySpan<byte> bgrx, int width, int height)
+    /// <summary>Takes a BGRX picture (width*4 bytes per row) as the stream picture and presents it like <see cref="Present(in DecodedFrame, ValueTuple{int, int}?)"/>.</summary>
+    public bool Present(ReadOnlySpan<byte> bgrx, int width, int height, (int X, int Y)? offset = null)
     {
         lock (_lock)
         {
             if (!IsUsable || width <= 0 || height <= 0 || bgrx.Length < width * height * 4) return false;
             try
             {
-                EnsureTextures(Source.Bgrx, width, height);
-                fixed (byte* p = bgrx) D3D11.UpdateSubresource(_context, _texture0, 0, p, (uint)(width * 4), 0);
-                SetPicture(0, 0, width, height);
+                EnsureTextures(_stream, Source.Bgrx, width, height);
+                fixed (byte* p = bgrx) D3D11.UpdateSubresource(_context, _stream.Texture0, 0, p, (uint)(width * 4), 0);
+                SetPicture(_stream, 0, 0, width, height);
+                ShowStreamLocked(offset);
                 PresentLocked();
                 return IsUsable;
             }
@@ -270,56 +293,187 @@ public sealed unsafe class VideoRenderer : IDisposable
         }
     }
 
+    private void ShowStreamLocked((int X, int Y)? offset)
+    {
+        _streamShown = true;
+        _streamOffset = offset;
+    }
+
+    /// <summary>
+    /// Takes the stream picture off the screen: the framebuffer shows again (black without one). The picture stays, so
+    /// a later frame needs no new textures. Any thread.
+    /// </summary>
+    public void HideStream()
+    {
+        lock (_lock)
+        {
+            if (!IsUsable || !_streamShown) return;
+            _streamShown = false;
+            _streamOffset = null;
+            try { PresentLocked(); }
+            catch (MediaException ex) { Fail(ex.Message); }
+        }
+    }
+
+    /// <summary>True while the stream picture shows (over part of the framebuffer, or instead of it).</summary>
+    public bool IsStreamShown
+    {
+        get { lock (_lock) return _streamShown; }
+    }
+
     private bool CopyTexture(in DecodedFrame frame)
     {
         D3D11.GetDesc(frame.Texture, out var desc);
         if (desc.Format != D3D11.FORMAT_NV12) return false;
-        EnsureTextures(Source.Nv12Texture, (int)desc.Width, (int)desc.Height);
+        EnsureTextures(_stream, Source.Nv12Texture, (int)desc.Width, (int)desc.Height);
         // The whole slice: NV12 is one subresource in D3D11, both planes travel together.
-        D3D11.CopySubresourceRegion(_context, _texture0, 0, 0, 0, 0, frame.Texture, frame.Subresource, null);
-        SetPicture(frame.OffsetX, frame.OffsetY, frame.Width, frame.Height);
+        D3D11.CopySubresourceRegion(_context, _stream.Texture0, 0, 0, 0, 0, frame.Texture, frame.Subresource, null);
+        SetPicture(_stream, frame.OffsetX, frame.OffsetY, frame.Width, frame.Height);
         return true;
     }
 
     private void UploadPlanes(in DecodedFrame frame)
     {
-        EnsureTextures(Source.Nv12Planes, frame.Width, frame.Height);
-        D3D11.UpdateSubresource(_context, _texture0, 0, (void*)frame.Y, (uint)frame.Stride, 0);
-        D3D11.UpdateSubresource(_context, _texture1, 0, (void*)frame.UV, (uint)frame.Stride, 0);
-        SetPicture(0, 0, frame.Width, frame.Height);
+        EnsureTextures(_stream, Source.Nv12Planes, frame.Width, frame.Height);
+        D3D11.UpdateSubresource(_context, _stream.Texture0, 0, (void*)frame.Y, (uint)frame.Stride, 0);
+        D3D11.UpdateSubresource(_context, _stream.Texture1, 0, (void*)frame.UV, (uint)frame.Stride, 0);
+        SetPicture(_stream, 0, 0, frame.Width, frame.Height);
     }
 
-    private void SetPicture(int x, int y, int width, int height)
+    private static void SetPicture(Picture picture, int x, int y, int width, int height)
     {
-        _pictureX = x; _pictureY = y; _pictureWidth = width; _pictureHeight = height;
+        picture.X = x; picture.Y = y; picture.Width = width; picture.Height = height;
     }
 
-    /// <summary>(Re)creates the picture textures and their views when the source kind or size changes.</summary>
-    private void EnsureTextures(Source source, int width, int height)
+    // ------------------------------------------------------------------ framebuffer
+
+    /// <summary>Copies changed parts of the remote framebuffer into the renderer; see <see cref="UpdateFramebuffer"/>.</summary>
+    public delegate void FramebufferCopy(FramebufferTarget target);
+
+    /// <summary>
+    /// The framebuffer picture while a <see cref="FramebufferCopy"/> runs: size it, then copy the changed rectangles in.
+    /// Valid only inside that callback.
+    /// </summary>
+    public sealed class FramebufferTarget
     {
-        if (source == _source && width == _textureWidth && height == _textureHeight) return;
-        ReleaseTextures();
+        private readonly VideoRenderer _owner;
+        internal bool Active;
+
+        internal FramebufferTarget(VideoRenderer owner) => _owner = owner;
+
+        /// <summary>
+        /// Makes the framebuffer picture <paramref name="width"/>×<paramref name="height"/> BGRX. True when it was
+        /// created or resized: its content is then undefined, so copy all of it.
+        /// </summary>
+        public bool EnsureSize(int width, int height)
+        {
+            if (!Active) throw new InvalidOperationException("Only inside UpdateFramebuffer.");
+            return _owner.EnsureFramebufferLocked(width, height);
+        }
+
+        /// <summary>
+        /// Uploads the rectangle at <paramref name="x"/>,<paramref name="y"/>: <paramref name="source"/> points at its
+        /// first pixel, <paramref name="rowPitch"/> bytes per source row. Clipped to the picture.
+        /// </summary>
+        public void Copy(IntPtr source, int rowPitch, int x, int y, int width, int height)
+        {
+            if (!Active) throw new InvalidOperationException("Only inside UpdateFramebuffer.");
+            _owner.CopyFramebufferLocked(source, rowPitch, x, y, width, height);
+        }
+    }
+
+    /// <summary>
+    /// Updates the framebuffer picture: <paramref name="copy"/> runs under the renderer's lock, sizes the picture and
+    /// uploads the rectangles that changed (only those reach the GPU). Then presents, when the framebuffer is what shows
+    /// (no stream, or a stream of part of the desktop), and returns whether it did. False also when the renderer failed;
+    /// check <see cref="IsUsable"/>. Any thread; presenting blocks about a frame, so not the UI thread.
+    /// </summary>
+    public bool UpdateFramebuffer(FramebufferCopy copy)
+    {
+        lock (_lock)
+        {
+            if (!IsUsable) return false;
+            try
+            {
+                _target.Active = true;
+                try { copy(_target); }
+                finally { _target.Active = false; }
+                if (!IsUsable || !FramebufferShowsLocked() || !_visible || _swapChain == IntPtr.Zero) return false;
+                PresentLocked();
+                return IsUsable;
+            }
+            catch (MediaException ex) { Fail(ex.Message); return false; }
+        }
+    }
+
+    /// <summary>Drops the framebuffer picture (a session without RFB, or none at all); the stream alone shows. Any thread.</summary>
+    public void ClearFramebuffer()
+    {
+        lock (_lock)
+        {
+            if (_disposed || _framebuffer.Kind == Source.None) return;
+            ReleaseTextures(_framebuffer);
+            if (!IsUsable) return;
+            try { PresentLocked(); }
+            catch (MediaException ex) { Fail(ex.Message); }
+        }
+    }
+
+    private bool FramebufferShowsLocked() =>
+        _framebuffer.HasContent && (!_streamShown || !_stream.HasContent || _streamOffset != null);
+
+    private bool EnsureFramebufferLocked(int width, int height)
+    {
+        if (width <= 0 || height <= 0)
+        {
+            ReleaseTextures(_framebuffer);
+            return false;
+        }
+        bool fresh = _framebuffer.Kind != Source.Bgrx || _framebuffer.TextureWidth != width || _framebuffer.TextureHeight != height;
+        EnsureTextures(_framebuffer, Source.Bgrx, width, height);
+        SetPicture(_framebuffer, 0, 0, width, height);
+        return fresh;
+    }
+
+    private void CopyFramebufferLocked(IntPtr source, int rowPitch, int x, int y, int width, int height)
+    {
+        if (_framebuffer.Kind != Source.Bgrx || source == IntPtr.Zero) return;
+        int left = Math.Max(0, x), top = Math.Max(0, y);
+        int right = Math.Min(_framebuffer.Width, x + width), bottom = Math.Min(_framebuffer.Height, y + height);
+        if (right <= left || bottom <= top) return;
+        var box = new D3D11_BOX { Left = (uint)left, Top = (uint)top, Front = 0, Right = (uint)right, Bottom = (uint)bottom, Back = 1 };
+        byte* first = (byte*)source + (long)(top - y) * rowPitch + (left - x) * 4;
+        D3D11.UpdateSubresource(_context, _framebuffer.Texture0, 0, &box, first, (uint)rowPitch, 0);
+    }
+
+    // ------------------------------------------------------------------ textures
+
+    /// <summary>(Re)creates a picture's textures and their views when its source kind or size changes.</summary>
+    private void EnsureTextures(Picture picture, Source source, int width, int height)
+    {
+        if (source == picture.Kind && width == picture.TextureWidth && height == picture.TextureHeight) return;
+        ReleaseTextures(picture);
         switch (source)
         {
             case Source.Nv12Texture:
-                _texture0 = CreateTexture(D3D11.FORMAT_NV12, width, height);
-                _view0 = CreateView(_texture0, D3D11.FORMAT_R8_UNORM);   // the luma plane
-                _view1 = CreateView(_texture0, D3D11.FORMAT_R8G8_UNORM); // the chroma plane
+                picture.Texture0 = CreateTexture(D3D11.FORMAT_NV12, width, height);
+                picture.View0 = CreateView(picture.Texture0, D3D11.FORMAT_R8_UNORM);   // the luma plane
+                picture.View1 = CreateView(picture.Texture0, D3D11.FORMAT_R8G8_UNORM); // the chroma plane
                 break;
             case Source.Nv12Planes:
-                _texture0 = CreateTexture(D3D11.FORMAT_R8_UNORM, width, height);
-                _texture1 = CreateTexture(D3D11.FORMAT_R8G8_UNORM, (width + 1) / 2, (height + 1) / 2);
-                _view0 = CreateView(_texture0, D3D11.FORMAT_R8_UNORM);
-                _view1 = CreateView(_texture1, D3D11.FORMAT_R8G8_UNORM);
+                picture.Texture0 = CreateTexture(D3D11.FORMAT_R8_UNORM, width, height);
+                picture.Texture1 = CreateTexture(D3D11.FORMAT_R8G8_UNORM, (width + 1) / 2, (height + 1) / 2);
+                picture.View0 = CreateView(picture.Texture0, D3D11.FORMAT_R8_UNORM);
+                picture.View1 = CreateView(picture.Texture1, D3D11.FORMAT_R8G8_UNORM);
                 break;
             case Source.Bgrx:
-                _texture0 = CreateTexture(D3D11.FORMAT_B8G8R8A8_UNORM, width, height);
-                _view0 = CreateView(_texture0, D3D11.FORMAT_B8G8R8A8_UNORM);
+                picture.Texture0 = CreateTexture(D3D11.FORMAT_B8G8R8A8_UNORM, width, height);
+                picture.View0 = CreateView(picture.Texture0, D3D11.FORMAT_B8G8R8A8_UNORM);
                 break;
         }
-        _source = source;
-        _textureWidth = width;
-        _textureHeight = height;
+        picture.Kind = source;
+        picture.TextureWidth = width;
+        picture.TextureHeight = height;
     }
 
     private IntPtr CreateTexture(int format, int width, int height, uint bind = D3D11.BIND_SHADER_RESOURCE, int usage = D3D11.USAGE_DEFAULT, uint cpu = 0)
@@ -340,22 +494,24 @@ public sealed unsafe class VideoRenderer : IDisposable
         return view;
     }
 
-    private void ReleaseTextures()
+    private static void ReleaseTextures(Picture picture)
     {
-        Com.Release(ref _view0);
-        Com.Release(ref _view1);
-        Com.Release(ref _texture0);
-        Com.Release(ref _texture1);
-        _source = Source.None;
-        _textureWidth = _textureHeight = 0;
+        Com.Release(ref picture.View0);
+        Com.Release(ref picture.View1);
+        Com.Release(ref picture.Texture0);
+        Com.Release(ref picture.Texture1);
+        picture.Kind = Source.None;
+        picture.TextureWidth = picture.TextureHeight = 0;
+        picture.X = picture.Y = picture.Width = picture.Height = 0;
     }
 
     // ------------------------------------------------------------------ drawing
 
     private void PresentLocked()
     {
-        if (!_visible || _swapChain == IntPtr.Zero || _source == Source.None) return;
-        Draw(_backBufferView, _destX, _destY, _destWidth, _destHeight);
+        if (!_visible || _swapChain == IntPtr.Zero) return;
+        if (!_stream.HasContent && !_framebuffer.HasContent) return;
+        Draw(_backBufferView, _bufferWidth, _bufferHeight, _destX, _destY, _destWidth, _destHeight);
         int hr = Dxgi.Present(_swapChain, 0, 0);
         if (hr < 0)
         {
@@ -366,34 +522,59 @@ public sealed unsafe class VideoRenderer : IDisposable
         FramesPresented++;
     }
 
-    /// <summary>Clears <paramref name="target"/> to black and draws the current picture into the destination rectangle.</summary>
-    private void Draw(IntPtr target, double x, double y, double width, double height)
+    /// <summary>
+    /// Clears <paramref name="target"/> (<paramref name="targetWidth"/>×<paramref name="targetHeight"/>) to black and
+    /// draws what shows into the destination rectangle: the framebuffer, the stream, or the stream over part of the framebuffer.
+    /// </summary>
+    private void Draw(IntPtr target, int targetWidth, int targetHeight, double x, double y, double width, double height)
     {
         float* black = stackalloc float[] { 0, 0, 0, 1 };
         IntPtr rtv = target;
         D3D11.OMSetRenderTargets(_context, 1, &rtv);
         D3D11.ClearRenderTargetView(_context, target, black);
-        if (width <= 0 || height <= 0 || _source == Source.None) return;
+        if (width <= 0 || height <= 0) return;
+        var clip = new PixelRect(0, 0, targetWidth, targetHeight);
+        if (FramebufferShowsLocked()) DrawPicture(_framebuffer, new PixelRect(x, y, width, height), clip);
+        if (!_streamShown || !_stream.HasContent) return;
+        if (_streamOffset is { } at && _framebuffer.HasContent)
+        {
+            // Scaled like the framebuffer, onto the part of it the stream shows, and no further than the framebuffer.
+            double sx = width / _framebuffer.Width, sy = height / _framebuffer.Height;
+            var part = new PixelRect(x + at.X * sx, y + at.Y * sy, _stream.Width * sx, _stream.Height * sy);
+            DrawPicture(_stream, part, clip.Intersect(new PixelRect(x, y, width, height)));
+        }
+        else DrawPicture(_stream, new PixelRect(x, y, width, height), clip);
+    }
 
-        double tw = _textureWidth, th = _textureHeight;
+    /// <summary>Draws <paramref name="picture"/> scaled into <paramref name="dest"/>, only where it lies inside <paramref name="clip"/>.</summary>
+    private void DrawPicture(Picture picture, PixelRect dest, PixelRect clip)
+    {
+        var shown = dest.Intersect(clip);
+        if (shown.IsEmpty || !picture.HasContent) return;
+        double tw = picture.TextureWidth, th = picture.TextureHeight;
+        // The part of the picture that lands in the visible rectangle, in texels.
+        double u0 = picture.X + (shown.X - dest.X) / dest.Width * picture.Width;
+        double v0 = picture.Y + (shown.Y - dest.Y) / dest.Height * picture.Height;
+        double uw = shown.Width / dest.Width * picture.Width, vh = shown.Height / dest.Height * picture.Height;
         // Texels per destination pixel: when shrinking, four taps a quarter pixel apart keep text from shimmering.
-        double sx = _pictureWidth / width, sy = _pictureHeight / height;
+        double sx = picture.Width / dest.Width, sy = picture.Height / dest.Height;
+        bool taps = sx > 1.25 || sy > 1.25;
         var p = new Params
         {
-            OriginX = (float)(_pictureX / tw), OriginY = (float)(_pictureY / th),
-            SizeX = (float)(_pictureWidth / tw), SizeY = (float)(_pictureHeight / th),
-            MinX = (float)((_pictureX + 0.5) / tw), MinY = (float)((_pictureY + 0.5) / th),
-            MaxX = (float)((_pictureX + _pictureWidth - 0.5) / tw), MaxY = (float)((_pictureY + _pictureHeight - 0.5) / th),
-            TapX = sx > 1.25 || sy > 1.25 ? (float)(0.25 * sx / tw) : 0,
-            TapY = sx > 1.25 || sy > 1.25 ? (float)(0.25 * sy / th) : 0,
-            Rgb = _source == Source.Bgrx ? 1u : 0u,
+            OriginX = (float)(u0 / tw), OriginY = (float)(v0 / th),
+            SizeX = (float)(uw / tw), SizeY = (float)(vh / th),
+            MinX = (float)((picture.X + 0.5) / tw), MinY = (float)((picture.Y + 0.5) / th),
+            MaxX = (float)((picture.X + picture.Width - 0.5) / tw), MaxY = (float)((picture.Y + picture.Height - 0.5) / th),
+            TapX = taps ? (float)(0.25 * sx / tw) : 0,
+            TapY = taps ? (float)(0.25 * sy / th) : 0,
+            Rgb = picture.Kind == Source.Bgrx ? 1u : 0u,
         };
         D3D11.UpdateSubresource(_context, _constants, 0, &p, 0, 0);
 
         var viewport = new D3D11_VIEWPORT
         {
-            TopLeftX = (float)Math.Clamp(x, -16384, 16383), TopLeftY = (float)Math.Clamp(y, -16384, 16383),
-            Width = (float)Math.Min(width, 16384), Height = (float)Math.Min(height, 16384), MaxDepth = 1,
+            TopLeftX = (float)shown.X, TopLeftY = (float)shown.Y,
+            Width = (float)Math.Min(shown.Width, 16384), Height = (float)Math.Min(shown.Height, 16384), MaxDepth = 1,
         };
         D3D11.RSSetViewports(_context, 1, &viewport);
         D3D11.IASetInputLayout(_context, IntPtr.Zero);
@@ -405,8 +586,8 @@ public sealed unsafe class VideoRenderer : IDisposable
         D3D11.PSSetConstantBuffers(_context, 0, 1, &constants);
         D3D11.PSSetSamplers(_context, 0, 1, &sampler);
         IntPtr* views = stackalloc IntPtr[3];
-        if (_source == Source.Bgrx) { views[0] = views[1] = IntPtr.Zero; views[2] = _view0; }
-        else { views[0] = _view0; views[1] = _view1; views[2] = IntPtr.Zero; }
+        if (picture.Kind == Source.Bgrx) { views[0] = views[1] = IntPtr.Zero; views[2] = picture.View0; }
+        else { views[0] = picture.View0; views[1] = picture.View1; views[2] = IntPtr.Zero; }
         D3D11.PSSetShaderResources(_context, 0, 3, views);
         D3D11.Draw(_context, 4, 0);
         // Unbind the picture so the next copy or upload into it never meets it bound as a shader input.
@@ -415,22 +596,27 @@ public sealed unsafe class VideoRenderer : IDisposable
     }
 
     /// <summary>
-    /// Renders the current picture at its own size into a BGRA buffer (width*4 bytes per row, alpha 255): the
-    /// screenshot of what the stream shows. Null when there is no picture. Any thread.
+    /// Renders what shows at its own size into a BGRA buffer (width*4 bytes per row, alpha 255): the screenshot. That is
+    /// the stream picture while a whole-desktop stream shows, otherwise the framebuffer (with a partial stream drawn over
+    /// it). Null when there is no picture. Any thread.
     /// </summary>
     public byte[]? CaptureFrame(out int width, out int height)
     {
         lock (_lock)
         {
-            width = _pictureWidth;
-            height = _pictureHeight;
-            if (!IsUsable || _source == Source.None || width <= 0 || height <= 0) return null;
+            var size = FramebufferShowsLocked() ? _framebuffer : _streamShown || !_framebuffer.HasContent ? _stream : _framebuffer;
+            width = size.Width;
+            height = size.Height;
+            if (!IsUsable || !size.HasContent || width <= 0 || height <= 0) return null;
             IntPtr target = IntPtr.Zero, view = IntPtr.Zero, staging = IntPtr.Zero;
+            bool streamShown = _streamShown;
             try
             {
+                // A stream never shown (a test, or a caller without HideStream) still captures as before.
+                if (ReferenceEquals(size, _stream)) _streamShown = true;
                 target = CreateTexture(D3D11.FORMAT_B8G8R8A8_UNORM, width, height, D3D11.BIND_RENDER_TARGET);
                 MF.Check(D3D11.CreateRenderTargetView(_device, target, out view), "CreateRenderTargetView");
-                Draw(view, 0, 0, width, height);
+                Draw(view, width, height, 0, 0, width, height);
                 staging = CreateTexture(D3D11.FORMAT_B8G8R8A8_UNORM, width, height, 0, D3D11.USAGE_STAGING, D3D11.CPU_ACCESS_READ);
                 D3D11.CopyResource(_context, staging, target);
                 MF.Check(D3D11.Map(_context, staging, 0, D3D11.MAP_READ, out var mapped), "Map");
@@ -447,6 +633,7 @@ public sealed unsafe class VideoRenderer : IDisposable
             catch (MediaException) { return null; }
             finally
             {
+                _streamShown = streamShown;
                 D3D11.ClearState(_context);
                 Com.Release(ref view);
                 Com.Release(ref target);
@@ -467,7 +654,8 @@ public sealed unsafe class VideoRenderer : IDisposable
             if (_disposed) return;
             _disposed = true;
             ReleaseSwapChain();
-            ReleaseTextures();
+            ReleaseTextures(_stream);
+            ReleaseTextures(_framebuffer);
             Com.Release(ref _factory);
             Com.Release(ref _constants);
             Com.Release(ref _sampler);

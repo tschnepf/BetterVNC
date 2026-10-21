@@ -6,6 +6,7 @@
     <Project Path="src/BetterVnc.Media.Windows/BetterVnc.Media.Windows.csproj" />
     <Project Path="src/BetterVnc.Platform/BetterVnc.Platform.csproj" />
     <Project Path="src/BetterVnc.Protocol/BetterVnc.Protocol.csproj" />
+    <Project Path="src/BetterVnc.Viewer/BetterVnc.Viewer.csproj" />
     <Project Path="src/BetterVnc.Viewer.Core/BetterVnc.Viewer.Core.csproj" />
   </Folder>
   <Folder Name="/tests/">

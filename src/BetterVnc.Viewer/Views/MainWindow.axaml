@@ -1,0 +1,92 @@
+<Window xmlns="https://github.com/avaloniaui"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:m="using:BetterVnc.Viewer.Core.Models"
+        x:Class="BetterVnc.Viewer.Views.MainWindow"
+        Title="BetterVNC" Width="900" Height="640" MinWidth="640" MinHeight="420"
+        WindowStartupLocation="CenterScreen" Icon="/Assets/BetterVNC.ico">
+    <Grid ColumnDefinitions="*,300">
+
+        <!-- Connections -->
+        <DockPanel Grid.Column="0" Margin="20,16,10,16">
+            <DockPanel DockPanel.Dock="Top" Margin="0,0,0,12">
+                <Button x:Name="NewConnectionButton" DockPanel.Dock="Right" Content="New connection" Theme="{StaticResource PrimaryButton}" VerticalAlignment="Top" Click="OnNewConnection" />
+                <Button x:Name="DisconnectAllButton" DockPanel.Dock="Right" Content="Disconnect all" Margin="0,0,8,0" IsVisible="False" VerticalAlignment="Top"
+                        ToolTip.Tip="Close every open session window" Click="OnDisconnectAll" />
+                <StackPanel>
+                    <TextBlock Classes="Heading" Text="Connections" />
+                    <TextBlock Classes="Muted" Text="Double-click to connect. Right-click for more." />
+                </StackPanel>
+            </DockPanel>
+            <TextBox x:Name="SearchBox" DockPanel.Dock="Top" Margin="0,0,0,12" PlaceholderText="Filter connections" ToolTip.Tip="Filter connections" />
+            <TextBlock x:Name="EmptyHint" DockPanel.Dock="Top" Classes="Muted" TextWrapping="Wrap" IsVisible="False"
+                       Text="No connections yet. Add an Unraid server on the right to discover its VMs, or create a connection to any VNC server or Mac." />
+            <ListBox x:Name="ConnectionList" DoubleTapped="OnConnectionDoubleClick" KeyDown="OnConnectionKeyDown">
+                <ListBox.ItemTemplate>
+                    <DataTemplate x:DataType="m:ConnectionProfile">
+                        <DockPanel>
+                            <Border DockPanel.Dock="Right" Background="{StaticResource PanelBrush}" CornerRadius="4" Padding="8,2" VerticalAlignment="Center">
+                                <TextBlock Text="{Binding KindLabel}" Classes="Muted" />
+                            </Border>
+                            <!-- Session badge: shown while a session window is open for this connection -->
+                            <Border DockPanel.Dock="Right" CornerRadius="4" Padding="8,2" Margin="0,0,8,0" VerticalAlignment="Center"
+                                    Background="{StaticResource PanelBrush}" IsVisible="{Binding IsOpen}">
+                                <StackPanel Orientation="Horizontal">
+                                    <Ellipse Width="8" Height="8" Margin="0,0,6,0" VerticalAlignment="Center" Classes="dot"
+                                             Classes.connected="{Binding IsConnected}" />
+                                    <TextBlock Text="{Binding SessionBadge}" VerticalAlignment="Center" Classes="Muted" Classes.connected="{Binding IsConnected}" />
+                                </StackPanel>
+                            </Border>
+                            <StackPanel>
+                                <TextBlock Text="{Binding Name}" FontWeight="SemiBold" FontSize="14" />
+                                <TextBlock Text="{Binding Subtitle}" Classes="Muted" Margin="0,2,0,0" />
+                            </StackPanel>
+                        </DockPanel>
+                    </DataTemplate>
+                </ListBox.ItemTemplate>
+                <ListBox.ContextMenu>
+                    <ContextMenu>
+                        <MenuItem Header="Connect" Click="OnConnectMenu" />
+                        <MenuItem Header="Connect fullscreen" Click="OnConnectFullscreenMenu" />
+                        <MenuItem Header="Open another session" Click="OnOpenAnotherSessionMenu"
+                                  ToolTip.Tip="Open a second window to this connection even though one is already open" />
+                        <Separator />
+                        <MenuItem Header="Edit…" Click="OnEditMenu" />
+                        <MenuItem Header="Duplicate" Click="OnDuplicateMenu" />
+                        <MenuItem Header="Delete" Click="OnDeleteMenu" />
+                    </ContextMenu>
+                </ListBox.ContextMenu>
+            </ListBox>
+        </DockPanel>
+
+        <!-- Unraid servers -->
+        <Border Grid.Column="1" Background="{StaticResource PanelBrush}" BorderBrush="{StaticResource BorderBrush}" BorderThickness="1,0,0,0">
+            <DockPanel Margin="16">
+                <StackPanel DockPanel.Dock="Top" Margin="0,0,0,12">
+                    <TextBlock Classes="Heading" Text="Unraid servers" FontSize="16" />
+                    <TextBlock Classes="Muted" TextWrapping="Wrap" Text="Discover VMs, read their VNC port and password, and start them, all over SSH." />
+                </StackPanel>
+                <Button x:Name="AddServerButton" DockPanel.Dock="Top" Content="Add Unraid server" Click="OnAddServer" HorizontalAlignment="Stretch" Margin="0,0,0,12" />
+                <ListBox x:Name="ServerList" DoubleTapped="OnServerDoubleClick">
+                    <ListBox.ItemTemplate>
+                        <DataTemplate x:DataType="m:UnraidServer">
+                            <DockPanel>
+                                <Button DockPanel.Dock="Right" Content="VMs" Click="OnBrowseServer" VerticalAlignment="Center" Padding="8,3" />
+                                <StackPanel>
+                                    <TextBlock Text="{Binding Name}" FontWeight="SemiBold" />
+                                    <TextBlock Text="{Binding Subtitle}" Classes="Muted" />
+                                </StackPanel>
+                            </DockPanel>
+                        </DataTemplate>
+                    </ListBox.ItemTemplate>
+                    <ListBox.ContextMenu>
+                        <ContextMenu>
+                            <MenuItem Header="Browse VMs…" Click="OnBrowseServerMenu" />
+                            <MenuItem Header="Edit…" Click="OnEditServerMenu" />
+                            <MenuItem Header="Delete" Click="OnDeleteServerMenu" />
+                        </ContextMenu>
+                    </ListBox.ContextMenu>
+                </ListBox>
+            </DockPanel>
+        </Border>
+    </Grid>
+</Window>

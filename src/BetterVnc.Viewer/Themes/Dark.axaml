@@ -1,0 +1,168 @@
+<!--
+  The viewer's dark look, ported from the WPF viewer's Themes/Dark.xaml: the palette, and control themes for the
+  buttons, toggle buttons and list cards that replace Fluent's. Everything else (text boxes, combo boxes, check boxes,
+  scroll bars, menus) is Fluent's dark variant with this accent colour.
+-->
+<ResourceDictionary xmlns="https://github.com/avaloniaui"
+                    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+
+    <!-- Palette -->
+    <Color x:Key="BgColor">#FF14161A</Color>
+    <Color x:Key="PanelColor">#FF1C1F25</Color>
+    <Color x:Key="CardColor">#FF23272F</Color>
+    <Color x:Key="CardHoverColor">#FF2B3039</Color>
+    <Color x:Key="BorderColor">#FF343A45</Color>
+    <Color x:Key="TextColor">#FFE8EAED</Color>
+    <Color x:Key="MutedColor">#FF9AA3B2</Color>
+    <Color x:Key="AccentColor">#FF4F8CFF</Color>
+    <Color x:Key="AccentHoverColor">#FF6B9DFF</Color>
+    <Color x:Key="DangerColor">#FFE5484D</Color>
+    <Color x:Key="SuccessColor">#FF3DD68C</Color>
+    <Color x:Key="WarningColor">#FFF5A524</Color>
+
+    <SolidColorBrush x:Key="BgBrush" Color="{StaticResource BgColor}" />
+    <SolidColorBrush x:Key="PanelBrush" Color="{StaticResource PanelColor}" />
+    <SolidColorBrush x:Key="CardBrush" Color="{StaticResource CardColor}" />
+    <SolidColorBrush x:Key="CardHoverBrush" Color="{StaticResource CardHoverColor}" />
+    <SolidColorBrush x:Key="BorderBrush" Color="{StaticResource BorderColor}" />
+    <SolidColorBrush x:Key="TextBrush" Color="{StaticResource TextColor}" />
+    <SolidColorBrush x:Key="MutedBrush" Color="{StaticResource MutedColor}" />
+    <SolidColorBrush x:Key="AccentBrush" Color="{StaticResource AccentColor}" />
+    <SolidColorBrush x:Key="AccentHoverBrush" Color="{StaticResource AccentHoverColor}" />
+    <SolidColorBrush x:Key="DangerBrush" Color="{StaticResource DangerColor}" />
+    <SolidColorBrush x:Key="SuccessBrush" Color="{StaticResource SuccessColor}" />
+    <SolidColorBrush x:Key="WarningBrush" Color="{StaticResource WarningColor}" />
+
+    <!-- Fluent's text boxes and drop-downs in the palette's colours -->
+    <SolidColorBrush x:Key="TextControlBackground" Color="{StaticResource PanelColor}" />
+    <SolidColorBrush x:Key="TextControlBackgroundPointerOver" Color="{StaticResource PanelColor}" />
+    <SolidColorBrush x:Key="TextControlBackgroundFocused" Color="{StaticResource PanelColor}" />
+    <SolidColorBrush x:Key="TextControlBorderBrush" Color="{StaticResource BorderColor}" />
+    <SolidColorBrush x:Key="TextControlBorderBrushPointerOver" Color="{StaticResource BorderColor}" />
+    <SolidColorBrush x:Key="TextControlBorderBrushFocused" Color="{StaticResource AccentColor}" />
+    <SolidColorBrush x:Key="TextControlForeground" Color="{StaticResource TextColor}" />
+    <SolidColorBrush x:Key="TextControlForegroundFocused" Color="{StaticResource TextColor}" />
+    <SolidColorBrush x:Key="TextControlForegroundPointerOver" Color="{StaticResource TextColor}" />
+    <SolidColorBrush x:Key="ComboBoxBackground" Color="{StaticResource PanelColor}" />
+    <SolidColorBrush x:Key="ComboBoxBackgroundPointerOver" Color="{StaticResource CardHoverColor}" />
+    <SolidColorBrush x:Key="ComboBoxBorderBrush" Color="{StaticResource BorderColor}" />
+    <SolidColorBrush x:Key="ComboBoxDropDownBackground" Color="{StaticResource CardColor}" />
+    <SolidColorBrush x:Key="ComboBoxDropDownBorderBrush" Color="{StaticResource BorderColor}" />
+    <SolidColorBrush x:Key="MenuFlyoutPresenterBackground" Color="{StaticResource CardColor}" />
+    <SolidColorBrush x:Key="MenuFlyoutPresenterBorderBrush" Color="{StaticResource BorderColor}" />
+    <SolidColorBrush x:Key="ToolTipBackground" Color="{StaticResource CardColor}" />
+    <SolidColorBrush x:Key="ToolTipBorderBrush" Color="{StaticResource BorderColor}" />
+    <SolidColorBrush x:Key="ToolTipForeground" Color="{StaticResource TextColor}" />
+    <CornerRadius x:Key="ControlCornerRadius">6</CornerRadius>
+
+    <ControlTheme x:Key="{x:Type Button}" TargetType="Button">
+        <Setter Property="Background" Value="{StaticResource CardBrush}" />
+        <Setter Property="Foreground" Value="{StaticResource TextBrush}" />
+        <Setter Property="BorderBrush" Value="{StaticResource BorderBrush}" />
+        <Setter Property="BorderThickness" Value="1" />
+        <Setter Property="CornerRadius" Value="6" />
+        <Setter Property="Padding" Value="12,6" />
+        <Setter Property="Cursor" Value="Hand" />
+        <Setter Property="HorizontalContentAlignment" Value="Center" />
+        <Setter Property="VerticalContentAlignment" Value="Center" />
+        <Setter Property="Template">
+            <ControlTemplate>
+                <ContentPresenter Name="Face" Background="{TemplateBinding Background}" BorderBrush="{TemplateBinding BorderBrush}"
+                                  BorderThickness="{TemplateBinding BorderThickness}" CornerRadius="{TemplateBinding CornerRadius}"
+                                  Padding="{TemplateBinding Padding}" Content="{TemplateBinding Content}"
+                                  ContentTemplate="{TemplateBinding ContentTemplate}" Foreground="{TemplateBinding Foreground}"
+                                  HorizontalContentAlignment="{TemplateBinding HorizontalContentAlignment}"
+                                  VerticalContentAlignment="{TemplateBinding VerticalContentAlignment}" />
+            </ControlTemplate>
+        </Setter>
+        <Style Selector="^:pointerover /template/ ContentPresenter#Face">
+            <Setter Property="Background" Value="{StaticResource CardHoverBrush}" />
+        </Style>
+        <Style Selector="^:pressed /template/ ContentPresenter#Face">
+            <Setter Property="Background" Value="{StaticResource BorderBrush}" />
+        </Style>
+        <Style Selector="^:disabled">
+            <Setter Property="Opacity" Value="0.45" />
+        </Style>
+    </ControlTheme>
+
+    <ControlTheme x:Key="PrimaryButton" TargetType="Button" BasedOn="{StaticResource {x:Type Button}}">
+        <Setter Property="Background" Value="{StaticResource AccentBrush}" />
+        <Setter Property="BorderBrush" Value="{StaticResource AccentBrush}" />
+        <Setter Property="Foreground" Value="White" />
+        <Setter Property="FontWeight" Value="SemiBold" />
+        <Style Selector="^:pointerover /template/ ContentPresenter#Face">
+            <Setter Property="Background" Value="{StaticResource AccentHoverBrush}" />
+        </Style>
+        <Style Selector="^:pressed /template/ ContentPresenter#Face">
+            <Setter Property="Background" Value="{StaticResource AccentBrush}" />
+        </Style>
+    </ControlTheme>
+
+    <ControlTheme x:Key="DangerButton" TargetType="Button" BasedOn="{StaticResource PrimaryButton}">
+        <Setter Property="Background" Value="{StaticResource DangerBrush}" />
+        <Setter Property="BorderBrush" Value="{StaticResource DangerBrush}" />
+    </ControlTheme>
+
+    <ControlTheme x:Key="ToolButton" TargetType="Button" BasedOn="{StaticResource {x:Type Button}}">
+        <Setter Property="Background" Value="Transparent" />
+        <Setter Property="BorderThickness" Value="0" />
+        <Setter Property="Padding" Value="8,4" />
+        <Setter Property="Margin" Value="1,0" />
+    </ControlTheme>
+
+    <ControlTheme x:Key="{x:Type ToggleButton}" TargetType="ToggleButton">
+        <Setter Property="Background" Value="Transparent" />
+        <Setter Property="Foreground" Value="{StaticResource TextBrush}" />
+        <Setter Property="CornerRadius" Value="6" />
+        <Setter Property="Padding" Value="8,4" />
+        <Setter Property="Margin" Value="1,0" />
+        <Setter Property="Cursor" Value="Hand" />
+        <Setter Property="VerticalAlignment" Value="Center" />
+        <Setter Property="Template">
+            <ControlTemplate>
+                <ContentPresenter Name="Face" Background="{TemplateBinding Background}" CornerRadius="{TemplateBinding CornerRadius}"
+                                  Padding="{TemplateBinding Padding}" Content="{TemplateBinding Content}"
+                                  ContentTemplate="{TemplateBinding ContentTemplate}" Foreground="{TemplateBinding Foreground}"
+                                  HorizontalContentAlignment="Center" VerticalContentAlignment="Center" />
+            </ControlTemplate>
+        </Setter>
+        <Style Selector="^:pointerover /template/ ContentPresenter#Face">
+            <Setter Property="Background" Value="{StaticResource CardHoverBrush}" />
+        </Style>
+        <Style Selector="^:checked /template/ ContentPresenter#Face">
+            <Setter Property="Background" Value="{StaticResource AccentBrush}" />
+            <Setter Property="Foreground" Value="White" />
+        </Style>
+        <Style Selector="^:disabled">
+            <Setter Property="Opacity" Value="0.45" />
+        </Style>
+    </ControlTheme>
+
+    <!-- Connection and VM cards -->
+    <ControlTheme x:Key="{x:Type ListBoxItem}" TargetType="ListBoxItem">
+        <Setter Property="Foreground" Value="{StaticResource TextBrush}" />
+        <Setter Property="Background" Value="{StaticResource CardBrush}" />
+        <Setter Property="BorderBrush" Value="{StaticResource BorderBrush}" />
+        <Setter Property="BorderThickness" Value="1" />
+        <Setter Property="CornerRadius" Value="8" />
+        <Setter Property="Margin" Value="0,0,0,8" />
+        <Setter Property="Padding" Value="14,10" />
+        <Setter Property="HorizontalContentAlignment" Value="Stretch" />
+        <Setter Property="Template">
+            <ControlTemplate>
+                <ContentPresenter Name="Card" Background="{TemplateBinding Background}" BorderBrush="{TemplateBinding BorderBrush}"
+                                  BorderThickness="{TemplateBinding BorderThickness}" CornerRadius="{TemplateBinding CornerRadius}"
+                                  Padding="{TemplateBinding Padding}" Content="{TemplateBinding Content}"
+                                  ContentTemplate="{TemplateBinding ContentTemplate}"
+                                  HorizontalContentAlignment="{TemplateBinding HorizontalContentAlignment}" />
+            </ControlTemplate>
+        </Setter>
+        <Style Selector="^:pointerover /template/ ContentPresenter#Card">
+            <Setter Property="Background" Value="{StaticResource CardHoverBrush}" />
+        </Style>
+        <Style Selector="^:selected /template/ ContentPresenter#Card">
+            <Setter Property="BorderBrush" Value="{StaticResource AccentBrush}" />
+        </Style>
+    </ControlTheme>
+</ResourceDictionary>

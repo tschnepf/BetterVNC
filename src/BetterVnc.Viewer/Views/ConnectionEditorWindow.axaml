@@ -1,0 +1,155 @@
+<Window xmlns="https://github.com/avaloniaui"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:m="using:BetterVnc.Viewer.Core.Models"
+        x:Class="BetterVnc.Viewer.Views.ConnectionEditorWindow"
+        Title="Connection" Width="560" Height="720" MinWidth="480" MinHeight="500"
+        WindowStartupLocation="CenterOwner" ShowInTaskbar="False" Icon="/Assets/BetterVNC.ico">
+    <DockPanel>
+        <Border DockPanel.Dock="Bottom" Background="{StaticResource PanelBrush}" BorderBrush="{StaticResource BorderBrush}" BorderThickness="0,1,0,0" Padding="16,10">
+            <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" Spacing="8">
+                <Button x:Name="CancelButton" Content="Cancel" IsCancel="True" Click="OnCancel" />
+                <Button x:Name="SaveButton" Content="Save" Theme="{StaticResource PrimaryButton}" IsDefault="True" Click="OnSave" MinWidth="90" />
+            </StackPanel>
+        </Border>
+        <ScrollViewer VerticalScrollBarVisibility="Auto">
+            <StackPanel Margin="20,12,20,20">
+                <TextBlock Classes="SectionLabel" Text="GENERAL" />
+                <Grid ColumnDefinitions="120,*" RowDefinitions="Auto,Auto,Auto,Auto,Auto">
+                    <Label Grid.Row="0" Content="Name" />
+                    <TextBox Grid.Row="0" Grid.Column="1" x:Name="NameBox" Margin="0,3" />
+                    <Label Grid.Row="1" Content="Type" />
+                    <ComboBox Grid.Row="1" Grid.Column="1" x:Name="KindBox" Margin="0,3" HorizontalAlignment="Stretch" SelectionChanged="OnKindChanged">
+                        <ComboBoxItem Content="Generic VNC server" />
+                        <ComboBoxItem Content="Unraid VM (QEMU)" />
+                        <ComboBoxItem Content="macOS Screen Sharing" />
+                    </ComboBox>
+                    <Label Grid.Row="2" Content="Host" />
+                    <TextBox Grid.Row="2" Grid.Column="1" x:Name="HostBox" Margin="0,3" />
+                    <Label Grid.Row="3" Content="Port" />
+                    <TextBox Grid.Row="3" Grid.Column="1" x:Name="PortBox" Margin="0,3" Width="100" HorizontalAlignment="Left" />
+                    <Label Grid.Row="4" x:Name="UserLabel" Content="User name" />
+                    <TextBox Grid.Row="4" Grid.Column="1" x:Name="UserBox" Margin="0,3" />
+                </Grid>
+                <Grid ColumnDefinitions="120,*" Margin="0,3">
+                    <Label Content="Password" />
+                    <TextBox Grid.Column="1" x:Name="PasswordBox" PasswordChar="●" />
+                </Grid>
+                <TextBlock x:Name="PasswordHint" Classes="Muted" Margin="120,2,0,0" TextWrapping="Wrap" />
+
+                <StackPanel x:Name="UnraidPanel">
+                    <TextBlock Classes="SectionLabel" Text="UNRAID" />
+                    <TextBlock Classes="Muted" TextWrapping="Wrap" Margin="0,0,0,6"
+                               Text="Linking to an Unraid server lets BetterVNC look up the VM's current VNC port and password over SSH each time you connect, and start the VM if it is off." />
+                    <Grid ColumnDefinitions="120,*,Auto" RowDefinitions="Auto,Auto">
+                        <Label Grid.Row="0" Content="Unraid server" />
+                        <ComboBox Grid.Row="0" Grid.Column="1" x:Name="ServerBox" Margin="0,3" HorizontalAlignment="Stretch">
+                            <ComboBox.ItemTemplate>
+                                <DataTemplate x:DataType="m:UnraidServer">
+                                    <TextBlock Text="{Binding Name}" />
+                                </DataTemplate>
+                            </ComboBox.ItemTemplate>
+                        </ComboBox>
+                        <Label Grid.Row="1" Content="VM name" />
+                        <TextBox Grid.Row="1" Grid.Column="1" x:Name="VmBox" Margin="0,3" />
+                        <Button Grid.Row="1" Grid.Column="2" x:Name="BrowseVmsButton" Content="Browse…" Margin="8,3,0,3" Click="OnBrowseVms" />
+                    </Grid>
+                </StackPanel>
+
+                <StackPanel x:Name="MacPanel">
+                    <TextBlock Classes="SectionLabel" Text="MAC KEYBOARD" />
+                    <TextBlock Classes="Muted" TextWrapping="Wrap" Margin="0,0,0,6"
+                               Text="macOS maps the Super (Windows) key to Command and Alt to Option. Pick how your PC keyboard should feel." />
+                    <RadioButton x:Name="MacStandard" Content="Standard: Win = ⌘ Command, Alt = ⌥ Option, Ctrl = Control" GroupName="mac" />
+                    <RadioButton x:Name="MacCtrlCmd" Content="Ctrl = ⌘ Command (Ctrl+C/V/Z behave like Cmd+C/V/Z), Win = Control" GroupName="mac" />
+                    <RadioButton x:Name="MacSwap" Content="Swap: Alt = ⌘ Command, Win = ⌥ Option (Command next to space, like a Mac)" GroupName="mac" />
+                </StackPanel>
+
+                <TextBlock Classes="SectionLabel" Text="DISPLAY &amp; INPUT" />
+                <CheckBox x:Name="FitBox" Content="Scale remote screen to fit the window" />
+                <CheckBox x:Name="FullscreenBox" Content="Start in fullscreen" />
+                <CheckBox x:Name="GrabBox" Content="Send Windows key, Alt+Tab and Alt+F4 to the remote (RDP-style)" />
+                <CheckBox x:Name="CursorBox" Content="Render the remote pointer locally (no cursor lag)" />
+                <CheckBox x:Name="ClipboardBox" Content="Synchronise text clipboard" />
+                <CheckBox x:Name="AudioBox" Content="Play audio (Unraid/QEMU VMs with a sound device)" />
+                <Grid ColumnDefinitions="120,*" Margin="0,6,0,0">
+                    <Label Content="Picture" />
+                    <ComboBox Grid.Column="1" x:Name="QualityBox" Margin="0,3" HorizontalAlignment="Stretch" />
+                </Grid>
+                <TextBlock Classes="Muted" TextWrapping="Wrap" Margin="120,0,0,6"
+                           Text="Lossless is best on a LAN. The compressed VNC modes need a server that honours lossy requests (QEMU with lossy=on; macOS has none). The stream modes take the picture from the guest agent's video channel and fall back to lossless VNC until the agent is up. The toolbar's Picture box changes this during a session." />
+                <Grid ColumnDefinitions="120,*">
+                    <Label Content="Scroll speed" />
+                    <StackPanel Grid.Column="1" Orientation="Horizontal" Margin="0,3">
+                        <Slider x:Name="ScrollSlider" Width="200" Minimum="1" Maximum="20" TickFrequency="1" IsSnapToTickEnabled="True" VerticalAlignment="Center" />
+                        <TextBlock Margin="10,0,0,0" VerticalAlignment="Center" Text="{Binding #ScrollSlider.Value, StringFormat='{}{0:0} wheel clicks per notch'}" />
+                    </StackPanel>
+                </Grid>
+
+                <TextBlock Classes="SectionLabel" Text="GUEST AGENT" />
+                <TextBlock Classes="Muted" TextWrapping="Wrap" Margin="0,0,0,6"
+                           Text="The BetterVNC guest agent runs inside the remote machine and mirrors images and files between the two clipboards, like RDP does (see README, Guest agent). It sits in the remote's tray or menu bar." />
+                <CheckBox x:Name="AgentBox" Content="Use the guest agent for images, files and text" IsCheckedChanged="OnAgentChanged" />
+                <CheckBox x:Name="AgentOnlyBox" Margin="0,4,0,0" IsCheckedChanged="OnAgentChanged"
+                          Content="No VNC server: picture, keyboard and mouse through the agent (Windows)"
+                          ToolTip.Tip="For a Windows PC that runs only the BetterVNC agent, or an Unraid VM whose VNC console you do not need. The host above is the agent's (or set the agent host); the VNC port and password are not used. Sign-in, the lock screen and UAC prompts need VNC for now." />
+                <StackPanel x:Name="AgentPanel">
+                    <Grid ColumnDefinitions="120,*" RowDefinitions="Auto,Auto">
+                        <Label Grid.Row="0" Content="Agent host" />
+                        <TextBox Grid.Row="0" Grid.Column="1" x:Name="AgentHostBox" Margin="0,3"
+                                 ToolTip.Tip="Leave empty to use the VNC host. Unraid VMs linked to a server: leave empty and the VM's own address is looked up on the server on every connect (needs the QEMU guest agent in the VM), or enter the VM's IP address or host name." />
+                        <Label Grid.Row="1" Content="Agent port" />
+                        <TextBox Grid.Row="1" Grid.Column="1" x:Name="AgentPortBox" Margin="0,3" Width="100" HorizontalAlignment="Left" />
+                    </Grid>
+                    <RadioButton x:Name="AgentPairRadio" GroupName="agentauth" Margin="0,6,0,0" IsCheckedChanged="OnAgentAuthChanged">
+                        <TextBlock TextWrapping="Wrap" Text="Pair with a click in the remote (recommended): a dialog appears there on first connect, click Allow once" />
+                    </RadioButton>
+                    <StackPanel x:Name="AgentPairedPanel" Orientation="Horizontal" Margin="22,2,0,0">
+                        <TextBlock x:Name="AgentPairedText" Classes="Muted" VerticalAlignment="Center" Text="Paired with this remote." />
+                        <Button x:Name="AgentForgetButton" Content="Forget pairing" Margin="10,0,0,0" Padding="8,2" Click="OnForgetPairing" />
+                    </StackPanel>
+                    <RadioButton x:Name="AgentTokenRadio" GroupName="agentauth" Margin="0,4,0,0" IsCheckedChanged="OnAgentAuthChanged"
+                                 Content="Token or password set in the agent's settings" />
+                    <Grid x:Name="AgentTokenPanel" ColumnDefinitions="120,*" Margin="0,2,0,0">
+                        <Label Content="Token" />
+                        <TextBox Grid.Column="1" x:Name="AgentTokenBox" PasswordChar="●" Margin="0,3"
+                                 ToolTip.Tip="The token or password from the agent's settings (tray or menu bar icon on the remote)" />
+                    </Grid>
+                </StackPanel>
+
+                <TextBlock Classes="SectionLabel" Text="FILE TRANSFER" />
+                <TextBlock Classes="Muted" TextWrapping="Wrap" Margin="0,0,0,6"
+                           Text="Fallback when no guest agent is available: dropped files, pasted files and pasted images are uploaded to a drop folder on the remote using SFTP (macOS: enable Remote Login; Linux: sshd; Windows guest: OpenSSH Server) or an SMB share." />
+                <Grid ColumnDefinitions="120,*">
+                    <Label Content="Channel" />
+                    <ComboBox Grid.Column="1" x:Name="TransferBox" Margin="0,3" HorizontalAlignment="Stretch" SelectionChanged="OnTransferChanged">
+                        <ComboBoxItem Content="None" />
+                        <ComboBoxItem Content="SFTP (SSH)" />
+                        <ComboBoxItem Content="SMB share (UNC path)" />
+                    </ComboBox>
+                </Grid>
+                <Grid x:Name="SftpPanel" ColumnDefinitions="120,*" RowDefinitions="Auto,Auto,Auto,Auto,Auto,Auto">
+                    <Label Grid.Row="0" Content="SSH host" />
+                    <TextBox Grid.Row="0" Grid.Column="1" x:Name="SftpHostBox" Margin="0,3" ToolTip.Tip="Leave empty to use the VNC host" />
+                    <Label Grid.Row="1" Content="SSH port" />
+                    <TextBox Grid.Row="1" Grid.Column="1" x:Name="SftpPortBox" Margin="0,3" Width="100" HorizontalAlignment="Left" />
+                    <Label Grid.Row="2" Content="User" />
+                    <TextBox Grid.Row="2" Grid.Column="1" x:Name="SftpUserBox" Margin="0,3" />
+                    <Label Grid.Row="3" Content="Password" />
+                    <TextBox Grid.Row="3" Grid.Column="1" x:Name="SftpPasswordBox" PasswordChar="●" Margin="0,3" />
+                    <Label Grid.Row="4" Content="Private key" />
+                    <TextBox Grid.Row="4" Grid.Column="1" x:Name="SftpKeyBox" Margin="0,3" ToolTip.Tip="Optional path to an OpenSSH private key" />
+                    <Label Grid.Row="5" Content="Drop folder" />
+                    <TextBox Grid.Row="5" Grid.Column="1" x:Name="SftpFolderBox" Margin="0,3" ToolTip.Tip="Remote directory, e.g. ~/Desktop/BetterVNC or /home/user/Downloads" />
+                </Grid>
+                <Grid x:Name="SmbPanel" ColumnDefinitions="120,*" RowDefinitions="Auto,Auto,Auto">
+                    <Label Grid.Row="0" Content="UNC path" />
+                    <TextBox Grid.Row="0" Grid.Column="1" x:Name="SmbPathBox" Margin="0,3" ToolTip.Tip="\\vm-name\Users\tim\Desktop\Drop" />
+                    <Label Grid.Row="1" Content="User (optional)" />
+                    <TextBox Grid.Row="1" Grid.Column="1" x:Name="SmbUserBox" Margin="0,3" />
+                    <Label Grid.Row="2" Content="Password" />
+                    <TextBox Grid.Row="2" Grid.Column="1" x:Name="SmbPasswordBox" PasswordChar="●" Margin="0,3" />
+                </Grid>
+            </StackPanel>
+        </ScrollViewer>
+    </DockPanel>
+</Window>

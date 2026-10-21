@@ -48,6 +48,11 @@ Portable builds sit next to them: `BetterVNC-<version>-win-x64.zip` (unzip, run 
 `bettervnc-agent-<version>-win-x64.zip` (unzip, run `bettervnc-agent install`) and
 `bettervnc-agent-<version>-{linux-x64,osx-arm64,osx-x64}.tar.gz` (unpack, run `sh install.sh`).
 
+`BetterVNC-<version>-preview-win-x64.zip` is a preview of the new cross-platform viewer, built with Avalonia
+(see [docs/CROSS-PLATFORM-VIEWER.md](docs/CROSS-PLATFORM-VIEWER.md)). Unzip it to a folder of its own and run
+`BetterVNC.exe` there. It has the installed viewer's features and uses the same connections and saved passwords.
+The installer still installs the WPF viewer.
+
 The builds are not code-signed, so Windows SmartScreen shows "Windows protected your PC" the first
 time (More info, Run anyway) and macOS asks you to right-click the package and choose Open, or to
 allow it under Privacy & Security. `SHA256SUMS.txt` on the release lists the checksums. Releases are
@@ -68,6 +73,11 @@ single folder:
 ```bash
 dotnet publish src/BetterVnc.App -c Release -r win-x64 --self-contained false -o publish
 ```
+
+The Avalonia viewer, the preview of the cross-platform one, builds alongside:
+`src/BetterVnc.Viewer/bin/Release/net10.0-windows/BetterVNC.exe`. Its picture goes through a Direct3D 11 swap chain
+in a child window. Where that is not available it falls back to OpenGL, then to plain bitmaps. To try a fallback,
+set `BETTERVNC_PICTURE=gl` or `bitmap` before starting it.
 
 ### Tests
 
@@ -94,7 +104,8 @@ release workflow runs every test executable the same way, and the others are bui
 ### Demo server
 
 `tools/BetterVnc.DemoServer` is a tiny RFB server (animated pattern, echoes keys, pointer and
-clipboard) for developing without a real VM:
+clipboard, logs keys and button presses, offers QEMU audio as silence, and resizes its desktop on F12) for
+developing without a real VM:
 
 ```bash
 dotnet run --project tools/BetterVnc.DemoServer -- 5999

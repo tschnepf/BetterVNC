@@ -99,7 +99,10 @@ internal static unsafe class D3D11
         ((delegate* unmanaged[Stdcall]<IntPtr, IntPtr, uint, uint, uint, uint, IntPtr, uint, D3D11_BOX*, void>)Com.Slot(ctx, 46))(ctx, dst, dstSub, x, y, z, src, srcSub, box);
     public static void CopyResource(IntPtr ctx, IntPtr dst, IntPtr src) => ((delegate* unmanaged[Stdcall]<IntPtr, IntPtr, IntPtr, void>)Com.Slot(ctx, 47))(ctx, dst, src);
     public static void UpdateSubresource(IntPtr ctx, IntPtr dst, uint dstSub, void* data, uint rowPitch, uint depthPitch) =>
-        ((delegate* unmanaged[Stdcall]<IntPtr, IntPtr, uint, D3D11_BOX*, void*, uint, uint, void>)Com.Slot(ctx, 48))(ctx, dst, dstSub, null, data, rowPitch, depthPitch);
+        UpdateSubresource(ctx, dst, dstSub, null, data, rowPitch, depthPitch);
+    /// <summary>Only the <paramref name="box"/> part of the subresource; <paramref name="data"/> points at the box's first texel.</summary>
+    public static void UpdateSubresource(IntPtr ctx, IntPtr dst, uint dstSub, D3D11_BOX* box, void* data, uint rowPitch, uint depthPitch) =>
+        ((delegate* unmanaged[Stdcall]<IntPtr, IntPtr, uint, D3D11_BOX*, void*, uint, uint, void>)Com.Slot(ctx, 48))(ctx, dst, dstSub, box, data, rowPitch, depthPitch);
     public static void ClearRenderTargetView(IntPtr ctx, IntPtr view, float* rgba) => ((delegate* unmanaged[Stdcall]<IntPtr, IntPtr, float*, void>)Com.Slot(ctx, 50))(ctx, view, rgba);
     public static void ClearState(IntPtr ctx) => ((delegate* unmanaged[Stdcall]<IntPtr, void>)Com.Slot(ctx, 110))(ctx);
     public static void Flush(IntPtr ctx) => ((delegate* unmanaged[Stdcall]<IntPtr, void>)Com.Slot(ctx, 111))(ctx);

@@ -178,6 +178,113 @@ public class GpuVideoTests
                 Assert.InRange(back[i + c], Math.Max(0, bgrx[i + c] - 1), Math.Min(255, bgrx[i + c] + 1));
     }
 
+    /// <summary>Uploads <paramref name="rects"/> of <paramref name="source"/> (w*4 bytes per row) into the renderer's framebuffer.</summary>
+    private static unsafe bool Upload(VideoRenderer renderer, byte[] source, int w, int h, params (int X, int Y, int W, int H)[] rects) =>
+        renderer.UpdateFramebuffer(target =>
+        {
+            bool fresh = target.EnsureSize(w, h);
+            fixed (byte* p = source)
+                foreach (var r in fresh ? new[] { (0, 0, w, h) } : rects)
+                    target.Copy((IntPtr)(p + (r.Item2 * w + r.Item1) * 4), w * 4, r.Item1, r.Item2, r.Item3, r.Item4);
+        });
+
+    private static byte[] Solid(int w, int h, byte b, byte g, byte r)
+    {
+        var bgrx = new byte[w * h * 4];
+        for (int i = 0; i < bgrx.Length; i += 4) { bgrx[i] = b; bgrx[i + 1] = g; bgrx[i + 2] = r; bgrx[i + 3] = 255; }
+        return bgrx;
+    }
+
+    private static void AssertSame(byte[] expected, byte[] actual, string what)
+    {
+        Assert.Equal(expected.Length, actual.Length);
+        for (int i = 0; i < expected.Length; i += 4)
+            for (int c = 0; c < 3; c++)
+                if (Math.Abs(expected[i + c] - actual[i + c]) > 1)
+                    Assert.Fail($"{what}: pixel {i / 4} channel {c} is {actual[i + c]}, expected {expected[i + c]}");
+    }
+
+    [Fact]
+    public void Only_the_changed_rectangles_of_the_framebuffer_are_uploaded()
+    {
+        const int w = 64, h = 40;
+        var source = Frame(w, h, 0);
+        using var device = DeviceOrSkip();
+        using var renderer = new VideoRenderer(device);
+        Upload(renderer, source, w, h);
+        Assert.Equal((w, h), (renderer.FramebufferWidth, renderer.FramebufferHeight));
+        AssertSame(source, renderer.CaptureFrame(out int cw, out int ch)!, "first upload");
+        Assert.Equal((w, h), (cw, ch));
+
+        // Two parts change, only one is uploaded: the picture shows exactly that one.
+        var changed = (byte[])source.Clone();
+        var expected = (byte[])source.Clone();
+        for (int y = 0; y < h; y++)
+            for (int x = 0; x < w; x++)
+            {
+                int i = (y * w + x) * 4;
+                bool first = x >= 5 && x < 21 && y >= 3 && y < 13, second = x >= 40 && x < 60 && y >= 20 && y < 38;
+                if (first || second) { changed[i] = 255; changed[i + 1] = 0; changed[i + 2] = 255; }
+                if (first) { expected[i] = 255; expected[i + 1] = 0; expected[i + 2] = 255; }
+            }
+        Upload(renderer, changed, w, h, (5, 3, 16, 10));
+        AssertSame(expected, renderer.CaptureFrame(out _, out _)!, "dirty rectangle");
+    }
+
+    [Fact]
+    public void A_partial_stream_lands_on_its_part_of_the_framebuffer()
+    {
+        const int w = 64, h = 40;
+        var grey = Solid(w, h, 90, 90, 90);
+        using var device = DeviceOrSkip();
+        using var renderer = new VideoRenderer(device);
+        Upload(renderer, grey, w, h);
+        // The primary display of a larger desktop: 16x10 at 8,6, and one that reaches past the framebuffer's corner.
+        Assert.True(renderer.Present(Solid(16, 10, 0, 0, 230), 16, 10, (8, 6)));
+        var shot = renderer.CaptureFrame(out int cw, out int ch)!;
+        Assert.Equal((w, h), (cw, ch));
+        var expected = (byte[])grey.Clone();
+        for (int y = 6; y < 16; y++)
+            for (int x = 8; x < 24; x++) { int i = (y * w + x) * 4; expected[i] = 0; expected[i + 1] = 0; expected[i + 2] = 230; }
+        AssertSame(expected, shot, "partial stream");
+
+        Assert.True(renderer.Present(Solid(16, 10, 0, 200, 0), 16, 10, (56, 34)));
+        expected = (byte[])grey.Clone();
+        for (int y = 34; y < h; y++)
+            for (int x = 56; x < w; x++) { int i = (y * w + x) * 4; expected[i] = 0; expected[i + 1] = 200; expected[i + 2] = 0; }
+        AssertSame(expected, renderer.CaptureFrame(out _, out _)!, "clipped partial stream");
+
+        // Framebuffer changes around the stream still show while it runs.
+        var lighter = Solid(w, h, 150, 150, 150);
+        Upload(renderer, lighter, w, h, (0, 0, 8, 8));
+        Assert.Equal(150, renderer.CaptureFrame(out _, out _)![0]);
+    }
+
+    [Fact]
+    public void A_whole_desktop_stream_covers_the_framebuffer_until_hidden()
+    {
+        const int w = 64, h = 40;
+        var source = Frame(w, h, 1);
+        using var device = DeviceOrSkip();
+        using var renderer = new VideoRenderer(device);
+        Upload(renderer, source, w, h);
+        // A scaled stream (half size) of the whole desktop: the screenshot is the stream at its own size.
+        var red = Solid(32, 20, 0, 0, 230);
+        Assert.True(renderer.Present(red, 32, 20));
+        Assert.True(renderer.IsStreamShown);
+        var shot = renderer.CaptureFrame(out int cw, out int ch)!;
+        Assert.Equal((32, 20), (cw, ch));
+        AssertSame(red, shot, "stream");
+        // The framebuffer keeps taking updates underneath, without presenting.
+        source[0] = 7;
+        Assert.False(Upload(renderer, source, w, h, (0, 0, 1, 1)));
+        renderer.HideStream();
+        Assert.False(renderer.IsStreamShown);
+        var back = renderer.CaptureFrame(out cw, out ch)!;
+        Assert.Equal((w, h), (cw, ch));
+        AssertSame(source, back, "back to the framebuffer");
+    }
+
     [Fact]
     public void Presents_into_a_window_and_survives_resizes()
     {

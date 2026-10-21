@@ -1,0 +1,59 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    The Avalonia viewer (Phase 2 of docs/CROSS-PLATFORM-VIEWER.md): the windows, the theme and the picture control, on
+    the portable libraries (Viewer.Core, Media, Platform). Windows only for now: the picture goes through
+    BetterVnc.Media.Windows' swap chain in a native child window, keys come from the window procedure. macOS and
+    Linux add their own video surface and input in Phases 3 and 4.
+    Ships beside the WPF viewer (src/BetterVnc.App) as a preview until it replaces it.
+  -->
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <LangVersion>latest</LangVersion>
+    <AssemblyName>BetterVNC</AssemblyName>
+    <RootNamespace>BetterVnc.Viewer</RootNamespace>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+    <ApplicationIcon>Assets\BetterVNC.ico</ApplicationIcon>
+    <Version>0.1.0</Version>
+    <SatelliteResourceLanguages>en</SatelliteResourceLanguages>
+    <InvariantGlobalization>false</InvariantGlobalization>
+    <AvaloniaUseCompiledBindingsByDefault>true</AvaloniaUseCompiledBindingsByDefault>
+    <BuiltInComInteropSupport>true</BuiltInComInteropSupport>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <AvaloniaResource Include="Assets\**" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Avalonia" Version="12.1.4" />
+    <PackageReference Include="Avalonia.Desktop" Version="12.1.4" />
+    <PackageReference Include="Avalonia.Themes.Fluent" Version="12.1.4" />
+    <!-- The QEMU audio stream: plain PCM through waveOut. -->
+    <PackageReference Include="NAudio.WinMM" Version="2.2.1" />
+  </ItemGroup>
+
+  <!-- SkiaSharp and HarfBuzz ship their native debug symbols (about 100 MB); a release publish leaves them out. -->
+  <Target Name="LeaveOutNativeSymbols" AfterTargets="ComputeResolvedFilesToPublishList" Condition="'$(DebugType)' == 'none'">
+    <ItemGroup>
+      <ResolvedFileToPublish Remove="@(ResolvedFileToPublish)" Condition="'%(Extension)' == '.pdb'" />
+    </ItemGroup>
+  </Target>
+
+  <ItemGroup>
+    <ProjectReference Include="..\BetterVnc.Protocol\BetterVnc.Protocol.csproj" />
+    <ProjectReference Include="..\BetterVnc.Agent.Protocol\BetterVnc.Agent.Protocol.csproj" />
+    <!-- Profiles, agent client, stream player, session controller. -->
+    <ProjectReference Include="..\BetterVnc.Viewer.Core\BetterVnc.Viewer.Core.csproj" />
+    <!-- The swap chain the picture goes through, the H.264 decoder, the pointer-shape reader. -->
+    <ProjectReference Include="..\BetterVnc.Media.Windows\BetterVnc.Media.Windows.csproj" />
+    <!-- The Windows clipboard and DPAPI, shared with the agent. -->
+    <ProjectReference Include="..\BetterVnc.Platform\BetterVnc.Platform.csproj" />
+  </ItemGroup>
+
+</Project>

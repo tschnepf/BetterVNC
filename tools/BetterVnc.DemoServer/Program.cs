@@ -5,7 +5,8 @@ using System.Text;
 using BetterVnc.Protocol;
 
 // A tiny RFB 3.8 server for development: animated test pattern, echoes pointer position and
-// typed keys, supports None or VNC-password auth, Raw encoding, legacy clipboard and bell.
+// typed keys, supports None or VNC-password auth, Raw encoding, legacy clipboard and bell, and QEMU audio (silence).
+// F12 toggles the desktop between its size and three quarters of it (DesktopSize), to watch a viewer follow a resize.
 // Usage: BetterVnc.DemoServer [port] [password] [--size <width>x<height>]
 // --size replaces the 800x500 desktop, e.g. with the size of a multi-monitor desktop that a guest agent streams part of.
 
@@ -30,6 +31,7 @@ while (true)
 
 static void Serve(TcpClient tcp, string? password, int W, int H)
 {
+    CancellationTokenSource? audio = null; // the silence sent while the client has audio on
     try
     {
         tcp.NoDelay = true;
@@ -70,18 +72,47 @@ static void Serve(TcpClient tcp, string? password, int W, int H)
         int mouseX = W / 2, mouseY = H / 2;
         byte buttons = 0;
         var typed = new StringBuilder();
+        int width = W, height = H;
         var frame = new byte[W * H * 4];
         var sendLock = new object();
         int tick = 0;
+        bool audioOffered = false, audioAcknowledged = false;
+        bool resizeOffered = false, resizePending = false;
+
+        // F12 switches between the desktop's size and three quarters of it.
+        void ToggleSize(uint keysym)
+        {
+            if (keysym != Keysym.F1 + 11 || !resizeOffered) return;
+            lock (sendLock)
+            {
+                (width, height) = width == W ? (W * 3 / 4, H * 3 / 4) : (W, H);
+                frame = new byte[width * height * 4];
+                mouseX = Math.Min(mouseX, width - 1);
+                mouseY = Math.Min(mouseY, height - 1);
+                resizePending = true;
+            }
+            Console.WriteLine($"Desktop resized to {width}x{height}");
+        }
 
         void SendFrame()
         {
-            tick++;
-            RenderPattern(frame, W, H, tick, mouseX, mouseY, buttons, typed.ToString());
-            var b = new RfbMessageBuilder();
-            b.U8(ServerMessage.FramebufferUpdate).Pad(1).U16(1);
-            b.U16(0).U16(0).U16(W).U16(H).S32(RfbEncoding.Raw).Bytes(frame);
-            lock (sendLock) Write(b.Data);
+            lock (sendLock)
+            {
+                tick++;
+                RenderPattern(frame, width, height, tick, mouseX, mouseY, buttons, typed.ToString());
+                var b = new RfbMessageBuilder();
+                // The first update after the client offered QEMU audio acknowledges it with a pseudo-rectangle.
+                bool ack = audioOffered && !audioAcknowledged;
+                audioAcknowledged |= ack;
+                bool resize = resizePending;
+                resizePending = false;
+                b.U8(ServerMessage.FramebufferUpdate).Pad(1).U16((ushort)(1 + (ack ? 1 : 0) + (resize ? 1 : 0)));
+                if (ack) b.U16(0).U16(0).U16(0).U16(0).S32(RfbEncoding.QemuAudio);
+                // The new size comes first, so the client has resized its framebuffer when the new pixels arrive.
+                if (resize) b.U16(0).U16(0).U16(width).U16(height).S32(RfbEncoding.DesktopSize);
+                b.U16(0).U16(0).U16(width).U16(height).S32(RfbEncoding.Raw).Bytes(frame);
+                Write(b.Data);
+            }
         }
 
         while (true)
@@ -100,6 +131,8 @@ static void Serve(TcpClient tcp, string? password, int W, int H)
                     var encs = new List<int>();
                     for (int i = 0; i < n; i++) encs.Add(r.ReadS32());
                     Console.WriteLine("Client encodings: " + string.Join(", ", encs.Select(RfbEncoding.Name)));
+                    audioOffered = encs.Contains(RfbEncoding.QemuAudio);
+                    resizeOffered = encs.Contains(RfbEncoding.DesktopSize);
                     break;
                 case ClientMessage.FramebufferUpdateRequest:
                     r.ReadBytes(9);
@@ -112,14 +145,20 @@ static void Serve(TcpClient tcp, string? password, int W, int H)
                     r.Skip(2);
                     uint keysym = r.ReadU32();
                     if (down) AppendKey(typed, keysym);
+                    if (down) ToggleSize(keysym);
                     Console.WriteLine($"Key {(down ? "down" : "up  ")} 0x{keysym:X}");
                     break;
                 }
                 case ClientMessage.PointerEvent:
-                    buttons = r.ReadU8();
+                {
+                    byte pressed = r.ReadU8();
                     mouseX = r.ReadU16();
                     mouseY = r.ReadU16();
+                    // Button changes only (wheel clicks are a press and a release), so a moving pointer does not flood the log.
+                    if (pressed != buttons) Console.WriteLine($"Pointer buttons 0x{pressed:X2} at {mouseX},{mouseY}");
+                    buttons = pressed;
                     break;
+                }
                 case ClientMessage.ClientCutText:
                 {
                     r.Skip(3);
@@ -143,8 +182,48 @@ static void Serve(TcpClient tcp, string? password, int W, int H)
                 case ClientMessage.Qemu:
                 {
                     byte sub = r.ReadU8();
-                    if (sub == QemuMessage.ExtendedKeyEvent) { r.ReadU16(); r.ReadU32(); r.ReadU32(); }
-                    else { ushort op = r.ReadU16(); if (op == QemuMessage.AudioSetFormat) r.ReadBytes(6); }
+                    if (sub == QemuMessage.ExtendedKeyEvent)
+                    {
+                        bool down = r.ReadU16() != 0;
+                        uint keysym = r.ReadU32(), keycode = r.ReadU32();
+                        if (down) AppendKey(typed, keysym);
+                        if (down) ToggleSize(keysym);
+                        Console.WriteLine($"Key {(down ? "down" : "up  ")} 0x{keysym:X} (XT 0x{keycode:X})");
+                    }
+                    else
+                    {
+                        ushort op = r.ReadU16();
+                        if (op == QemuMessage.AudioSetFormat) r.ReadBytes(6);
+                        else if (op == QemuMessage.AudioEnable && audio == null)
+                        {
+                            // Silence, 44.1 kHz stereo 16-bit, in 100 ms chunks: enough for a client to start playback.
+                            Console.WriteLine("Audio enabled");
+                            audio = new CancellationTokenSource();
+                            var token = audio.Token;
+                            lock (sendLock) Write(new RfbMessageBuilder().U8(ServerMessage.Qemu).U8(QemuMessage.Audio).U16(QemuMessage.AudioServerBegin).Data);
+                            _ = Task.Run(async () =>
+                            {
+                                var silence = new byte[17_640];
+                                try
+                                {
+                                    while (!token.IsCancellationRequested)
+                                    {
+                                        var chunk = new RfbMessageBuilder().U8(ServerMessage.Qemu).U8(QemuMessage.Audio).U16(QemuMessage.AudioServerData).U32((uint)silence.Length).Bytes(silence);
+                                        lock (sendLock) Write(chunk.Data);
+                                        await Task.Delay(100, token);
+                                    }
+                                }
+                                catch (Exception) { } // cancelled, or the client went away
+                            });
+                        }
+                        else if (op == QemuMessage.AudioDisable && audio != null)
+                        {
+                            Console.WriteLine("Audio disabled");
+                            audio.Cancel();
+                            audio = null;
+                            lock (sendLock) Write(new RfbMessageBuilder().U8(ServerMessage.Qemu).U8(QemuMessage.Audio).U16(QemuMessage.AudioServerEnd).Data);
+                        }
+                    }
                     break;
                 }
                 default:
@@ -159,6 +238,7 @@ static void Serve(TcpClient tcp, string? password, int W, int H)
     }
     finally
     {
+        audio?.Cancel();
         tcp.Dispose();
     }
 }
