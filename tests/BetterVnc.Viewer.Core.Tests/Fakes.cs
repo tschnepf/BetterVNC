@@ -26,12 +26,17 @@ public sealed class FakeAgentStream : IAgentStream
 
     /// <summary>Whether the last start asked for the pointer's shape (sessions without VNC).</summary>
     public bool CursorRequested { get; private set; }
+    /// <summary>Whether the last start asked for repairs of the still screen.</summary>
+    public bool RepairRequested { get; private set; }
+    /// <summary>Whether this agent repairs the still screen when asked (the start reply says so).</summary>
+    public bool CanRepair { get; set; }
 
-    public Task<AgentConnection.VideoStartInfo> StartStreamAsync(int bitrateKbps, int maxFps, (int Width, int Height)? area = null, bool cursor = false)
+    public Task<AgentConnection.VideoStartInfo> StartStreamAsync(int bitrateKbps, int maxFps, (int Width, int Height)? area = null, bool cursor = false, bool repair = false)
     {
         Starts++;
         CursorRequested = cursor;
-        StreamInfo = new AgentConnection.VideoStartInfo(AgentVideoCodec.H264, bitrateKbps, maxFps, 64, 48, "fake");
+        RepairRequested = repair;
+        StreamInfo = new AgentConnection.VideoStartInfo(AgentVideoCodec.H264, bitrateKbps, maxFps, 64, 48, "fake", Repair: repair && CanRepair);
         return Task.FromResult(StreamInfo);
     }
 
@@ -59,6 +64,21 @@ public sealed class FakeAgentStream : IAgentStream
         StreamFrame?.Invoke(new AgentFrame(
             new AgentMessage { Type = AgentMessageType.VideoFrame, Codec = AgentVideoCodec.H264, Sequence = sequence, Keyframe = keyframe, Timestamp = sequence * 16_667L },
             new byte[] { (byte)sequence, 0, 0, 1 }));
+
+    /// <summary>
+    /// A repair of the still screen arrives: the stream's 64×48 picture filled with <paramref name="blue"/> where
+    /// <paramref name="rects"/> lie (the whole picture when none are given, which makes it a whole repair).
+    /// </summary>
+    public void SendRepair(int sequence, byte blue, params RepairRect[] rects)
+    {
+        bool whole = rects.Length == 0;
+        if (whole) rects = new[] { new RepairRect(0, 0, 64, 48) };
+        var picture = new byte[64 * 48 * 4];
+        for (int i = 0; i < picture.Length; i += 4) picture[i] = blue;
+        StreamFrame?.Invoke(new AgentFrame(
+            new AgentMessage { Type = AgentMessageType.VideoRepair, Sequence = sequence, Keyframe = whole, Width = 64, Height = 48, Timestamp = sequence * 16_667L },
+            RepairPayload.Encode(picture, 64 * 4, 64, 48, rects)));
+    }
 
     /// <summary>The agent ends the stream; call on the UI thread, where <see cref="AgentClient"/> raises it.</summary>
     public void StopFromAgent(string reason)
@@ -111,9 +131,13 @@ public sealed class FakeVideoSurface : IVideoSurface
 
     public bool PresentVideoFrame(byte[] bgrx, int width, int height, (int X, int Y)? offset = null)
     {
+        LastPicture = bgrx.AsSpan(0, width * height * 4).ToArray();
         Interlocked.Increment(ref _framesShown);
         return true;
     }
+
+    /// <summary>A copy of the last BGRX picture shown (motion JPEG, or the player's repaired picture).</summary>
+    public byte[]? LastPicture { get; private set; }
 
     public void PresentExternalFrame(byte[] bgrx, int width, int height, Action<byte[]>? release = null, (int X, int Y)? offset = null)
     {

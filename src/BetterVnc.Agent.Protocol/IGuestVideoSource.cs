@@ -12,6 +12,8 @@ public sealed class VideoRequest
     /// </summary>
     public int MaxWidth { get; init; }
     public int MaxHeight { get; init; }
+    /// <summary>Send repairs: exact pixels of what the lossy frames showed, once the screen is still (see <see cref="VideoFrame.Repair"/>).</summary>
+    public bool Repair { get; init; }
 }
 
 /// <summary>One encoded frame produced by an <see cref="IVideoSession"/>.</summary>
@@ -20,7 +22,11 @@ public sealed class VideoRequest
 /// <param name="TimestampMicros">Capture time in microseconds since the session started.</param>
 /// <param name="Width">Frame size; may change when the guest changes resolution.</param>
 /// <param name="OffsetX">Position of the frame in the desktop when it shows only part of it (see <see cref="IVideoSession.Offset"/>); null for the whole desktop.</param>
-public readonly record struct VideoFrame(ReadOnlyMemory<byte> Data, bool Keyframe, long TimestampMicros, int Width, int Height, int? OffsetX = null, int? OffsetY = null);
+/// <param name="Repair">
+/// Not a frame but a repair (<see cref="AgentMessageType.VideoRepair"/>): <paramref name="Data"/> is a <see cref="RepairPayload"/>
+/// in the frames' coordinates, and <paramref name="Keyframe"/> says it covers the whole picture.
+/// </param>
+public readonly record struct VideoFrame(ReadOnlyMemory<byte> Data, bool Keyframe, long TimestampMicros, int Width, int Height, int? OffsetX = null, int? OffsetY = null, bool Repair = false);
 
 /// <summary>A pointer image: <paramref name="Width"/>×<paramref name="Height"/> pixels of B, G, R, A with straight alpha, top row first.</summary>
 public sealed record CursorImage(int Width, int Height, int HotX, int HotY, byte[] Bgra);
@@ -55,6 +61,9 @@ public interface IGuestVideoSource
     /// </summary>
     IVideoSession Start(VideoRequest request, Action<VideoFrame> onFrame, Action<string?> onEnded, Action<GuestCursor>? onCursor) =>
         Start(request, onFrame, onEnded);
+
+    /// <summary>True when some of its sessions can send repairs (<see cref="VideoRequest.Repair"/>); the server then announces <see cref="AgentFeature.Repair"/>.</summary>
+    bool SupportsRepair => false;
 }
 
 /// <summary>A running stream. Disposing stops capture and encoding; no frames arrive after Dispose returns.</summary>
@@ -78,6 +87,8 @@ public interface IVideoSession : IDisposable
     ScreenArea? Area => null;
     /// <summary>See <see cref="AgentVideoEncoder"/>.</summary>
     string EncoderKind { get; }
+    /// <summary>True when this session sends repairs: it was asked to, and its codec and capture allow it.</summary>
+    bool Repairs => false;
 
     /// <summary>Changes the bitrate and/or frame-rate cap on the fly; null leaves a value as it is.</summary>
     void Set(int? bitrateKbps, int? maxFps);
@@ -90,6 +101,9 @@ public interface IVideoSession : IDisposable
     /// </summary>
     void SetMaxSize(int maxWidth, int maxHeight) { }
 
-    /// <summary>Makes the next frame a key frame (and for sources that skip unchanged frames: sends one even if nothing changed).</summary>
+    /// <summary>
+    /// Makes the next frame a key frame (and for sources that skip unchanged frames: sends one even if nothing changed).
+    /// A session that sends repairs then repairs the whole picture once the screen is still.
+    /// </summary>
     void RequestKeyframe();
 }

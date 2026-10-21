@@ -13,14 +13,19 @@ public interface IAgentStream
     /// <summary>Parameters of the running stream, its size following the frames; null when none runs.</summary>
     AgentConnection.VideoStartInfo? StreamInfo { get; }
 
-    /// <summary>An encoded frame arrived; raised on the agent's receive thread, so decode elsewhere and return quickly.</summary>
+    /// <summary>
+    /// An encoded frame arrived, or a repair of the still screen (<see cref="AgentMessageType.VideoRepair"/> as the
+    /// header's type) for a stream started with repairs; raised on the agent's receive thread, so decode elsewhere and
+    /// return quickly.
+    /// </summary>
     event Action<AgentFrame>? StreamFrame;
     /// <summary>The stream ended without this side asking (agent stopped it, or disconnected); on the UI thread.</summary>
     event Action<string?>? StreamStopped;
 
     /// <param name="area">Where the picture is shown, in device pixels (see <see cref="AgentMessage.Width"/>); null for no limit.</param>
     /// <param name="cursor">Also have the agent send the pointer's shape: for a session without VNC.</param>
-    Task<AgentConnection.VideoStartInfo> StartStreamAsync(int bitrateKbps, int maxFps, (int Width, int Height)? area = null, bool cursor = false);
+    /// <param name="repair">Have the agent repair the still screen with exact pixels when it can (the result's <see cref="AgentConnection.VideoStartInfo.Repair"/> says).</param>
+    Task<AgentConnection.VideoStartInfo> StartStreamAsync(int bitrateKbps, int maxFps, (int Width, int Height)? area = null, bool cursor = false, bool repair = false);
     /// <summary>The area the picture is shown in changed (device pixels); an agent that can scale encodes no larger than that.</summary>
     Task SetStreamAreaAsync(int width, int height);
     Task SetStreamAsync(int? bitrateKbps, int? maxFps, bool keyframe = false);

@@ -17,6 +17,10 @@ namespace BetterVnc.Agent.Video;
 /// encoder. An unchanged screen sends nothing, which keeps the viewer's lossless idle fallback working; a key-frame
 /// request encodes the current picture even when nothing changed. While frames flow, the time each stage takes goes to
 /// the log about once a second.
+/// A viewer can ask for repairs (<see cref="VideoRequest.Repair"/>): the session keeps track of what its lossy frames
+/// showed, and once the screen has been still for <see cref="RepairAfterMicros"/> it sends the exact pixels of that
+/// region from the captured picture (<see cref="AgentMessageType.VideoRepair"/>). The viewer's picture is then exact
+/// without waiting for the VNC server, which in a VM can take a second to send an update.
 /// </summary>
 internal sealed class H264ScreenSession : IVideoSession
 {
@@ -30,8 +34,11 @@ internal sealed class H264ScreenSession : IVideoSession
     private readonly Thread _thread;
     private readonly ManualResetEventSlim _stop = new();
     private readonly bool _duplicationWanted;
+    private readonly bool _repairs;
     /// <summary>Capture and conversion time of each frame inside the encoder, waiting for its encode time to be added.</summary>
     private readonly Queue<long> _workBeforeEncode = new();
+    /// <summary>What the frames showed lossy since the last repair, in the captured picture's pixels (capture thread).</summary>
+    private DirtyRegion _lossy = new(1, 1);
     private bool _primaryOnly;
     private IScreenGrabber _grabber;
     private H264Encoder _encoder;
@@ -48,6 +55,7 @@ internal sealed class H264ScreenSession : IVideoSession
         _log = log;
         _bitrateKbps = request.BitrateKbps;
         _maxFps = Math.Clamp(request.MaxFps, 1, 120);
+        _repairs = request.Repair;
         _grabber = CreateGrabber(allowDuplication: true, out _duplicationWanted);
         try { _encoder = CreateEncoder(_grabber); }
         catch (Exception ex) when (!_primaryOnly && _grabber.Width > 0)
@@ -72,6 +80,14 @@ internal sealed class H264ScreenSession : IVideoSession
     public int Width { get; private set; }
     public int Height { get; private set; }
     public string EncoderKind => _encoder.IsHardware ? AgentVideoEncoder.Hardware : AgentVideoEncoder.Software;
+    public bool Repairs => _repairs;
+
+    /// <summary>
+    /// The screen must have been still this long before a repair goes out: long enough that a burst of typing or a
+    /// short pause in scrolling does not pay for one each time, short enough that the picture is exact before the eye
+    /// settles on it.
+    /// </summary>
+    public const long RepairAfterMicros = 150_000;
     public string Description => $"{_grabber.Name}, {_encoder.Name} ({EncoderKind}){(Offset is { } at ? $", the primary display at {at.X},{at.Y} of the {SystemInformation.VirtualScreen.Width}x{SystemInformation.VirtualScreen.Height} desktop" : "")}";
 
     /// <summary>
@@ -172,6 +188,7 @@ internal sealed class H264ScreenSession : IVideoSession
         // What changed since the last encoded frame, and what the latest capture changed.
         var pending = new DirtyRegion(_grabber.Width, _grabber.Height);
         var captured = new DirtyRegion(_grabber.Width, _grabber.Height);
+        _lossy = new DirtyRegion(_grabber.Width, _grabber.Height);
         var output = new List<EncodedFrame>();
         var governor = new FrameRateGovernor(_maxFps);
         var stats = new StreamStats();
@@ -239,6 +256,7 @@ internal sealed class H264ScreenSession : IVideoSession
                     if (!RecreateGrabber(ref bgra)) { endReason = "Screen capture failed: " + ex.Message; break; }
                     pending = new DirtyRegion(_grabber.Width, _grabber.Height);
                     captured = new DirtyRegion(_grabber.Width, _grabber.Height);
+                    _lossy = new DirtyRegion(_grabber.Width, _grabber.Height); // the key frame below covers it all
                     lastChanged = false;
                     _keyframe = true;
                     continue;
@@ -252,7 +270,13 @@ internal sealed class H264ScreenSession : IVideoSession
                     capturedAt = Micros();
                 }
                 // The first frame must show the screen as it is, so it waits for a capture; a key frame does not.
-                if (pending.IsEmpty && !(_keyframe && !first)) continue;
+                if (pending.IsEmpty && !(_keyframe && !first))
+                {
+                    // Still for a moment and every frame out of the encoder: repair what the frames showed lossy.
+                    if (_repairs && !_lossy.IsEmpty && _encoder.InFlight == 0 && Micros() - lastSubmit >= RepairAfterMicros)
+                        SendRepair(bgra, stats, Micros());
+                    continue;
+                }
 
                 now = Micros();
                 first = false;
@@ -266,6 +290,7 @@ internal sealed class H264ScreenSession : IVideoSession
                 stats.Submitted(captureWork, _encoder.LastConvertMicros, dirty);
                 _workBeforeEncode.Enqueue(captureWork + _encoder.LastConvertMicros);
                 captureWork = 0;
+                if (_repairs) _lossy.Add(pending);
                 pending.Clear();
                 lastSubmit = now;
                 nextAllowed = now + interval;
@@ -299,9 +324,27 @@ internal sealed class H264ScreenSession : IVideoSession
             stats.Encoded(f.Data.Length, f.EncodeMicros, f.Keyframe);
             long work = (_workBeforeEncode.TryDequeue(out var before) ? before : 0) + f.EncodeMicros;
             if (governor.Record(work, nowMicros) is { } change) _log?.Invoke("Stream: " + change);
+            if (_repairs && f.Keyframe) _lossy.AddAll(); // a key frame redraws all of the picture, lossy
             _onFrame(new VideoFrame(f.Data, f.Keyframe, f.TimestampMicros, _encoder.Width, _encoder.Height, at?.X, at?.Y));
         }
         output.Clear();
+    }
+
+    /// <summary>
+    /// Sends the exact pixels of what the frames showed lossy since the last repair, from the captured picture (which
+    /// matches the screen: nothing changed since the last capture). A repair of all of it can start a picture on its own.
+    /// </summary>
+    private void SendRepair(byte[] bgra, StreamStats stats, long nowMicros)
+    {
+        long started = Stopwatch.GetTimestamp();
+        bool whole = _lossy.IsFull;
+        double share = _lossy.Coverage;
+        var rects = _lossy.GetRects().Select(r => new RepairRect(r.X, r.Y, r.Width, r.Height));
+        var payload = RepairPayload.Encode(bgra, _grabber.Width * 4, _encoder.Width, _encoder.Height, rects, _encoder.ConvertThreads);
+        _lossy.Clear();
+        var at = Offset;
+        _onFrame(new VideoFrame(payload, whole, nowMicros, _encoder.Width, _encoder.Height, at?.X, at?.Y, Repair: true));
+        stats.Repaired(payload.Length, (Stopwatch.GetTimestamp() - started) * 1_000_000 / Stopwatch.Frequency, share);
     }
 
     private void RecreateEncoder()
@@ -346,10 +389,18 @@ internal sealed class H264ScreenSession : IVideoSession
     private sealed class StreamStats
     {
         private long _start = -1;
-        private int _submitted, _encoded, _keyframes;
-        private long _capture, _convert, _encode, _encodeMax, _bytes;
-        private double _dirty;
+        private int _submitted, _encoded, _keyframes, _repairs;
+        private long _capture, _convert, _encode, _encodeMax, _bytes, _repairBytes, _repairWork;
+        private double _dirty, _repaired;
         private TimeSpan _cpuStart;
+
+        public void Repaired(int bytes, long workMicros, double share)
+        {
+            _repairs++;
+            _repairBytes += bytes;
+            _repairWork += workMicros;
+            _repaired += share;
+        }
 
         public void Submitted(long captureMicros, long convertMicros, double dirtyShare)
         {
@@ -368,27 +419,30 @@ internal sealed class H264ScreenSession : IVideoSession
             if (keyframe) _keyframes++;
         }
 
-        /// <summary>A line about the last second or so when frames were encoded in it; null otherwise and while a second is not up.</summary>
+        /// <summary>A line about the last second or so when frames were encoded or repairs sent in it; null otherwise and while a second is not up.</summary>
         public string? Line(long nowMicros, FrameRateGovernor governor)
         {
             if (_start >= 0 && nowMicros - _start < 1_000_000) return null;
             string? line = null;
             var cpu = Environment.CpuUsage.TotalTime;
-            if (_start >= 0 && _encoded > 0 && _submitted > 0)
+            if (_start >= 0 && ((_encoded > 0 && _submitted > 0) || _repairs > 0))
             {
                 double seconds = (nowMicros - _start) / 1e6;
                 double cpuShare = (cpu - _cpuStart).TotalSeconds / (seconds * Environment.ProcessorCount);
                 string cap = governor.SteppedDown ? $"{governor.Fps} of {governor.RequestedFps}" : $"{governor.Fps}";
-                line = $"Stream: {_encoded / seconds:0.0} fps (cap {cap}), capture {_capture / 1000.0 / _submitted:0.00} ms, convert {_convert / 1000.0 / _submitted:0.00} ms, " +
-                       $"encode {_encode / 1000.0 / _encoded:0.00} ms (max {_encodeMax / 1000.0:0.0}), {_bytes * 8 / seconds / 1000:0} kbit/s, dirty {_dirty * 100 / _submitted:0.0}%" +
-                       (_keyframes > 0 ? $", {_keyframes} key frame(s)" : "") +
-                       $", agent CPU {cpuShare:0%} of {Environment.ProcessorCount} logical processors";
+                string repairs = _repairs == 0 ? "" : $"{_repairs} repair(s) of {_repaired * 100 / _repairs:0.0}% of the picture in {_repairBytes / 1024} KB ({_repairWork / 1000.0 / _repairs:0.0} ms each), ";
+                line = _encoded == 0 || _submitted == 0
+                    ? $"Stream: {repairs}agent CPU {cpuShare:0%} of {Environment.ProcessorCount} logical processors"
+                    : $"Stream: {_encoded / seconds:0.0} fps (cap {cap}), capture {_capture / 1000.0 / _submitted:0.00} ms, convert {_convert / 1000.0 / _submitted:0.00} ms, " +
+                      $"encode {_encode / 1000.0 / _encoded:0.00} ms (max {_encodeMax / 1000.0:0.0}), {_bytes * 8 / seconds / 1000:0} kbit/s, dirty {_dirty * 100 / _submitted:0.0}%" +
+                      (_keyframes > 0 ? $", {_keyframes} key frame(s)" : "") + ", " + repairs +
+                      $"agent CPU {cpuShare:0%} of {Environment.ProcessorCount} logical processors";
             }
             _start = nowMicros;
             _cpuStart = cpu;
-            _submitted = _encoded = _keyframes = 0;
-            _capture = _convert = _encode = _encodeMax = _bytes = 0;
-            _dirty = 0;
+            _submitted = _encoded = _keyframes = _repairs = 0;
+            _capture = _convert = _encode = _encodeMax = _bytes = _repairBytes = _repairWork = 0;
+            _dirty = _repaired = 0;
             return line;
         }
     }

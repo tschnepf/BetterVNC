@@ -177,7 +177,7 @@ on the box makes the current choice the default.
 |---|---|---|
 | VNC lossless | Exact pixels over RFB (Tight on QEMU, ZRLE on macOS). | Always. |
 | VNC compressed, high / medium / low | Tight JPEG quality 9 / 6 / 3 on the live connection. Switching re-sends the whole screen at the new quality. | The server honours lossy requests. QEMU does so only when the VM's VNC server is started with `lossy=on` (libvirt does not expose it; use a `<qemu:commandline>` override). The status bar says `JPEG n` once JPEG rectangles arrive and `requested (none received yet)` while the server ignores the request. macOS Screen Sharing has no lossy encoding, so these entries are greyed out there. |
-| Stream, quality / balanced / low bandwidth | The guest agent captures the screen and sends it as H.264 video (motion JPEG with old agents) at about 20 / 8 / 2.5 Mbit/s. RFB stays connected underneath for input, cursor shapes and resizes, polled once a second. Whenever the screen is still for 0.7 s the viewer switches back to the lossless RFB picture and asks for a full update, so a quiet desktop is always pixel-exact; the next frame switches back to the stream. | The guest agent is connected, is a build that announces `video`, runs on Windows or on macOS 12.3 or later (Linux capture is not done yet) and has `enableVideo` on (default; also a checkbox in the tray settings). Greyed out otherwise, with the reason in the tooltip. A plain VNC connection without an agent shows only the VNC entries. |
+| Stream, quality / balanced / low bandwidth | The guest agent captures the screen and sends it as H.264 video (motion JPEG with old agents) at about 20 / 8 / 2.5 Mbit/s. RFB stays connected underneath for input, cursor shapes and resizes, polled once a second. Once the screen has been still for 0.15 s, a Windows agent sends the exact pixels of what its frames showed and the viewer shows them, so a quiet desktop is pixel-exact about a third of a second after it stops moving ([measurements](docs/STILL-SCREEN-REPAIR.md)). With agents that cannot (the Mac agent, motion JPEG, older builds) the viewer switches back to the lossless RFB picture after 0.7 s still and asks for a full update; the next frame switches back to the stream. | The guest agent is connected, is a build that announces `video`, runs on Windows or on macOS 12.3 or later (Linux capture is not done yet) and has `enableVideo` on (default; also a checkbox in the tray settings). Greyed out otherwise, with the reason in the tooltip. A plain VNC connection without an agent shows only the VNC entries. |
 
 Choosing a stream mode before the agent is up is fine: the session starts on lossless VNC and the
 stream takes over the moment the agent connects, the same way the clipboard features light up. If
@@ -313,8 +313,9 @@ that is empty; for an Unraid VM linked to a server, the VM's own address as usua
 at once:
 
 * **Picture**: the agent's stream, always; the Picture box offers the stream modes only. There is no
-  lossless VNC picture to fall back to while the screen is still, so after 1.5 s without a frame the
-  viewer asks for one key frame, which redraws the still screen from scratch.
+  lossless VNC picture to fall back to while the screen is still. A Windows agent repairs the still
+  screen with its exact pixels; with other agents the viewer asks for one key frame after 1.5 s without
+  a frame, which redraws the still screen from scratch.
 * **Mouse**: positions are pixels of the picture you see; the agent maps them onto the part of its
   screen the stream shows and moves the pointer with `SendInput` over the whole virtual desktop, so
   every display is reachable. Left, middle, right and both side buttons; the wheel goes through the
@@ -360,7 +361,11 @@ the stream shows, so the viewer needs to know nothing about the guest's displays
 or button a viewer still holds when it disconnects. A `startVideo` with `cursor: true` (answered with `cursor: true`
 in `videoStarted` by an agent that has the feature) also brings `cursor` messages while the stream runs: `visible`,
 and with a new shape `width`, `height`, `hotX`, `hotY` and the pixels as B, G, R, A with straight alpha in the
-payload; only the newest state is sent when the link is slow. Protocol version 1 stays: both sides skip header
+payload; only the newest state is sent when the link is slow. With the feature `repair`, a `startVideo` with
+`repair: true` (answered with `repair: true`) also brings `videoRepair` messages: shortly after the screen goes still,
+the exact pixels of what the frames showed since the last repair, as zlib-compressed rectangles (`RepairPayload`),
+in order with the frames and numbered on their own; `keyframe` marks one that covers the whole picture, and a key
+frame request brings such a one. Protocol version 1 stays: both sides skip header
 fields they do not know and ignore notifications they do not know, and the agent answers an unknown request (one
 with an `id`) with an error carrying that id, so neither side stalls or disconnects on something newer.
 
@@ -542,6 +547,7 @@ tools/BetterVnc.Agent         Guest agent executable (Windows, Linux, macOS)
 tools/BetterVnc.Agent.MacCapture  Screen capture helper of the Mac agent (Swift: ScreenCaptureKit, VideoToolbox; build.sh)
 tools/BetterVnc.DemoServer    Development VNC server
 tools/BetterVnc.StreamBench   Plays a 1080p60 H.264 stream into the real session view and measures the viewer's CPU per path
+tools/BetterVnc.AgentBench    Measures a guest's picture as a viewer gets it (agent stream or VNC): input to picture, motion, still-screen exactness
 tools/BetterVnc.IconGen       Renders the app icon (src/BetterVnc.App/Assets/BetterVNC.ico and icon.svg) from code
 docs/ANALYSIS.md              Server analysis and design notes
 ```

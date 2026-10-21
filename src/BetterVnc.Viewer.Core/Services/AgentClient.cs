@@ -133,10 +133,11 @@ public sealed class AgentClient : IDisposable, IScrollInjector, IAgentInput, IAg
 
     /// <param name="area">Where the picture is shown, in device pixels (see <see cref="AgentMessage.Width"/>); null for no limit.</param>
     /// <param name="cursor">Also have the agent send the pointer's shape (<see cref="CursorChanged"/>): for a session without VNC.</param>
-    public async Task<AgentConnection.VideoStartInfo> StartStreamAsync(int bitrateKbps, int maxFps, (int Width, int Height)? area = null, bool cursor = false)
+    /// <param name="repair">Have the agent repair the still screen with exact pixels when it can (<see cref="AgentConnection.SupportsRepair"/>).</param>
+    public async Task<AgentConnection.VideoStartInfo> StartStreamAsync(int bitrateKbps, int maxFps, (int Width, int Height)? area = null, bool cursor = false, bool repair = false)
     {
         var conn = _connection ?? throw new InvalidOperationException("The guest agent is not connected.");
-        var info = await conn.StartVideoAsync(StreamCodecs, bitrateKbps, maxFps, area, cursor && conn.SupportsCursor, _cts.Token).ConfigureAwait(false);
+        var info = await conn.StartVideoAsync(StreamCodecs, bitrateKbps, maxFps, area, cursor && conn.SupportsCursor, repair && conn.SupportsRepair, _cts.Token).ConfigureAwait(false);
         StreamInfo = info;
         return info;
     }

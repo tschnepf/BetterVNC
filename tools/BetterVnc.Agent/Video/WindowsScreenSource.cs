@@ -38,6 +38,9 @@ public sealed class WindowsScreenSource : IGuestVideoSource
     /// <summary>Both codecs report the pointer: Desktop Duplication's pointer updates, or GDI's current cursor.</summary>
     public bool SupportsCursor => true;
 
+    /// <summary>H.264 sessions repair the still screen with exact pixels when asked; motion JPEG sessions do not.</summary>
+    public bool SupportsRepair => _h264 != null;
+
     public IVideoSession Start(VideoRequest request, Action<VideoFrame> onFrame, Action<string?> onEnded) => Start(request, onFrame, onEnded, null);
 
     public IVideoSession Start(VideoRequest request, Action<VideoFrame> onFrame, Action<string?> onEnded, Action<GuestCursor>? onCursor)
