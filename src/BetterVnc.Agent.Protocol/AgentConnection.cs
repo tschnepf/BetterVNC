@@ -56,13 +56,19 @@ public sealed class AgentConnection : IDisposable
     public bool SupportsInput => RemoteFeatures.Contains(AgentFeature.Input);
     /// <summary>True when the agent can send the pointer's shape with a stream (see <see cref="StartVideoAsync(IEnumerable{string}, int, int, ValueTuple{int, int}?, bool, CancellationToken)"/>).</summary>
     public bool SupportsCursor => RemoteFeatures.Contains(AgentFeature.Cursor);
+    /// <summary>True when the agent can repair the still screen with exact pixels in a stream that asks for it (<see cref="AgentFeature.Repair"/>).</summary>
+    public bool SupportsRepair => RemoteFeatures.Contains(AgentFeature.Repair);
     /// <summary>Codecs the agent can encode, most preferred first; empty when it cannot stream.</summary>
     public string[] RemoteCodecs { get; private set; } = Array.Empty<string>();
     public bool IsConnected => _stream != null && _disposed == 0 && !_closed;
 
     /// <summary>The guest clipboard changed; the message lists formats and, for files, names and sizes.</summary>
     public event Action<AgentMessage>? ClipboardChanged;
-    /// <summary>One encoded video frame (header plus payload), raised on the receive thread while a stream runs.</summary>
+    /// <summary>
+    /// One encoded video frame (header plus payload), raised on the receive thread while a stream runs. For a stream
+    /// started with repairs, also each repair of the still screen (<see cref="AgentMessageType.VideoRepair"/> as the
+    /// header's type), so frames and repairs keep their order.
+    /// </summary>
     public event Action<AgentFrame>? VideoFrameReceived;
     /// <summary>The agent ended the stream by itself; the string says why (may be null).</summary>
     public event Action<string?>? VideoStopped;
@@ -248,6 +254,7 @@ public sealed class AgentConnection : IDisposable
                         ClipboardChanged?.Invoke(h);
                         break;
                     case AgentMessageType.VideoFrame:
+                    case AgentMessageType.VideoRepair:
                         VideoFrameReceived?.Invoke(frame);
                         break;
                     case AgentMessageType.VideoStopped:
@@ -360,9 +367,10 @@ public sealed class AgentConnection : IDisposable
     /// The negotiated parameters of a stream, from the agent's <see cref="AgentMessageType.VideoStarted"/> reply.
     /// <paramref name="OffsetX"/>/<paramref name="OffsetY"/> say where the frames sit in the desktop when they show only
     /// part of it (see <see cref="AgentMessage.OffsetX"/>); null when they show the whole desktop. <paramref name="Cursor"/>
-    /// is true when the agent sends the pointer's shape with this stream (<see cref="CursorReceived"/>).
+    /// is true when the agent sends the pointer's shape with this stream (<see cref="CursorReceived"/>), <paramref name="Repair"/>
+    /// when it repairs the still screen with exact pixels (<see cref="AgentMessageType.VideoRepair"/>).
     /// </summary>
-    public sealed record VideoStartInfo(string Codec, int BitrateKbps, int MaxFps, int Width, int Height, string EncoderKind, int? OffsetX = null, int? OffsetY = null, bool Cursor = false);
+    public sealed record VideoStartInfo(string Codec, int BitrateKbps, int MaxFps, int Width, int Height, string EncoderKind, int? OffsetX = null, int? OffsetY = null, bool Cursor = false, bool Repair = false);
 
     /// <summary>
     /// Asks the agent to stream its screen. <paramref name="codecs"/> lists what this side can decode, most preferred
@@ -386,7 +394,15 @@ public sealed class AgentConnection : IDisposable
     /// stream runs (<see cref="CursorReceived"/>), when it can (<see cref="SupportsCursor"/>; the reply's
     /// <see cref="VideoStartInfo.Cursor"/> says). For a viewer without a VNC connection to take them from.
     /// </summary>
-    public async Task<VideoStartInfo> StartVideoAsync(IEnumerable<string> codecs, int bitrateKbps, int maxFps, (int Width, int Height)? area, bool cursor, CancellationToken ct)
+    public Task<VideoStartInfo> StartVideoAsync(IEnumerable<string> codecs, int bitrateKbps, int maxFps, (int Width, int Height)? area, bool cursor, CancellationToken ct) =>
+        StartVideoAsync(codecs, bitrateKbps, maxFps, area, cursor, false, ct);
+
+    /// <summary>
+    /// The same, and with <paramref name="repair"/> the agent also repairs the still screen with exact pixels
+    /// (<see cref="AgentMessageType.VideoRepair"/>, through <see cref="VideoFrameReceived"/>) when it can
+    /// (<see cref="SupportsRepair"/>; the reply's <see cref="VideoStartInfo.Repair"/> says).
+    /// </summary>
+    public async Task<VideoStartInfo> StartVideoAsync(IEnumerable<string> codecs, int bitrateKbps, int maxFps, (int Width, int Height)? area, bool cursor, bool repair, CancellationToken ct)
     {
         if (!SupportsVideo) throw new NotSupportedException("The agent does not stream video.");
         var reply = await RequestAsync(new AgentMessage
@@ -398,11 +414,12 @@ public sealed class AgentConnection : IDisposable
             Width = area?.Width,
             Height = area?.Height,
             Cursor = cursor ? true : null,
+            Repair = repair ? true : null,
         }, default, ct).ConfigureAwait(false);
         var h = reply.Header;
         if (h.Type != AgentMessageType.VideoStarted || string.IsNullOrEmpty(h.Codec))
             throw new AgentProtocolException($"Unexpected reply '{h.Type}' to startVideo.");
-        return new VideoStartInfo(h.Codec, h.Bitrate ?? bitrateKbps, h.MaxFps ?? maxFps, h.Width ?? 0, h.Height ?? 0, h.Encoder ?? AgentVideoEncoder.Software, h.OffsetX, h.OffsetY, h.Cursor == true);
+        return new VideoStartInfo(h.Codec, h.Bitrate ?? bitrateKbps, h.MaxFps ?? maxFps, h.Width ?? 0, h.Height ?? 0, h.Encoder ?? AgentVideoEncoder.Software, h.OffsetX, h.OffsetY, h.Cursor == true, h.Repair == true);
     }
 
     /// <summary>Changes the running stream's bitrate and/or frame-rate cap (null keeps a value), optionally asking for a key frame.</summary>

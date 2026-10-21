@@ -18,6 +18,7 @@
   </Folder>
   <Folder Name="/tools/">
     <Project Path="tools/BetterVnc.Agent/BetterVnc.Agent.csproj" />
+    <Project Path="tools/BetterVnc.AgentBench/BetterVnc.AgentBench.csproj" />
     <Project Path="tools/BetterVnc.DemoServer/BetterVnc.DemoServer.csproj" />
     <Project Path="tools/BetterVnc.IconGen/BetterVnc.IconGen.csproj" />
     <Project Path="tools/BetterVnc.Probe/BetterVnc.Probe.csproj" />

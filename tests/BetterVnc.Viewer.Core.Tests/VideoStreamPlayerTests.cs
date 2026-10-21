@@ -179,4 +179,103 @@ public sealed class VideoStreamPlayerTests : IDisposable
         Assert.Equal(new[] { (1024, 768) }, _agent.Areas);
         Assert.False(areaTimer.IsEnabled);
     }
+
+    /// <summary>Sends a repair and waits until the player has shown it and the UI thread has heard.</summary>
+    private async Task RepairAsync(int sequence, byte blue, params BetterVnc.Agent.Protocol.RepairRect[] rects)
+    {
+        long expected = _player.RepairsShown + 1;
+        _agent.SendRepair(sequence, blue, rects);
+        await _ui.UntilAsync(() => _player.RepairsShown >= expected, $"repair {sequence} to be shown");
+        await Task.Delay(20);
+        await _ui.RunAsync(() => true);
+    }
+
+    private static byte BlueAt(byte[] bgrx, int x, int y) => bgrx[(y * 64 + x) * 4];
+
+    [Fact]
+    public async Task An_agent_that_repairs_the_still_screen_keeps_its_exact_picture_instead_of_falling_back_to_RFB()
+    {
+        _agent.CanRepair = true;
+        await StartAsync();
+        Assert.True(_agent.RepairRequested);
+        await SendAsync(0, keyframe: true);
+        Assert.False(await _ui.RunAsync(() => _player.ShowingExactPicture));
+
+        // The screen went still: the whole picture, exact, replaces the lossy frame.
+        await RepairAsync(1, blue: 7);
+        var picture = Assert.IsType<byte[]>(_view.LastPicture);
+        Assert.All(Enumerable.Range(0, 64 * 48), i => { Assert.Equal(7, picture[i * 4]); Assert.Equal(255, picture[i * 4 + 3]); });
+        Assert.True(await _ui.RunAsync(() => _player.ShowingExactPicture));
+
+        // IdleAfter later nothing switches to the VNC framebuffer, whose picture may be older.
+        await IdleTimer.FireAsync();
+        Assert.False(_player.IdleFallbackActive);
+        Assert.Equal(0, _view.FramebufferShown);
+        Assert.Equal(0, _rfb.Refreshes);
+        Assert.Equal(VideoStreamPlayer.RfbIntervalWhileStreaming, _rfb.UpdateInterval);
+
+        // A later repair paints over the earlier ones: only its rectangle changes.
+        await SendAsync(1, keyframe: false);
+        Assert.False(await _ui.RunAsync(() => _player.ShowingExactPicture));
+        await RepairAsync(2, blue: 9, new BetterVnc.Agent.Protocol.RepairRect(8, 8, 16, 16));
+        picture = _view.LastPicture!;
+        Assert.Equal(9, BlueAt(picture, 8, 8));
+        Assert.Equal(9, BlueAt(picture, 23, 23));
+        Assert.Equal(7, BlueAt(picture, 24, 8));
+        Assert.Equal(7, BlueAt(picture, 0, 0));
+        Assert.True(await _ui.RunAsync(() => _player.ShowingExactPicture));
+        Assert.Equal(0, _agent.KeyframeRequests);
+        _ui.ThrowIfFailed();
+    }
+
+    [Fact]
+    public async Task A_lost_repair_hides_the_picture_until_a_whole_one_comes()
+    {
+        _agent.CanRepair = true;
+        await StartAsync();
+        await SendAsync(0, keyframe: true);
+        await RepairAsync(1, blue: 7);
+
+        // Repair 2 never arrived: repair 3 alone would leave part of the picture as it was before 2, so it is not shown.
+        _agent.SendRepair(3, 9, new BetterVnc.Agent.Protocol.RepairRect(0, 0, 8, 8));
+        await _ui.UntilAsync(() => _agent.KeyframeRequests == 1, "a key frame request");
+        Assert.Equal(1, _player.RepairsShown);
+
+        // The key frame brings a whole repair once the screen is still again, and that is shown.
+        await SendAsync(1, keyframe: true);
+        await RepairAsync(4, blue: 11);
+        Assert.Equal(11, BlueAt(_view.LastPicture!, 0, 0));
+        _ui.ThrowIfFailed();
+    }
+
+    [Fact]
+    public async Task A_repair_that_comes_after_the_fallback_to_RFB_brings_the_exact_stream_picture_back()
+    {
+        _agent.CanRepair = true;
+        await StartAsync();
+        await SendAsync(0, keyframe: true);
+
+        // The repair is late (a slow link): the old fallback runs first...
+        await IdleTimer.FireAsync();
+        Assert.True(_player.IdleFallbackActive);
+        Assert.Equal(TimeSpan.Zero, _rfb.UpdateInterval);
+
+        // ...and the repair puts the exact picture back on the stream's surface, with RFB on its trickle again.
+        await RepairAsync(1, blue: 7);
+        Assert.False(_player.IdleFallbackActive);
+        Assert.True(await _ui.RunAsync(() => _player.ShowingExactPicture));
+        Assert.Equal(VideoStreamPlayer.RfbIntervalWhileStreaming, _rfb.UpdateInterval);
+        _ui.ThrowIfFailed();
+    }
+
+    [Fact]
+    public async Task An_agent_without_repairs_is_still_asked_and_the_stream_falls_back_to_RFB_as_before()
+    {
+        await StartAsync();
+        Assert.True(_agent.RepairRequested);
+        await SendAsync(0, keyframe: true);
+        await IdleTimer.FireAsync();
+        Assert.True(_player.IdleFallbackActive);
+        Assert.Equal(1, _rfb.Refreshes);
+    }
 }

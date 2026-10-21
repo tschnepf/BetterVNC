@@ -75,8 +75,12 @@ Interfaces (the names are suggestions):
 
 - **`IUiThread`:** post, invoke and timers. Replaces `Dispatcher` and `DispatcherTimer` in `AgentClient` and
   `VideoStreamPlayer`.
-- **`ISecretStore`:** protect and unprotect. Stored values get a prefix (`dpapi:`, `keychain:`, `secret-service:`), so a
-  `profiles.json` copied to another OS fails visibly instead of quietly reading as "no password".
+- **`ISecretStore`:** protect and unprotect. Values written on Windows stay as they are today: base64 of the DPAPI
+  bytes, with **no prefix**, because older viewers share `profiles.json` and can't read a prefixed value. Only the new
+  stores tag what they write: `keychain:` on macOS and `secret-service:` on Linux. Base64 has no colon, so the rule is
+  unambiguous: no prefix means DPAPI. A `profiles.json` copied to another OS then fails visibly ("This password was
+  saved on Windows; enter it again") instead of quietly reading as "no password", with no migration and no cut-over
+  date. Decided 2026-10-20.
 - **`ILocalClipboard`:** `IGuestClipboard` (formats, change token, files) plus a change event where the OS has one.
 - **`IAudioSink`:** `Start(rate, channels, bits)`, `Feed`, `Stop`. The QEMU audio stream is plain PCM.
 - **`IKeyboardLayout`:** physical key plus modifiers to keysym, with Ctrl and Alt stripped and AltGr kept, as
@@ -234,6 +238,9 @@ windows never activated except for fullscreen:
 
 - **Saved passwords:** Keychain generic-password items (`SecItemAdd`, `SecItemCopyMatching`), through P/Invoke to
   Security.framework.
+  - The value in `profiles.json` is `keychain:` plus a reference to the item, not ciphertext, so deleting a profile
+    must also delete its items.
+  - A value without a prefix was saved on Windows: say so and ask for the password again.
 - **Clipboard:** the agent's `MacClipboard` works as is: `pbcopy`/`osascript`, polled once a second. If that delay
   shows, write a native `NSPasteboard` version through `objc_msgSend`, as `Tray/MacStatusItem.cs` already does for the
   menu bar.
@@ -265,8 +272,11 @@ modes, and fullscreen with Cmd capture.
 
 **Platform services:**
 
-- **Saved passwords:** Secret Service over D-Bus, through libsecret or `secret-tool`. Give a clear error when no
-  keyring is running, as on headless setups or bare window managers, and offer an opt-in unencrypted fallback.
+- **Saved passwords:** Secret Service over D-Bus, through libsecret or `secret-tool`.
+  - Values are written with the `secret-service:` prefix.
+  - Give a clear error when no keyring is running, as on headless setups or bare window managers, and offer an opt-in
+    unencrypted fallback with a prefix of its own.
+  - A value without a prefix was saved on Windows, as on macOS.
 - **Clipboard:** the agent's `LinuxClipboard` (`wl-copy`/`wl-paste` or `xclip`) as is.
 - **Audio:** libpulse-simple (`pa_simple_new`, `pa_simple_write`). PipeWire serves it through pipewire-pulse.
 - **Keysyms:** xkbcommon (`xkb_state_key_get_one_sym`), using a table from `PhysicalKey` to evdev codes.

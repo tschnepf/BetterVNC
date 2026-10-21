@@ -22,6 +22,11 @@ namespace BetterVnc.Viewer.Core.Services;
 /// pointer's shape. There is no lossless picture to fall back to, so when the screen goes still the player asks for
 /// one key frame instead: the last delta frame can carry compression residue (a faint trace where a window was), which
 /// would otherwise stay until that part of the screen changes.
+/// An agent that repairs the still screen (<see cref="AgentMessageType.VideoRepair"/>) makes both of those unnecessary:
+/// shortly after the screen goes still it sends the exact pixels of what its frames showed lossy, the player paints them
+/// onto a picture of its own and shows that, and neither the switch to RFB (whose framebuffer can be a second old and
+/// whose server, in a VM, can take as long to send the update) nor the key frame happens. They remain the fallback for
+/// agents without repairs, and for a repair that does not arrive in time.
 /// </summary>
 public sealed class VideoStreamPlayer : IDisposable
 {
@@ -59,10 +64,13 @@ public sealed class VideoStreamPlayer : IDisposable
     // Sessions without VNC: the still screen was redrawn by a key frame since the last change; and when that was asked.
     private bool _stillRefreshed;
     private long _stillRefreshAskedAt;
+    // The agent repairs the still screen (it said so at the start); UI thread: the picture showing is such a repair.
+    private bool _repairs;
+    private bool _exact;
     private bool _disposed;
 
     // statistics (read from the UI thread, written from the decode thread; slightly stale is fine)
-    private long _bytesReceived, _framesReceived, _framesDecoded, _framesSkipped;
+    private long _bytesReceived, _framesReceived, _framesDecoded, _framesSkipped, _repairsShown;
     private long _bytesAtRate;
     private DateTime _rateTime = DateTime.UtcNow;
 
@@ -96,6 +104,10 @@ public sealed class VideoStreamPlayer : IDisposable
     public long FramesDecoded => Interlocked.Read(ref _framesDecoded);
     public long FramesSkipped => Interlocked.Read(ref _framesSkipped);
     public long BytesReceived => Interlocked.Read(ref _bytesReceived);
+    /// <summary>Repairs of the still screen painted and shown since the stream started.</summary>
+    public long RepairsShown => Interlocked.Read(ref _repairsShown);
+    /// <summary>True while the picture is the agent's exact repair of the still screen (no frame since). UI thread.</summary>
+    public bool ShowingExactPicture => IsStreaming && _exact;
     /// <summary>How the current stream is decoded and shown, for the status bar ("DXVA → GPU", "software → WPF"); null before the first picture.</summary>
     public string? DecodePath { get; private set; }
 
@@ -132,7 +144,7 @@ public sealed class VideoStreamPlayer : IDisposable
         // The agent encodes at most the size the picture is shown at (a Mac scales on its GPU), so it lands here 1:1.
         var area = _view.PictureArea;
         // Without VNC nothing else tells this side what the pointer looks like.
-        var info = await _agent.StartStreamAsync(mode.BitrateKbps, mode.MaxFps, area, cursor: _client == null).ConfigureAwait(true);
+        var info = await _agent.StartStreamAsync(mode.BitrateKbps, mode.MaxFps, area, cursor: _client == null, repair: true).ConfigureAwait(true);
         _sentArea = area;
         Mode = mode;
         DecodePath = null;
@@ -141,10 +153,13 @@ public sealed class VideoStreamPlayer : IDisposable
         Interlocked.Exchange(ref _framesReceived, 0);
         Interlocked.Exchange(ref _framesDecoded, 0);
         Interlocked.Exchange(ref _framesSkipped, 0);
+        Interlocked.Exchange(ref _repairsShown, 0);
         _bytesAtRate = 0;
         _decodeLoop ??= Task.Run(() => DecodeLoopAsync(_cts.Token));
         IdleFallbackActive = false;
         _stillRefreshed = false;
+        _repairs = info.Repair;
+        _exact = false;
         // RFB keeps running at a trickle: cursor shapes and resizes still arrive, pixels mostly come from the stream.
         if (_client != null) _client.UpdateInterval = RfbIntervalWhileStreaming;
         _idleTimer.Interval = _client != null ? IdleAfter : StillRedrawAfter;
@@ -153,7 +168,7 @@ public sealed class VideoStreamPlayer : IDisposable
         string where = info.OffsetX is not { } ox ? ""
             : _client != null ? $" (the primary display, at {ox},{info.OffsetY ?? 0} of the desktop; the other displays stay on VNC)"
             : " (the primary display only: the desktop is too large to stream whole)";
-        Message?.Invoke($"Streaming {info.Codec} {info.Width}×{info.Height}{where} from the guest agent ({info.EncoderKind} encoder, {info.BitrateKbps / 1000.0:0.#} Mbit/s, {info.MaxFps} fps max)");
+        Message?.Invoke($"Streaming {info.Codec} {info.Width}×{info.Height}{where} from the guest agent ({info.EncoderKind} encoder, {info.BitrateKbps / 1000.0:0.#} Mbit/s, {info.MaxFps} fps max{(info.Repair ? ", exact pixels once the screen is still" : "")})");
     }
 
     /// <summary>Stops the stream and returns the picture to RFB with a full lossless update.</summary>
@@ -213,9 +228,9 @@ public sealed class VideoStreamPlayer : IDisposable
     private void OnFrame(AgentFrame frame)
     {
         if (!IsStreaming) return;
-        Interlocked.Increment(ref _framesReceived);
+        if (frame.Header.Type != AgentMessageType.VideoRepair) Interlocked.Increment(ref _framesReceived);
         Interlocked.Add(ref _bytesReceived, frame.Payload.Length);
-        _frames.Writer.TryWrite(frame);
+        _frames.Writer.TryWrite(frame); // repairs too, so they stay in order with the frames
     }
 
     private byte[] Rent(int size)
@@ -272,6 +287,7 @@ public sealed class VideoStreamPlayer : IDisposable
         bool softwareOnly = false;     // the GPU path failed on this stream: decode on the CPU from then on
         bool reportDecoder = false;    // describe the decode path once the first picture shows what it really is
         bool reportedJpeg = false;
+        var canvas = new RepairCanvas();
         try
         {
             await foreach (var frame in _frames.Reader.ReadAllAsync(ct).ConfigureAwait(false))
@@ -296,6 +312,13 @@ public sealed class VideoStreamPlayer : IDisposable
                     _lostFrames = false;
                     h264?.Dispose();
                     h264 = null;
+                    canvas = new RepairCanvas();
+                }
+
+                if (h.Type == AgentMessageType.VideoRepair)
+                {
+                    PaintRepair(frame, offset, canvas);
+                    continue;
                 }
 
                 try
@@ -401,9 +424,78 @@ public sealed class VideoStreamPlayer : IDisposable
         finally { h264?.Dispose(); }
     }
 
+    /// <summary>The picture the agent's repairs build up, exact where they painted it (decode thread).</summary>
+    private sealed class RepairCanvas
+    {
+        public byte[]? Pixels;
+        public int Width, Height;
+        /// <summary>Every part of it is painted: a whole repair arrived, and none was lost since.</summary>
+        public bool Complete;
+        public int? LastSequence;
+    }
+
+    /// <summary>Inflating a repair of the whole screen is spread over this many threads.</summary>
+    private static readonly int RepairThreads = Math.Max(1, Environment.ProcessorCount / 2);
+
+    /// <summary>
+    /// Paints a repair onto the canvas and, once the canvas holds all of the picture, shows it: the exact picture replaces
+    /// the lossy one. A lost or broken repair leaves holes in it, so the player asks for a key frame, which brings a
+    /// repair of the whole picture once the screen is still.
+    /// </summary>
+    private void PaintRepair(AgentFrame frame, (int X, int Y)? offset, RepairCanvas canvas)
+    {
+        var h = frame.Header;
+        var info = _agent.StreamInfo;
+        int width = h.Width ?? info?.Width ?? 0, height = h.Height ?? info?.Height ?? 0;
+        if (width <= 0 || height <= 0) return;
+        if (canvas.Pixels == null || canvas.Width != width || canvas.Height != height)
+        {
+            canvas.Pixels = new byte[width * height * 4];
+            canvas.Width = width;
+            canvas.Height = height;
+            canvas.Complete = false;
+        }
+        if (canvas.LastSequence is { } last && h.Sequence is { } sequence && sequence != last + 1) canvas.Complete = false;
+        canvas.LastSequence = h.Sequence;
+        try { RepairPayload.Decode(frame.Payload, canvas.Pixels, width, height, RepairThreads); }
+        catch (AgentProtocolException ex)
+        {
+            canvas.Complete = false;
+            Report("Repair of the still screen failed: " + ex.Message);
+        }
+        if (h.Keyframe == true) canvas.Complete = true;
+        if (!canvas.Complete)
+        {
+            RequestKeyframe();
+            return;
+        }
+        if (_frames.Reader.Count > 0) return; // something newer is on its way; the canvas stays up to date for later
+        if (!_view.PresentVideoFrame(canvas.Pixels, width, height, offset))
+        {
+            var copy = Rent(canvas.Pixels.Length);
+            Buffer.BlockCopy(canvas.Pixels, 0, copy, 0, canvas.Pixels.Length);
+            _view.PresentExternalFrame(copy, width, height, Return, offset);
+        }
+        Interlocked.Increment(ref _repairsShown);
+        _ui.Post(OnRepairPresented, UiPriority.Background);
+    }
+
+    private void OnRepairPresented()
+    {
+        if (!IsStreaming) return;
+        _exact = true;
+        if (IdleFallbackActive && _client != null)
+        {
+            // The repair came after the switch to the VNC picture, and showing it brought the stream's surface back.
+            IdleFallbackActive = false;
+            _client.UpdateInterval = RfbIntervalWhileStreaming;
+        }
+    }
+
     private void OnFramePresented()
     {
         if (!IsStreaming) return;
+        _exact = false;
         if (_client == null)
         {
             // The first frame after asking is (most likely) the key frame that redraws the still screen; anything later
@@ -427,6 +519,8 @@ public sealed class VideoStreamPlayer : IDisposable
     private void OnIdle()
     {
         _idleTimer.Stop();
+        // The agent repaired the still screen: the picture is exact and current already.
+        if (_repairs && _exact) return;
         if (_client == null)
         {
             if (IsStreaming && !_stillRefreshed) _ = RedrawStillScreenAsync();

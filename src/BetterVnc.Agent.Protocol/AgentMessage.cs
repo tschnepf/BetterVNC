@@ -84,6 +84,17 @@ public static class AgentMessageType
     public const string StopVideo = "stopVideo";
     /// <summary>Agent to viewer, unsolicited while a stream runs: one encoded frame in the payload; see <see cref="AgentMessage.Keyframe"/>, <see cref="AgentMessage.Timestamp"/>.</summary>
     public const string VideoFrame = "videoFrame";
+    /// <summary>
+    /// Agent to viewer, unsolicited while a stream that asked for them (<see cref="AgentMessage.Repair"/> on
+    /// <see cref="StartVideo"/>) runs: shortly after the screen went still, the exact pixels of everything the lossy frames
+    /// showed since the previous repair (<see cref="RepairPayload"/>), in the frames' coordinates and size
+    /// (<see cref="AgentMessage.Width"/>, <see cref="AgentMessage.Height"/>, <see cref="AgentMessage.OffsetX"/>). Painted
+    /// over the previous repairs, they give the picture exactly as it is on the guest's screen. <see cref="AgentMessage.Keyframe"/>
+    /// is true on a repair of the whole picture, which needs no earlier ones; <see cref="AgentMessage.Sequence"/> counts
+    /// repairs on their own, so a gap means one was lost and the picture is exact again only after the next whole one
+    /// (a key frame request brings one). Comes in order with the frames, on the same connection.
+    /// </summary>
+    public const string VideoRepair = "videoRepair";
     /// <summary>Agent to viewer, unsolicited: the stream ended on the agent's side (capture failed, session locked); <see cref="AgentMessage.Message"/> says why.</summary>
     public const string VideoStopped = "videoStopped";
 }
@@ -133,6 +144,8 @@ public static class AgentFeature
     public const string Input = "input";
     /// <summary>The agent sends the pointer's shape (<see cref="AgentMessageType.Cursor"/>) with a stream that asks for it.</summary>
     public const string Cursor = "cursor";
+    /// <summary>The agent repairs the still screen with exact pixels (<see cref="AgentMessageType.VideoRepair"/>) in a stream that asks for it.</summary>
+    public const string Repair = "repair";
 }
 
 /// <summary>Bits of <see cref="AgentMessage.Buttons"/> in a pointer message.</summary>
@@ -259,6 +272,11 @@ public sealed class AgentMessage
     /// runs, for a viewer with no VNC connection to get them from. videoStarted: true when the agent will.
     /// </summary>
     public bool? Cursor { get; set; }
+    /// <summary>
+    /// startVideo: send <see cref="AgentMessageType.VideoRepair"/> messages, so the still screen becomes exact without a
+    /// second protocol. videoStarted: true when the agent will (its encoder is lossy and it keeps the captured picture).
+    /// </summary>
+    public bool? Repair { get; set; }
 
     // ---- video
     /// <summary>Welcome: codecs the agent can encode. startVideo: codecs the viewer can decode, most preferred first.</summary>

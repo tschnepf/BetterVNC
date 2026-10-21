@@ -5,15 +5,13 @@ using System.Text;
 namespace BetterVnc.Platform;
 
 /// <summary>
-/// Windows DPAPI, scoped to the current user. Values are base64 of the protected bytes. Every build so far has written
-/// them without the "dpapi:" prefix, and older viewers sharing %AppData%\BetterVNC\profiles.json cannot read a prefixed
-/// value, so this store keeps writing the bare form and reads both. A bare value therefore means DPAPI to every store.
+/// Windows DPAPI, scoped to the current user. Values are base64 of the protected bytes, with no prefix: that is what
+/// every build has written, and older viewers sharing %AppData%\BetterVNC\profiles.json read nothing else. A value
+/// without a prefix therefore means DPAPI to every store (see <see cref="ISecretStore"/>).
 /// </summary>
 [SupportedOSPlatform("windows")]
 public sealed class DpapiSecretStore : ISecretStore
 {
-    public const string Prefix = "dpapi:";
-
     public string? Protect(string? plain)
     {
         if (string.IsNullOrEmpty(plain)) return null;
@@ -24,10 +22,9 @@ public sealed class DpapiSecretStore : ISecretStore
     public string? Unprotect(string? protectedValue)
     {
         if (string.IsNullOrEmpty(protectedValue)) return null;
-        var value = protectedValue.StartsWith(Prefix, StringComparison.Ordinal) ? protectedValue[Prefix.Length..] : protectedValue;
         try
         {
-            var bytes = ProtectedData.Unprotect(Convert.FromBase64String(value), null, DataProtectionScope.CurrentUser);
+            var bytes = ProtectedData.Unprotect(Convert.FromBase64String(protectedValue), null, DataProtectionScope.CurrentUser);
             return Encoding.UTF8.GetString(bytes);
         }
         catch

@@ -229,7 +229,10 @@ fails mid-session**, rather than ending the stream. Take Jump's rate-control cho
 
 **Still-screen refinement** (comparison doc, 3.4) suits CPU-only VMs well. It spends encoder
 time exactly when the screen is still, which is when the vCPUs are otherwise idle, and it can
-replace the 700 ms switch to a lossless RFB refresh.
+replace the 700 ms switch to a lossless RFB refresh. Done (2026-10-20) as lossless repairs from the
+captured picture, with no second encode. Measurements, including the ~15 fps composition ceiling
+of a VM without a GPU and QEMU's 0.5–1.2 s VNC latency, are in
+[STILL-SCREEN-REPAIR.md](STILL-SCREEN-REPAIR.md).
 
 ### 5.4 Encode fewer pixels: match the viewer's size
 
