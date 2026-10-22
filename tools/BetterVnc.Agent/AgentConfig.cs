@@ -42,18 +42,13 @@ public sealed class AgentConfig
     public bool EnableInput { get; set; } = true;
     /// <summary>Multiplier for the scroll distance the viewer sends (1.0 = one wheel notch moves what it moves on the Windows side).</summary>
     public double ScrollScale { get; set; } = 1.0;
-    /// <summary>macOS only: flip the direction, for setups where the system applies "natural" scrolling to injected events too.</summary>
+    /// <summary>macOS agent only: flip the direction, for setups where the system applies "natural" scrolling to injected events too.</summary>
     public bool ScrollInvert { get; set; }
-    /// <summary>macOS only: forward gesture phases so apps treat the stream like a trackpad gesture. Turn off if an app misbehaves.</summary>
+    /// <summary>macOS agent only: forward gesture phases so apps treat the stream like a trackpad gesture. Turn off if an app misbehaves.</summary>
     public bool ScrollPhases { get; set; } = true;
 
-    /// <summary>
-    /// Next to the program, except inside a macOS app bundle: writing there would break the bundle's signature (and with it
-    /// the privacy permissions), so the agent uses the installed location, ~/Library/Application Support/BetterVNC.
-    /// </summary>
-    public static string DefaultPath => MacAppBundle.EnclosingBundle(Path.Combine(AppContext.BaseDirectory, MacAppBundle.ExecutableName)) != null
-        ? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), "Library", "Application Support", "BetterVNC", FileName)
-        : Path.Combine(AppContext.BaseDirectory, FileName);
+    /// <summary>Next to the program.</summary>
+    public static string DefaultPath => Path.Combine(AppContext.BaseDirectory, FileName);
 
     public static AgentConfig? Load(string path)
     {

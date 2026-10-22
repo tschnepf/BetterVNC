@@ -42,11 +42,22 @@ installers and portable builds; nothing else needs to be installed.
 |---|---|---|
 | BetterVNC viewer (Windows x64) | `BetterVNC-<version>-setup.exe` | Installs to Program Files (or just for you), Start menu entry, optional desktop shortcut and `vnc://` link handler, uninstaller in Settings. Run a newer one to upgrade. |
 | Guest agent, Windows VM | `bettervnc-agent-<version>-setup.exe` | Run inside the VM as the user who will use it: installs to `%LOCALAPPDATA%\Programs\BetterVNC Agent`, registers the start-at-sign-in task, adds the firewall rule (when elevated) and starts the tray icon. Upgrades keep the config and pairings; uninstall from Settings. |
-| Guest agent, Mac | `bettervnc-agent-<version>-macos.pkg` | One package for Apple silicon and Intel: installs under `/usr/local`, then sets the agent up for the signed-in user (menu bar item, LaunchAgent) and starts it. Remove with `sudo /usr/local/libexec/bettervnc-agent/uninstall.sh`. |
+| Guest agent, Mac | `bettervnc-agent-<version>-macos.pkg` | One package for Apple silicon and Intel (macOS 12.3 or later): installs **BetterVNC Agent**, a native app, in Applications, then sets it up for the signed-in user (menu bar item, LaunchAgent) and starts it. Run a newer one to upgrade, including over 0.0.4 (below). Remove with `sudo /usr/local/libexec/bettervnc-agent/uninstall.sh`. |
 
 Portable builds sit next to them: `BetterVNC-<version>-win-x64.zip` (unzip, run `BetterVNC.exe`),
-`bettervnc-agent-<version>-win-x64.zip` (unzip, run `bettervnc-agent install`) and
-`bettervnc-agent-<version>-{linux-x64,osx-arm64,osx-x64}.tar.gz` (unpack, run `sh install.sh`).
+`bettervnc-agent-<version>-win-x64.zip` (unzip, run `bettervnc-agent install`),
+`bettervnc-agent-<version>-linux-x64.tar.gz` (unpack, run `sh install.sh`) and
+`BetterVNC-Agent-<version>-macos.zip` (unzip, run `"BetterVNC Agent.app/Contents/MacOS/bettervnc-agent" install`,
+which copies the app to Applications; then delete the unzipped copy).
+
+**Upgrading a Mac from 0.0.4.** Up to 0.0.4 the Mac agent was the .NET agent, which built its own
+`BetterVNC Agent.app` in `~/Library/Application Support/BetterVNC`. It is now a native app in
+`/Applications`. The package (or `install` from the zip) stops the old agent, deletes its app (and any
+other installed copy, so exactly one is left), points the LaunchAgent `com.bettervnc.agent` at
+`/Applications/BetterVNC Agent.app` and keeps `bettervnc-agent.json` next to where the old app was, so the
+pairings and the token carry over and viewers connect without pairing again. To macOS it is a new program:
+grant it Accessibility (smooth scrolling) and Screen Recording (the Stream picture modes) again; its menu
+bar item's **Permissions…** walks through both.
 
 `BetterVNC-<version>-preview-win-x64.zip` is a preview of the new cross-platform viewer, built with Avalonia
 (see [docs/CROSS-PLATFORM-VIEWER.md](docs/CROSS-PLATFORM-VIEWER.md)). Unzip it to a folder of its own and run
@@ -56,8 +67,8 @@ The installer still installs the WPF viewer.
 The builds are not code-signed, so Windows SmartScreen shows "Windows protected your PC" the first
 time (More info, Run anyway) and macOS asks you to right-click the package and choose Open, or to
 allow it under Privacy & Security. `SHA256SUMS.txt` on the release lists the checksums. Releases are
-produced by `.github/workflows/release.yml` whenever a `v*` tag is pushed, with the assembly versions
-taken from the tag; the installer sources are in `installers/`.
+produced by `.github/workflows/release.yml` whenever a `v*` tag is pushed, with every version (the
+assemblies', the Mac app's and the packages') taken from the tag; the installer sources are in `installers/`.
 
 ## Building
 
@@ -96,7 +107,7 @@ release workflow runs every test executable the same way, and the others are bui
 
 | Project | Covers | Target |
 |---|---|---|
-| `tests/BetterVnc.Agent.Tests` | agent protocol, pairing, scrolling, video channel, Mac helper reader | `net10.0` |
+| `tests/BetterVnc.Agent.Tests` | agent protocol, pairing, scrolling, input, video channel and repairs, single-instance lock | `net10.0` |
 | `tests/BetterVnc.Media.Tests` | pixel conversion, Annex B, dirty regions, pacing, video layout | `net10.0` |
 | `tests/BetterVnc.Media.Windows.Tests` | Media Foundation encode and decode, Desktop Duplication, DXVA and the swap chain | `net10.0-windows` |
 | `tests/BetterVnc.Viewer.Core.Tests` | the session controller and stream player, with fakes and no GUI | `net10.0` |
@@ -158,9 +169,10 @@ a drop folder such as `~/Desktop/Drop`.
 
 ## Guest agent
 
-RFB carries text only. The **BetterVNC guest agent** (`bettervnc-agent`, in `tools/BetterVnc.Agent`)
-is a small program that runs inside the VM or on the Mac and gives the viewer a second channel next
-to VNC. With it connected the clipboard behaves like an RDP session:
+RFB carries text only. The **BetterVNC guest agent** is a small program that runs inside the VM or on
+the Mac and gives the viewer a second channel next to VNC: `bettervnc-agent` (C#, `tools/BetterVnc.Agent`)
+on Windows and Linux, and **BetterVNC Agent**, a native Swift app (`tools/BetterVnc.Agent.Mac`), on a
+Mac. Both speak the same protocol (`src/BetterVnc.Agent.Protocol`). With it connected the clipboard behaves like an RDP session:
 
 | Direction | What happens |
 |---|---|
@@ -256,9 +268,7 @@ stream of scrolling text-like detail into the real session view and measures the
 | Software decode → CPU NV12 to BGRX → WPF (the path before GPU presentation) | 301 % | 19 fps |
 
 **On a Mac** the stream replaces Apple's lossless Screen Sharing picture while things move, which is
-where the Mac gains most. The agent starts `bettervnc-capture`, a small Swift program installed next
-to it (source in `tools/BetterVnc.Agent.MacCapture`), for each stream. It captures the main display
-with ScreenCaptureKit, which hands over a frame only when something changed and scales it on the GPU,
+where the Mac gains most. The agent captures the main display in its own process with ScreenCaptureKit, which hands over a frame only when something changed and scales it on the GPU,
 and encodes it with VideoToolbox in hardware: real-time mode with low-latency rate control where the
 Mac has it, no frame reordering, the requested bitrate with bursts capped at 1.5 times the average
 over any second, key frames only at the start and on request. The stream comes at the size the
@@ -277,19 +287,23 @@ part of the VNC picture and the other displays stay on VNC. The Windows agent ta
 does not scale yet: it streams at the desktop's size and the viewer scales.
 
 **Screen Recording permission (macOS).** Capturing the screen needs the Screen Recording permission
-(called Screen & System Audio Recording since macOS 15). On a Mac the agent is installed as an
-application, **BetterVNC Agent** (`~/Library/Application Support/BetterVNC/BetterVNC Agent.app`), because
-macOS lists only applications in its privacy settings; a bare program gets a hidden entry that cannot
-be switched on. The first time a viewer starts a stream, macOS shows its prompt on the Mac's screen
+(called Screen & System Audio Recording since macOS 15), which belongs to the app,
+**BetterVNC Agent** (`/Applications/BetterVNC Agent.app`, bundle id `com.bettervnc.agent`). The first time a viewer starts a stream, macOS shows its prompt on the Mac's screen
 (you can answer it through the VNC picture) and adds **BetterVNC Agent**, switched off, to System
 Settings, Privacy & Security, Screen & System Audio Recording. Switch it on, accept **Quit & Reopen**
 if macOS offers it (the agent comes straight back), and the stream starts by itself if a Stream mode
 is still selected. Until then the stream fails with a message saying so and the viewer stays on VNC.
-The agent is signed ad hoc, so macOS ties the permission to this exact build: after an upgrade the
-switch can look on while streaming fails; switch it off and on again (or remove the entry with **−**).
+macOS keeps the code requirement it saw when it first listed the agent. For an app signed with a
+certificate that names the bundle id and the certificate, so the permission survives updates. For an
+ad-hoc signed build (what `build.sh` makes without an identity) it is that one build: after an update
+the switch can look on while streaming fails, and switching it off and on does not help. The entry
+has to be removed (**−**, or `tccutil reset ScreenCapture com.bettervnc.agent`) and granted again;
+the wizard below does that. To keep the permissions across your own rebuilds, build with a
+certificate: `sh tools/BetterVnc.Agent.Mac/build.sh --sign "Apple Development"` (any name or hash
+that `security find-identity -v -p codesigning` shows; `BETTERVNC_CODESIGN_IDENTITY` works too).
 The menu bar item's **Permissions…** walks through both permissions: it says which are missing and
-what each is for, opens the right page of System Settings, waits for the switch and then moves on to
-the next one. It also comes up by itself at login, and when a stream or a scroll is refused, whenever
+what each is for, clears the agent's old entry, asks macOS again so the agent is listed afresh, opens
+the right page of System Settings, waits for the switch and then moves on to the next one. It also comes up by itself at login, and when a stream or a scroll is refused, whenever
 a permission is missing.
 macOS 15 and later can ask again from time to time whether the agent may keep recording. At startup
 the agent's log says `Screen streaming: … Screen Recording permission not granted yet` while it is
@@ -406,20 +420,30 @@ reach it through an SSH tunnel.
 powershell -ExecutionPolicy Bypass -File tools/BetterVnc.Agent/publish-agent.ps1
 ```
 
-This publishes the agent as one self-contained executable per platform (no .NET needed in the
-guest) and wraps each in an archive under `publish/`: `bettervnc-agent-<version>-win-x64.zip`,
-`…-linux-x64.tar.gz`, `…-linux-arm64.tar.gz`, `…-osx-arm64.tar.gz` (Apple Silicon) and
-`…-osx-x64.tar.gz` (Intel Mac). Each archive holds the binary, `INSTALL.txt` and, for Linux and
-macOS, `install.sh`. `-Rids osx-arm64,win-x64` limits the set. The Mac archives also need the
-screen capture helper, which only builds on a Mac (`sh tools/BetterVnc.Agent.MacCapture/build.sh`,
-Xcode or the Command Line Tools); copy the result to this machine and pass
-`-MacCapture <path to bettervnc-capture>`. Without it the Mac archives work but cannot stream. The
-release workflow builds it on its macOS runner.
+This publishes the Windows and Linux agent as one self-contained executable per platform (no .NET
+needed in the guest) and wraps each in an archive under `publish/`: `bettervnc-agent-<version>-win-x64.zip`,
+`…-linux-x64.tar.gz` and `…-linux-arm64.tar.gz`. Each archive holds the binary, `INSTALL.txt` and,
+for Linux, `install.sh`. `-Rids linux-x64,win-x64` limits the set.
+
+The Mac agent builds on a Mac with Xcode:
+
+```bash
+sh tools/BetterVnc.Agent.Mac/build.sh [--version 1.2.3] [--sign "Apple Development"]
+sh installers/macos/build-pkg.sh "tools/BetterVnc.Agent.Mac/build/BetterVNC Agent.app" dist
+```
+
+The first makes `tools/BetterVnc.Agent.Mac/build/BetterVNC Agent.app`, one universal binary for Apple
+silicon and Intel, signed (ad hoc without `--sign`; a certificate gets the hardened runtime, as
+notarization needs). The release workflow passes the tag as `--version`; without it the app is a
+development build and its version says so, as `git describe` puts it (`0.0.4-12-g5e4e859`: twelve
+commits after v0.0.4), never a number that could pass for a release. The second wraps the app in the
+`.pkg`, which takes its version from the app. `swift test --package-path tools/BetterVnc.Agent.Mac`
+runs its tests. The release workflow does all of it on its macOS runner.
 
 ### Installing
 
 The easiest way is the installer from the [releases page](#download-and-install): `bettervnc-agent-<version>-setup.exe`
-on a Windows guest, `bettervnc-agent-<version>-macos.pkg` on a Mac. Both end by running the same
+on a Windows guest, `bettervnc-agent-<version>-macos.pkg` on a Mac. Both end by running the
 `install` command described here. With a portable archive, copy it to the remote machine, unpack it and
 run the installer once in a terminal there:
 
@@ -427,9 +451,9 @@ run the installer once in a terminal there:
 |---|---|
 | Windows guest | `bettervnc-agent.exe install` (in the unpacked folder) |
 | Linux guest | `tar xzf bettervnc-agent-*-linux-x64.tar.gz && sh bettervnc-agent-*-linux-x64/install.sh` |
-| macOS | `tar xzf bettervnc-agent-*-osx-arm64.tar.gz && sh bettervnc-agent-*-osx-arm64/install.sh` |
+| macOS | `unzip BetterVNC-Agent-*-macos.zip && "BetterVNC Agent.app/Contents/MacOS/bettervnc-agent" install` |
 
-`install` needs no administrator rights. It copies the agent into a per-user location, writes the
+`install` needs no administrator rights. It copies the agent into place, writes the
 config (an existing one with its pairings and token is kept, so reinstalling does not break saved
 connections), registers it to start at login with the OS's own mechanism and starts it:
 
@@ -437,7 +461,7 @@ connections), registers it to start at login with the OS's own mechanism and sta
 |---|---|---|---|
 | Windows | `%LOCALAPPDATA%\Programs\BetterVNC Agent\` | "BetterVNC agent" entry under `HKCU\Software\Microsoft\Windows\CurrentVersion\Run` (at sign-in; the program has no console window); a firewall rule for all network profiles is added if the prompt is elevated, otherwise Windows asks once (tick Public networks there if the machine's network is Public) | next to the program |
 | Linux | `~/.local/bin/bettervnc-agent`, `~/.config/bettervnc-agent.json` | systemd user service `bettervnc-agent` (or `~/.config/autostart` without systemd) | `~/.local/state/` |
-| macOS | `~/Library/Application Support/BetterVNC/` (the program as `BetterVNC Agent.app`, with the capture helper inside) | LaunchAgent `~/Library/LaunchAgents/com.bettervnc.agent.plist` | `~/Library/Logs/bettervnc-agent.log` |
+| macOS | `/Applications/BetterVNC Agent.app` (`~/Applications` when `/Applications` is not writable), config in `~/Library/Application Support/BetterVNC/` | LaunchAgent `~/Library/LaunchAgents/com.bettervnc.agent.plist`, started again only after a crash | next to the config, and `~/Library/Logs/bettervnc-agent.log` |
 
 Options: `install --port 5971` or `--listen 127.0.0.1` (then reach it through an SSH tunnel).
 `install --dry-run` only shows what would be done. `uninstall` stops the agent and removes all of it.
@@ -471,10 +495,10 @@ A running agent picks up command-line changes after a restart; the tray and menu
 ### Running it by hand
 
 `bettervnc-agent` without a command just serves (in the tray or menu bar; `--console` keeps it in the
-terminal instead). On first start it writes `bettervnc-agent.json` next to the executable (or where
-`--config` points) with pairing on and no token. The file also holds `port`, `listen` (`0.0.0.0` or
-`127.0.0.1`), `maxPayloadMb`, `allowPairing`, `token`, `viewers`, `enableVideo`, `enableInput` and the
-scroll settings. The agent must run in the
+terminal instead). On first start it writes `bettervnc-agent.json` next to the executable (on a Mac in
+`~/Library/Application Support/BetterVNC`, or where `--config` points) with pairing on and no token.
+The file also holds `port`, `listen` (`0.0.0.0` or `127.0.0.1`), `maxPayloadMb`, `allowPairing`,
+`token`, `viewers`, `enableVideo`, `enableInput` and the scroll settings. The agent must run in the
 logged-in user's desktop session on every OS, because that is where the clipboard and the approval
 dialog live: not as a Windows service, and on Linux with `DISPLAY` or `WAYLAND_DISPLAY` set.
 
@@ -487,13 +511,14 @@ dialog live: not as a Windows service, and on Linux with `DISPLAY` or `WAYLAND_D
   `text/uri-list` (or GNOME's `x-special/gnome-copied-files` when `XDG_CURRENT_DESKTOP` says GNOME).
   The pairing dialog uses `zenity`, `kdialog` or `xmessage`; without one of them set a token. There is
   no tray icon on Linux; use the command line.
-* **macOS**: text through `pbcopy`/`pbpaste`; images, files, HTML and change detection through
-  `osascript` (JavaScript for Automation against `NSPasteboard`). Nothing needs to be installed. The
-  binary is unsigned, so `install.sh` clears the download quarantine before running it. `install`
-  wraps the agent and the screen capture helper (`bettervnc-capture`) in an application,
-  `BetterVNC Agent.app`, signed ad hoc, so macOS lists it by name for the
-  [Screen Recording](#picture-modes-and-screen-streaming) and [Accessibility](#smooth-scrolling)
-  permissions.
+* **macOS**: a native app. Text, HTML, images (PNG, and TIFF converted) and files go through
+  `NSPasteboard` in the agent's own process; scrolling is CoreGraphics; capture and encoding are
+  ScreenCaptureKit and VideoToolbox; the pairing question and the settings are native dialogs.
+  Nothing needs to be installed. The app is built and signed by `build.sh` and `install` copies it
+  unchanged, so macOS lists it by name for the [Screen Recording](#picture-modes-and-screen-streaming)
+  and [Accessibility](#smooth-scrolling) permissions. One agent runs per config: a second copy, such
+  as the one launchd and macOS's **Quit & Reopen** can both start, sees the lock
+  (`bettervnc-agent.lock` next to the config) and exits.
 
 ### Smooth scrolling
 
@@ -519,12 +544,13 @@ faster Mac), and for macOS `scrollInvert` (if the direction comes out reversed o
 `scrollPhases` (set to `false` if an app misbehaves with trackpad-style gestures). Restart the agent
 after editing.
 
-**macOS permission.** Posting input events requires Accessibility. At startup the agent asks macOS for
+**macOS permission.** Posting input events requires Accessibility. The menu bar's **Permissions…**
+(which also comes up by itself at login and at the first scroll while it is missing) asks macOS for
 it, which adds **BetterVNC Agent**, switched off, to System Settings, Privacy & Security, Accessibility:
-switch it on. If it is not listed, click **+**, press Cmd+Shift+G and enter
-`~/Library/Application Support/BetterVNC/BetterVNC Agent.app`. When you start the agent from Terminal
-for a test, Terminal itself must be allowed instead. The permission is tied to the build: after an
-upgrade, switch the entry off and on again (or remove and re-add it) if scrolling stops. The agent
+switch it on. If it is not listed, click **+** and choose BetterVNC Agent in Applications. When you
+start the agent from Terminal for a test, Terminal itself must be allowed instead. With an ad-hoc
+signature the permission is tied to the build: after an update, remove the entry and grant it again if
+scrolling stops (**Permissions…** does the removing). The agent
 prints `Accessibility permission missing` at startup while it is not granted, and
 `bettervnc-agent probe <host> <token> scroll 0 -240` scrolls the window under the Mac's pointer down by
 240 px to test it. Since the viewer already keeps the Mac's pointer where yours is, scrolling lands in
@@ -538,9 +564,12 @@ the remote clipboard (`pair` instead of the token pairs the probe the way the vi
 `probe … scroll <dx> <dy> [steps]` injects a scroll gesture (pixels, `dy > 0` is up);
 `probe … video [kbit/s] [fps] [seconds] [first-frame.jpg|-] [codec|-] [WxH [WxH]]` starts a screen stream and
 prints frames, bandwidth and frame size per second (the sizes act as a viewer's picture area at the start and halfway).
-The agent framing, authentication and request handling are covered by `tests/BetterVnc.Agent.Tests`
-(an executable like the protocol tests; `dotnet tests/BetterVnc.Agent.Tests/bin/Debug/net10.0/BetterVnc.Agent.Tests.dll`
-also runs it).
+The probe is part of the C# agent and runs on any OS with .NET (`dotnet bettervnc-agent.dll probe …`
+from a `dotnet build` of `tools/BetterVnc.Agent`), so it also tests the Mac agent; the macOS CI
+workflow drives the built app with it. The agent framing, authentication and request handling are
+covered by `tests/BetterVnc.Agent.Tests` (an executable like the protocol tests;
+`dotnet tests/BetterVnc.Agent.Tests/bin/Debug/net10.0/BetterVnc.Agent.Tests.dll` also runs it) and, for
+the Mac agent, by `swift test --package-path tools/BetterVnc.Agent.Mac`.
 
 ## Project layout
 
@@ -554,8 +583,8 @@ src/BetterVnc.Platform        OS services shared by agent and viewer: clipboards
 src/BetterVnc.App             WPF viewer
 tests/                        Protocol tests with a fake RFB server; agent tests with a fake clipboard; media tests;
                               viewer core tests with fakes and no GUI
-tools/BetterVnc.Agent         Guest agent executable (Windows, Linux, macOS)
-tools/BetterVnc.Agent.MacCapture  Screen capture helper of the Mac agent (Swift: ScreenCaptureKit, VideoToolbox; build.sh)
+tools/BetterVnc.Agent         Guest agent for Windows and Linux (C#; also the probe test client)
+tools/BetterVnc.Agent.Mac     Guest agent for macOS: BetterVNC Agent.app (Swift; build.sh, swift test)
 tools/BetterVnc.DemoServer    Development VNC server
 tools/BetterVnc.StreamBench   Plays a 1080p60 H.264 stream into the real session view and measures the viewer's CPU per path
 tools/BetterVnc.AgentBench    Measures a guest's picture as a viewer gets it (agent stream or VNC): input to picture, motion, still-screen exactness

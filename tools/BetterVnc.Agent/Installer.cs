@@ -1,5 +1,4 @@
 using System.Diagnostics;
-using System.Text;
 using BetterVnc.Platform;
 using Microsoft.Win32;
 using BetterVnc.Agent.Protocol;
@@ -10,18 +9,18 @@ namespace BetterVnc.Agent;
 /// <c>bettervnc-agent install</c>: copies the executable into a per-user location, creates the config (keeping existing
 /// pairings and token), registers it to start at login with the OS's own mechanism and starts it right away.
 /// <c>uninstall</c> reverses all of it. <see cref="IsAutostartEnabled"/> / <see cref="SetAutostart"/> back the
-/// "Start at login" switch in the tray and menu bar UIs. No administrator rights are needed on any OS (the Windows
-/// firewall rule is attempted and reported if it needs elevation).
+/// "Start at login" switch in the tray. No administrator rights are needed (the Windows firewall rule is attempted and
+/// reported if it needs elevation). Windows and Linux; the macOS agent is the Swift app in tools/BetterVnc.Agent.Mac.
 /// </summary>
 public static class Installer
 {
     private const string TaskName = "BetterVNC agent";
     private const string RunKey = @"Software\Microsoft\Windows\CurrentVersion\Run";
-    private const string LaunchLabel = "com.bettervnc.agent";
     private const string ServiceName = "bettervnc-agent";
 
     public static int Install(bool dryRun, int? port, string? listen)
     {
+        if (OperatingSystem.IsMacOS()) return MacNotSupported();
         var source = Environment.ProcessPath ?? "";
         if (!dryRun && (source.Length == 0 || Path.GetFileNameWithoutExtension(source).Equals("dotnet", StringComparison.OrdinalIgnoreCase)))
         {
@@ -58,17 +57,7 @@ public static class Installer
         Directory.CreateDirectory(layout.Dir);
         Directory.CreateDirectory(Path.GetDirectoryName(layout.Config)!);
         StopRunning(layout);
-        if (OperatingSystem.IsMacOS())
-        {
-            try { InstallAppBundle(source, layout); }
-            catch (Exception ex)
-            {
-                Console.Error.WriteLine($"Could not build {MacAppBundle.Name}: {ex.Message}");
-                if (File.Exists(layout.Exe)) StartNow(layout); // the previous install is untouched; bring it back
-                return 1;
-            }
-        }
-        else if (!PathsEqual(source, layout.Exe))
+        if (!PathsEqual(source, layout.Exe))
         {
             File.Copy(source, layout.Exe, overwrite: true);
             if (!OperatingSystem.IsWindows()) File.SetUnixFileMode(layout.Exe, Executable);
@@ -90,7 +79,6 @@ public static class Installer
         Console.WriteLine();
         Console.WriteLine("Installed and running.");
         if (OperatingSystem.IsWindows()) Console.WriteLine("Look for the BetterVNC icon in the notification area (tray): it opens the settings.");
-        else if (OperatingSystem.IsMacOS()) Console.WriteLine("Look for the BetterVNC icon in the menu bar: it opens the settings.");
         Console.WriteLine();
         if (cfg.AllowPairing)
         {
@@ -111,6 +99,7 @@ public static class Installer
 
     public static int Uninstall(bool dryRun)
     {
+        if (OperatingSystem.IsMacOS()) return MacNotSupported();
         var layout = Layout.ForThisOs();
         Console.WriteLine($"Removing the BetterVNC guest agent for the current user{(dryRun ? " (dry run)" : "")}:");
         Console.WriteLine($"  {layout.AutostartDescription}");
@@ -123,13 +112,8 @@ public static class Installer
         if (OperatingSystem.IsWindows()) Quiet("netsh", "advfirewall", "firewall", "delete", "rule", $"name={TaskName}");
         if (OperatingSystem.IsLinux()) TryDelete(Path.Combine(Home, ".config", "autostart", "bettervnc-agent.desktop"));
         TryDelete(layout.Config);
+        TryDelete(SingleInstance.LockPath(layout.Config));
         foreach (var f in new[] { "bettervnc-agent.log", "bettervnc-agent.log.1", "run-hidden.vbs" }) TryDelete(Path.Combine(layout.Dir, f));
-        if (OperatingSystem.IsMacOS())
-        {
-            TryDeleteTree(MacAppBundle.EnclosingBundle(layout.Exe)!);
-            foreach (var f in LegacyMacFiles) TryDelete(Path.Combine(layout.Dir, f));
-        }
-        TryDelete(Path.Combine(Home, "Library", "Logs", "bettervnc-agent.log"));
         var self = Environment.ProcessPath;
         if (self != null && PathsEqual(self, layout.Exe) && OperatingSystem.IsWindows())
         {
@@ -147,52 +131,14 @@ public static class Installer
     private const UnixFileMode Executable = UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute
         | UnixFileMode.GroupRead | UnixFileMode.GroupExecute | UnixFileMode.OtherRead | UnixFileMode.OtherExecute;
 
-    /// <summary>What versions before the app bundle installed on macOS, next to the config.</summary>
-    private static readonly string[] LegacyMacFiles = { MacAppBundle.ExecutableName, Video.MacScreenSource.HelperName };
-
-    /// <summary>
-    /// macOS: builds <see cref="MacAppBundle.Name"/> from this agent and the capture helper next to it, signs it ad hoc and
-    /// puts it in place of the installed one. It is built in a staging folder first, so reinstalling from the installed
-    /// copy works and a failure leaves the old install alone; the old bundle is then removed rather than overwritten,
-    /// because macOS kills a program whose signed file changed in place. The bare program and helper of earlier versions go.
-    /// </summary>
-    [System.Runtime.Versioning.SupportedOSPlatform("macos")]
-    private static void InstallAppBundle(string source, Layout layout)
-    {
-        var bundle = MacAppBundle.EnclosingBundle(layout.Exe)!;
-        var stagingDir = Path.Combine(layout.Dir, ".staging");
-        var staging = Path.Combine(stagingDir, MacAppBundle.Name);
-        TryDeleteTree(stagingDir);
-        var helper = Video.MacScreenSource.FindHelper();
-        if (helper == null) Console.WriteLine($"  warning  : {Video.MacScreenSource.HelperName} is not next to this agent, so screen streaming will not be available.");
-        var version = typeof(Installer).Assembly.GetName().Version?.ToString(3) ?? "0.0.0";
-        var exe = MacAppBundle.Write(staging, source, helper, version, MacAppBundle.EmbeddedIcon());
-        File.SetUnixFileMode(exe, Executable);
-        if (helper != null)
-        {
-            var stagedHelper = Path.Combine(Path.GetDirectoryName(exe)!, Video.MacScreenSource.HelperName);
-            File.SetUnixFileMode(stagedHelper, Executable);
-            Run("codesign", "--force", "--sign", "-", stagedHelper);
-        }
-        // Apple silicon runs only signed code, and the bundle's signature is what ties Info.plist, and with it the
-        // privacy permissions, to the program.
-        Run("codesign", "--force", "--sign", "-", staging);
-        TryDeleteTree(bundle);
-        Directory.Move(staging, bundle);
-        TryDeleteTree(stagingDir);
-        Quiet("xattr", "-dr", "com.apple.quarantine", bundle);
-        foreach (var f in LegacyMacFiles) TryDelete(Path.Combine(layout.Dir, f));
-    }
-
     // ------------------------------------------------------------------ autostart
 
-    /// <summary>Whether the agent is registered to start at login (Run entry, LaunchAgent plist or systemd user unit).</summary>
+    /// <summary>Whether the agent is registered to start at login (Run entry, or systemd user unit or autostart entry).</summary>
     public static bool IsAutostartEnabled()
     {
         try
         {
             if (OperatingSystem.IsWindows()) return Registry.CurrentUser.OpenSubKey(RunKey)?.GetValue(TaskName) != null;
-            if (OperatingSystem.IsMacOS()) return File.Exists(Layout.ForThisOs().Autostart);
             if (ProcessRunner.Exists("systemctl")) return ProcessRunner.Run("systemctl", new[] { "--user", "is-enabled", ServiceName }).Ok;
             return File.Exists(Path.Combine(Home, ".config", "autostart", "bettervnc-agent.desktop"));
         }
@@ -231,32 +177,6 @@ public static class Installer
                 }
             }
         }
-        else if (OperatingSystem.IsMacOS())
-        {
-            var plist = Path.Combine(Home, "Library", "LaunchAgents", LaunchLabel + ".plist");
-            if (!enable) { TryDelete(plist); return; }
-            var log = Path.Combine(Home, "Library", "Logs", "bettervnc-agent.log");
-            Directory.CreateDirectory(Path.GetDirectoryName(log)!);
-            var sb = new StringBuilder();
-            sb.AppendLine("<?xml version=\"1.0\" encoding=\"UTF-8\"?>");
-            sb.AppendLine("<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">");
-            sb.AppendLine("<plist version=\"1.0\"><dict>");
-            sb.AppendLine($"  <key>Label</key><string>{LaunchLabel}</string>");
-            sb.AppendLine("  <key>ProgramArguments</key><array>");
-            sb.AppendLine($"    <string>{Xml(exe)}</string><string>--config</string><string>{Xml(configPath)}</string>");
-            sb.AppendLine("  </array>");
-            sb.AppendLine("  <key>RunAtLoad</key><true/>");
-            sb.AppendLine("  <key>KeepAlive</key><true/>");
-            sb.AppendLine("  <key>ProcessType</key><string>Interactive</string>");
-            // Login Items in System Settings then shows the app's name and icon instead of the bare program.
-            if (MacAppBundle.EnclosingBundle(exe) != null)
-                sb.AppendLine($"  <key>AssociatedBundleIdentifiers</key><string>{MacAppBundle.BundleId}</string>");
-            sb.AppendLine($"  <key>StandardOutPath</key><string>{Xml(log)}</string>");
-            sb.AppendLine($"  <key>StandardErrorPath</key><string>{Xml(log)}</string>");
-            sb.AppendLine("</dict></plist>");
-            Directory.CreateDirectory(Path.GetDirectoryName(plist)!);
-            File.WriteAllText(plist, sb.ToString());
-        }
         else
         {
             if (ProcessRunner.Exists("systemctl"))
@@ -293,17 +213,10 @@ public static class Installer
         }
     }
 
-    /// <summary>Starts the installed agent the way it starts after a login (through launchd or systemd where those are used).</summary>
+    /// <summary>Starts the installed agent the way it starts after a login (through systemd where that is used).</summary>
     private static void StartNow(Layout l)
     {
-        if (OperatingSystem.IsMacOS())
-        {
-            var uid = ProcessRunner.Run("id", new[] { "-u" }).Text.Trim();
-            Quiet("launchctl", "bootout", $"gui/{uid}/{LaunchLabel}");
-            var r = ProcessRunner.Run("launchctl", new[] { "bootstrap", $"gui/{uid}", l.Autostart });
-            if (!r.Ok) Run("launchctl", "load", "-w", l.Autostart); // older macOS
-        }
-        else if (ProcessRunner.Exists("systemctl"))
+        if (!OperatingSystem.IsWindows() && ProcessRunner.Exists("systemctl"))
         {
             Run("systemctl", "--user", "restart", ServiceName);
         }
@@ -320,20 +233,21 @@ public static class Installer
     {
         if (OperatingSystem.IsWindows())
         {
-            foreach (var p in Process.GetProcessesByName("bettervnc-agent"))
-            {
-                if (p.Id == Environment.ProcessId) continue;
-                try { if (PathsEqual(p.MainModule?.FileName ?? "", l.Exe)) { p.Kill(); p.WaitForExit(3000); } } catch { }
-            }
-        }
-        else if (OperatingSystem.IsMacOS())
-        {
-            var uid = ProcessRunner.Run("id", new[] { "-u" }).Text.Trim();
-            Quiet("launchctl", "bootout", $"gui/{uid}/{LaunchLabel}");
+            StopCopiesOf(l.Exe);
         }
         else if (ProcessRunner.Exists("systemctl"))
         {
             Quiet("systemctl", "--user", "stop", ServiceName);
+        }
+    }
+
+    /// <summary>Ends every agent running from <paramref name="exe"/> except this process.</summary>
+    private static void StopCopiesOf(string exe)
+    {
+        foreach (var p in Process.GetProcessesByName("bettervnc-agent"))
+        {
+            if (p.Id == Environment.ProcessId) continue;
+            try { if (PathsEqual(p.MainModule?.FileName ?? "", exe)) { p.Kill(); p.WaitForExit(3000); } } catch { }
         }
     }
 
@@ -349,17 +263,17 @@ public static class Installer
                 return new Layout(dir, Path.Combine(dir, "bettervnc-agent.exe"), Path.Combine(dir, AgentConfig.FileName), "",
                     $"Run entry \"{TaskName}\" in HKEY_CURRENT_USER (at sign-in)");
             }
-            if (OperatingSystem.IsMacOS())
-            {
-                var dir = Path.Combine(Home, "Library", "Application Support", "BetterVNC");
-                var plist = Path.Combine(Home, "Library", "LaunchAgents", LaunchLabel + ".plist");
-                return new Layout(dir, MacAppBundle.ExecutablePath(Path.Combine(dir, MacAppBundle.Name)), Path.Combine(dir, AgentConfig.FileName), plist, $"LaunchAgent {plist}");
-            }
             var bin = Path.Combine(Home, ".local", "bin");
             var unit = Path.Combine(Home, ".config", "systemd", "user", ServiceName + ".service");
             return new Layout(bin, Path.Combine(bin, "bettervnc-agent"), Path.Combine(Home, ".config", AgentConfig.FileName), unit,
                 ProcessRunner.Exists("systemctl") ? $"systemd user service {unit}" : "~/.config/autostart/bettervnc-agent.desktop");
         }
+    }
+
+    private static int MacNotSupported()
+    {
+        Console.Error.WriteLine("On macOS the agent is BetterVNC Agent.app: build it with tools/BetterVnc.Agent.Mac/build.sh, or install the macOS package.");
+        return 2;
     }
 
     private static string Home => Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
@@ -383,15 +297,8 @@ public static class Installer
         try { if (path.Length > 0 && File.Exists(path)) File.Delete(path); } catch (Exception ex) { Console.WriteLine($"  could not delete {path}: {ex.Message}"); }
     }
 
-    private static void TryDeleteTree(string dir)
-    {
-        try { if (Directory.Exists(dir)) Directory.Delete(dir, recursive: true); } catch (Exception ex) { Console.WriteLine($"  could not delete {dir}: {ex.Message}"); }
-    }
-
     private static void TryDeleteDir(string dir)
     {
         try { if (Directory.Exists(dir) && !Directory.EnumerateFileSystemEntries(dir).Any()) Directory.Delete(dir); } catch { }
     }
-
-    private static string Xml(string s) => s.Replace("&", "&amp;").Replace("<", "&lt;").Replace(">", "&gt;");
 }

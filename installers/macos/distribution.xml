@@ -6,7 +6,7 @@
   <options customize="never" require-scripts="true" hostArchitectures="arm64,x86_64" rootVolumeOnly="true" />
   <domains enable_localSystem="true" />
   <allowed-os-versions>
-    <os-version min="12.0" />
+    <os-version min="12.3" />
   </allowed-os-versions>
   <choices-outline>
     <line choice="default">
@@ -17,5 +17,5 @@
   <choice id="com.bettervnc.agent" visible="false">
     <pkg-ref id="com.bettervnc.agent" />
   </choice>
-  <pkg-ref id="com.bettervnc.agent" version="@VERSION@" onConclusion="none">agent.pkg</pkg-ref>
+  <pkg-ref id="com.bettervnc.agent" version="@BUNDLE_VERSION@" onConclusion="none">agent.pkg</pkg-ref>
 </installer-gui-script>

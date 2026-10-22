@@ -1,0 +1,115 @@
+# Builds the native macOS agent (tools/BetterVnc.Agent.Mac) whenever it or the protocol changes, runs its tests, and
+# drives the built app with the C# agent's probe client: an independent implementation of the viewer's side of the
+# protocol, so a mismatch between the two shows up here. Compiler errors and the results show up as annotations. The
+# stream needs the Screen Recording permission, which a hosted runner may not give, so that step reports and does not
+# fail the job. A second job upgrades a runner from the v0.0.4 agent (the .NET one, from its release) with the package
+# built here and checks the migration (.github/scripts/mac-agent-upgrade.sh).
+name: macOS agent
+
+on:
+  # Every branch, so a pull request shows the result on its commits.
+  push:
+    paths:
+      - 'tools/BetterVnc.Agent.Mac/**'
+      - 'src/BetterVnc.Agent.Protocol/**'
+      - 'installers/macos/**'
+      - '.github/workflows/mac-agent.yml'
+      - '.github/scripts/mac-agent-upgrade.sh'
+  workflow_dispatch:
+
+env:
+  DOTNET_NOLOGO: true
+  DOTNET_CLI_TELEMETRY_OPTOUT: true
+
+jobs:
+  agent:
+    name: Build, test and drive on macOS
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # the tags, for the development version (git describe)
+      - name: Build the app (universal)
+        # Without --version: a development build, stamped from git describe (v0.0.4-12-g5e4e859 and the like).
+        run: |
+          set -o pipefail
+          swift --version
+          sh tools/BetterVnc.Agent.Mac/build.sh 2>&1 | tee build.log
+      - name: Report compiler messages
+        if: always()
+        run: |
+          [ -f build.log ] || exit 0
+          # file:line:col: error|warning: text  ->  workflow annotations
+          messages="$(sed -nE 's#^.*/(tools/BetterVnc\.Agent\.Mac/[^:]+):([0-9]+):([0-9]+): (error|warning): (.*)$#::\4 file=\1,line=\2,col=\3::\5#p' build.log | sort -u)"
+          if [ -n "$messages" ]; then echo "$messages"; fi
+          if ! grep -q 'Architectures in the fat file' build.log; then
+            echo "::error title=Build failed::$(tail -n 8 build.log | tr '\n' ' ')"
+          fi
+      - name: Unit tests
+        run: swift test --package-path tools/BetterVnc.Agent.Mac
+      - name: Package
+        run: |
+          ditto -c -k --keepParent "tools/BetterVnc.Agent.Mac/build/BetterVNC Agent.app" BetterVNC-Agent-macos.zip
+          sh installers/macos/build-pkg.sh "tools/BetterVnc.Agent.Mac/build/BetterVNC Agent.app" dist
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+      - name: Build the probe client (C#)
+        run: dotnet build tools/BetterVnc.Agent -c Release -f net10.0 -p:TargetFrameworks=net10.0 -o out/probe
+      - name: Drive the app with the probe
+        continue-on-error: true
+        run: |
+          set +e
+          agent="tools/BetterVnc.Agent.Mac/build/BetterVNC Agent.app/Contents/MacOS/bettervnc-agent"
+          probe="dotnet out/probe/bettervnc-agent.dll probe 127.0.0.1:5970 ci-smoke-test"
+          "$agent" --console --verbose --token ci-smoke-test --port 5970 --config "$RUNNER_TEMP/agent.json" > "$RUNNER_TEMP/agent.log" 2>&1 &
+          pid=$!
+          sleep 4
+          $probe info > "$RUNNER_TEMP/probe.log" 2>&1; info=$?
+          $probe set text "hello from the probe" >> "$RUNNER_TEMP/probe.log" 2>&1
+          got="$($probe get text)"
+          $probe video 4000 30 4 out/first-frame.h264 h264 > "$RUNNER_TEMP/probe-video.log" 2>&1; video=$?
+          # As a viewer whose picture area is 800x600 at the start and 400x300 halfway.
+          $probe video 4000 30 4 - h264 800x600 400x300 > "$RUNNER_TEMP/probe-area.log" 2>&1; area=$?
+          kill "$pid"
+          cat "$RUNNER_TEMP/agent.log" "$RUNNER_TEMP/probe.log" "$RUNNER_TEMP/probe-video.log" "$RUNNER_TEMP/probe-area.log"
+          if [ "$info" = 0 ] && [ "$got" = "hello from the probe" ]; then
+            echo "::notice title=Handshake and clipboard::$(head -n 3 "$RUNNER_TEMP/probe.log" | tr '\n' ' ')"
+          else
+            echo "::error title=Handshake or clipboard failed::info exit $info, clipboard '$got'"
+            exit 1
+          fi
+          summary="$(grep -hE 'Streaming|Total|stopped|Cannot|failed|Screen streaming|stream:' "$RUNNER_TEMP/agent.log" "$RUNNER_TEMP/probe-video.log" | tr '\n' ' ')"
+          if [ "$video" = 0 ]; then echo "::notice title=Stream::$summary"; else echo "::warning title=Stream (exit $video)::$summary"; fi
+          sizes="$(grep -hE 'Viewer area|Frame sizes' "$RUNNER_TEMP/probe-area.log" | tr '\n' ' ') $(grep -hE 'viewer area|Capture size' "$RUNNER_TEMP/agent.log" | tr '\n' ' ')"
+          if [ "$area" = 0 ]; then echo "::notice title=Stream at the viewer's size::$sizes"; else echo "::warning title=Stream at the viewer's size (exit $area)::$sizes"; fi
+          [ "$video" = 0 ] && video=$area
+          exit $video
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: mac-agent
+          path: |
+            BetterVNC-Agent-macos.zip
+            dist/*.pkg
+            out/first-frame.h264
+          if-no-files-found: ignore
+
+  upgrade:
+    name: Upgrade from v0.0.4 on macOS
+    needs: agent
+    runs-on: macos-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: mac-agent
+          path: new
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+      - name: Build the probe client (C#)
+        run: dotnet build tools/BetterVnc.Agent -c Release -f net10.0 -p:TargetFrameworks=net10.0 -o out/probe
+      - name: Install v0.0.4, then this build's package, and check
+        run: sh .github/scripts/mac-agent-upgrade.sh new/dist/*.pkg dotnet out/probe/bettervnc-agent.dll probe

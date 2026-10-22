@@ -241,19 +241,22 @@ windows never activated except for fullscreen:
   - The value in `profiles.json` is `keychain:` plus a reference to the item, not ciphertext, so deleting a profile
     must also delete its items.
   - A value without a prefix was saved on Windows: say so and ask for the password again.
-- **Clipboard:** the agent's `MacClipboard` works as is: `pbcopy`/`osascript`, polled once a second. If that delay
-  shows, write a native `NSPasteboard` version through `objc_msgSend`, as `Tray/MacStatusItem.cs` already does for the
-  menu bar.
+- **Clipboard:** `MacClipboard` in `src/BetterVnc.Platform` (the C# agent's until the Mac agent became a Swift app)
+  works as is: `pbcopy`/`osascript`, polled once a second. If that delay shows, write a native `NSPasteboard` version
+  through `objc_msgSend`, as the C# agent's `Tray/MacStatusItem.cs` did for the menu bar (in git history up to v0.0.4);
+  `tools/BetterVnc.Agent.Mac/Sources/AgentCore/MacClipboard.swift` shows which pasteboard types to read and write.
 - **Audio:** AudioQueue (AudioToolbox) through P/Invoke; it's small for fixed-format PCM.
 - **Keysyms:** `UCKeyTranslate` with the current input source, using a table from `PhysicalKey` to macOS key codes.
 - **System keys:** a `CGEventTap` while the session window is focused, so Cmd+Tab, Cmd+Space and Cmd+Q reach the
-  remote. This needs the Accessibility permission. Reuse the check and prompt in `tools/BetterVnc.Agent/MacPermissions.cs`.
+  remote. This needs the Accessibility permission. Reuse the check and prompt of the C# agent's `MacPermissions.cs` (git
+  history up to v0.0.4), or follow the Swift agent's `Permissions.swift`.
 - **Modifier mapping:** a Mac keyboard on a Windows or Linux remote needs a Cmd→Ctrl option. That's the mirror of
   `MacModifierMode`, which today maps a Windows keyboard onto a Mac remote.
 
 **Video: VideoToolbox, through a small Swift dylib.**
 
-- It sits beside `tools/BetterVnc.Agent.MacCapture` and is built by the same CI job.
+- It sits beside the Swift agent, `tools/BetterVnc.Agent.Mac` (whose `Video/VideoEncoder.swift` is the encoding side of
+  VideoToolbox), and is built by a macOS CI job like `mac-agent.yml`.
 - Its C API creates a decoder session and decodes Annex B. Pictures are then either presented into a CAMetalLayer view
   (hosted in a `NativeControlHost`) or handed back as IOSurfaces for `ICompositionGpuInterop`.
 - Software fallback: VideoToolbox falls back to software itself, and CPU NV12 into a `WriteableBitmap` works too.
@@ -262,8 +265,9 @@ windows never activated except for fullscreen:
 
 - `BetterVNC.app` for Apple silicon and Intel, with `CFBundleURLTypes` for `vnc`, an `.icns` icon, and a `.dmg` or
   `.pkg` from the macOS job in `release.yml`.
-- It's unsigned, like the agent. macOS ties the Accessibility grant to the code signature, so expect to grant it again
-  after updates. Reuse the approach in `MacAppBundle.cs`.
+- It's signed ad hoc, like the agent. macOS ties the Accessibility grant to the code signature, so expect to grant it
+  again after updates. Reuse the agent's `build.sh` (Info.plist with the version from the tag, icon, signing) and
+  `installers/macos/build-pkg.sh` (not relocatable, so it lands in /Applications).
 
 **Done when:** from a Mac, connecting to an Unraid VM and to another Mac works with clipboard, files, audio, the stream
 modes, and fullscreen with Cmd capture.
