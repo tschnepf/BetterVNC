@@ -24,6 +24,14 @@ public enum AgentMessageType {
     public static let stopVideo = "stopVideo"
     public static let videoFrame = "videoFrame"
     public static let videoStopped = "videoStopped"
+
+    // Newer than this agent's features (the Windows agent has them): control without VNC, the pointer's shape and the
+    // still-screen repair. This agent never announces input, cursor or repair, so a viewer sends none of these and
+    // gets none back; a startVideo asking for the cursor or repairs gets a plain stream.
+    public static let pointer = "pointer"
+    public static let key = "key"
+    public static let cursor = "cursor"
+    public static let videoRepair = "videoRepair"
 }
 
 /// Codec names used in `codecs` and `codec`.
@@ -51,6 +59,10 @@ public enum AgentErrorCode {
 public enum AgentFeature {
     public static let scroll = "scroll"
     public static let video = "video"
+    // Not announced by this agent (see AgentMessageType.pointer).
+    public static let input = "input"
+    public static let cursor = "cursor"
+    public static let repair = "repair"
 }
 
 /// Values of `phase` in a scroll message.
@@ -127,6 +139,12 @@ public struct AgentMessage: Codable, Equatable {
     public var timestamp: Int64?
     public var sequence: Int?
     public var keyframeRequest: Bool?
+    /// startVideo: the viewer would like the pointer's shape with the stream. videoStarted: whether the agent sends it
+    /// (never, here: left out).
+    public var cursor: Bool?
+    /// startVideo: the viewer would like repairs of the still screen. videoStarted: whether the agent sends them (never,
+    /// here: left out).
+    public var repair: Bool?
 
     public init(type: String, id: Int? = nil) {
         self.type = type

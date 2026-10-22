@@ -38,6 +38,11 @@ final class ServerTests: XCTestCase {
         super.tearDown()
     }
 
+    func logged(_ text: String) -> [String] {
+        logLock.lock(); defer { logLock.unlock() }
+        return logLines.filter { $0.contains(text) }
+    }
+
     func testTokenHandshakeAnnouncesFeaturesCodecsAndFormats() throws {
         try startServer()
         clipboard.formatsNow = [AgentFormat.text]
@@ -220,6 +225,49 @@ final class ServerTests: XCTestCase {
         video.end("display went to sleep")
         let stopped = try client.next(type: "videoStopped")
         XCTAssertEqual(stopped.header.message, "display went to sleep")
+    }
+
+    func testStreamAskingForTheCursorAndRepairsGetsAPlainOne() throws {
+        try startServer()
+        let client = try TestClient(port: server.port)
+        _ = try client.authenticate(secret: "test-token")
+        var start = AgentMessage(type: "startVideo", id: 1)
+        start.codecs = ["h264"]
+        start.cursor = true
+        start.repair = true
+        let started = try client.request(start).header
+        XCTAssertEqual(started.type, "videoStarted")
+        XCTAssertNil(started.cursor)
+        XCTAssertNil(started.repair)
+        video.emit(keyframe: true)
+        XCTAssertEqual(try client.next(type: "videoFrame").header.sequence, 1)
+    }
+
+    func testNewerViewerMessagesAreIgnoredOrRefusedWithoutEndingTheSession() throws {
+        try startServer()
+        let client = try TestClient(port: server.port)
+        let welcome = try client.authenticate(secret: "test-token")
+        // Control without VNC, the pointer's shape and repairs are the Windows agent's: not announced here.
+        for feature in [AgentFeature.input, AgentFeature.cursor, AgentFeature.repair] {
+            XCTAssertFalse((welcome.features ?? []).contains(feature), feature)
+        }
+
+        // A notification it does not know, as from a newer viewer, is ignored (and logged once); the session goes on.
+        var pointer = AgentMessage(type: AgentMessageType.pointer)
+        pointer.x = 10
+        pointer.y = 20
+        pointer.width = 100
+        pointer.height = 100
+        try client.stream.send(pointer)
+        try client.stream.send(pointer)
+        XCTAssertEqual(try client.request(AgentMessage(type: "ping", id: 7)).header.type, "pong")
+        XCTAssertEqual(logged("ignoring 'pointer' messages").count, 1)
+
+        // A request it does not know gets an error with its id, and the session goes on.
+        let reply = try client.request(AgentMessage(type: "somethingNew", id: 8)).header
+        XCTAssertEqual(reply.type, "error")
+        XCTAssertEqual(reply.message, "Unknown message type 'somethingNew'.")
+        XCTAssertEqual(try client.request(AgentMessage(type: "ping", id: 9)).header.type, "pong")
     }
 
     func testNothingCanAuthenticateIsRefused() {

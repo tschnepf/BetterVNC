@@ -29,6 +29,10 @@ final class ProtocolTests: XCTestCase {
         XCTAssertEqual(scroll.dx, -1.5)
         XCTAssertEqual(scroll.dy, 120)
         XCTAssertThrowsError(try AgentFraming.decodeHeader(Data("{nope".utf8)))
+        // What today's viewer adds when the agent announces the cursor and repairs (this one does not).
+        let flags = try AgentFraming.decodeHeader(Data(#"{"type":"startVideo","id":4,"codecs":["h264"],"cursor":true,"repair":true}"#.utf8))
+        XCTAssertEqual(flags.cursor, true)
+        XCTAssertEqual(flags.repair, true)
     }
 
     func testFrameLayoutIsTwoBigEndianLengthsThenHeaderThenPayload() throws {

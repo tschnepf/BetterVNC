@@ -423,9 +423,18 @@ final class Session {
             stopVideo()
             return AgentFrame(AgentMessage(type: AgentMessageType.ok, id: h.id))
         case AgentMessageType.clipboardChanged, AgentMessageType.pong: return nil // informational
-        default: return AgentFrame(.errorReply(h.id, "Unknown message type '\(h.type)'."))
+        default:
+            // From a newer viewer. A request (it carries an id) gets an error, so the viewer is not left waiting; a
+            // notification is ignored, the way viewers ignore what they do not know. An error without an id would end
+            // the viewer's connection.
+            if h.id != nil { return AgentFrame(.errorReply(h.id, "Unknown message type '\(h.type)'.")) }
+            if ignoredTypes.insert(h.type).inserted { log("\(peer): ignoring '\(h.type)' messages (unknown to this agent)") }
+            return nil
         }
     }
+
+    /// Notification types this session ignored; only read and written on the session's own thread.
+    private var ignoredTypes = Set<String>()
 
     // ---- video
 
