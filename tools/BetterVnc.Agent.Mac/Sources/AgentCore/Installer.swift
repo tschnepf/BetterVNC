@@ -30,12 +30,12 @@ public enum Installer {
          home.appendingPathComponent("Library/Application Support/BetterVNC/\(appName)").path]
     }
 
-    /// Where `install` sets the app up: where it already is when that is an Applications folder (the package puts it in
-    /// /Applications, and a second copy would be one too many), else `applicationsDir`.
+    /// Where `install` sets the app up: where it already is when that is one of the install locations in an Applications
+    /// folder (the package puts it in /Applications, and a second copy would be one too many), else `applicationsDir`.
+    /// A copy under another name ("BetterVNC Agent 2.app") is copied to the usual name like any other.
     static func destination(source: String, home: URL, applicationsDir: String) -> String {
         let source = URL(fileURLWithPath: source).standardizedFileURL.path
-        let folder = (source as NSString).deletingLastPathComponent
-        if folder == "/Applications" || folder == home.appendingPathComponent("Applications").path { return source }
+        if installLocations(home: home).prefix(2).contains(source) { return source }
         return applicationsDir + "/" + appName
     }
 

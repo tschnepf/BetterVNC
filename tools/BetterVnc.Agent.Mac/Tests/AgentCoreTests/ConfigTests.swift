@@ -124,8 +124,10 @@ final class ConfigTests: XCTestCase {
                        "/Applications/BetterVNC Agent.app")
         XCTAssertEqual(Installer.destination(source: "/Users/tim/Applications/BetterVNC Agent.app", home: home, applicationsDir: "/Applications"),
                        "/Users/tim/Applications/BetterVNC Agent.app")
-        // From a build folder or a download it is copied.
+        // From a build folder or a download it is copied, and so is a copy under another name.
         XCTAssertEqual(Installer.destination(source: "/Users/tim/Downloads/BetterVNC Agent.app", home: home, applicationsDir: "/Applications"),
+                       "/Applications/BetterVNC Agent.app")
+        XCTAssertEqual(Installer.destination(source: "/Applications/BetterVNC Agent 2.app", home: home, applicationsDir: "/Applications"),
                        "/Applications/BetterVNC Agent.app")
         // Every other one of these goes on install, the C# agent's bundle (v0.0.4) included.
         XCTAssertEqual(Installer.installLocations(home: home), [

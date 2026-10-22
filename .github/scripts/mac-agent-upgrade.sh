@@ -66,8 +66,9 @@ check "no second copy in ~/Applications" test ! -e "$HOME/Applications/BetterVNC
 check "the LaunchAgent starts /Applications/BetterVNC Agent.app" test "$(plutil -extract ProgramArguments.0 raw "$plist" 2>/dev/null)" = "$exe"
 check "the LaunchAgent uses the old config" test "$(plutil -extract ProgramArguments.2 raw "$plist" 2>/dev/null)" = "$config"
 check "the LaunchAgent restarts the agent only after a crash" test "$(plutil -extract KeepAlive.SuccessfulExit raw "$plist" 2>/dev/null)" = "false"
-check "the config kept the token" grep -q "\"token\": *\"$token\"" "$config"
-check "the config kept the paired viewer" grep -q '"id": *"ci-viewer"' "$config"
+# plutil reads the JSON, whichever way it is spaced (.NET writes "token": "…", Swift "token" : "…").
+check "the config kept the token" test "$(plutil -extract token raw "$config" 2>/dev/null)" = "$token"
+check "the config kept the paired viewer" test "$(plutil -extract viewers.0.id raw "$config" 2>/dev/null)" = "ci-viewer"
 check "the v0.0.4 package's agent is gone" test ! -e /usr/local/libexec/bettervnc-agent/arm64 -a ! -e /usr/local/libexec/bettervnc-agent/x64
 check "the uninstall script is in place" test -x /usr/local/libexec/bettervnc-agent/uninstall.sh
 check "/usr/local/bin/bettervnc-agent is the new agent" test "$(readlink /usr/local/bin/bettervnc-agent)" = "$exe"
@@ -85,7 +86,7 @@ else
 fi
 
 echo "--- config"
-sed 's/"key": "[^"]*"/"key": "…"/' "$config"
+sed -E 's/"key" *: *"[^"]*"/"key": "…"/' "$config"
 echo "--- agent log"
 tail -n 30 "$support/bettervnc-agent.log" 2>/dev/null
 tail -n 30 "$HOME/Library/Logs/bettervnc-agent.log" 2>/dev/null
