@@ -42,12 +42,22 @@ installers and portable builds; nothing else needs to be installed.
 |---|---|---|
 | BetterVNC viewer (Windows x64) | `BetterVNC-<version>-setup.exe` | Installs to Program Files (or just for you), Start menu entry, optional desktop shortcut and `vnc://` link handler, uninstaller in Settings. Run a newer one to upgrade. |
 | Guest agent, Windows VM | `bettervnc-agent-<version>-setup.exe` | Run inside the VM as the user who will use it: installs to `%LOCALAPPDATA%\Programs\BetterVNC Agent`, registers the start-at-sign-in task, adds the firewall rule (when elevated) and starts the tray icon. Upgrades keep the config and pairings; uninstall from Settings. |
-| Guest agent, Mac | `bettervnc-agent-<version>-macos.pkg` | One package for Apple silicon and Intel: installs **BetterVNC Agent** in Applications, then sets it up for the signed-in user (menu bar item, LaunchAgent) and starts it. Remove with `sudo /usr/local/libexec/bettervnc-agent/uninstall.sh`. |
+| Guest agent, Mac | `bettervnc-agent-<version>-macos.pkg` | One package for Apple silicon and Intel (macOS 12.3 or later): installs **BetterVNC Agent**, a native app, in Applications, then sets it up for the signed-in user (menu bar item, LaunchAgent) and starts it. Run a newer one to upgrade, including over 0.0.4 (below). Remove with `sudo /usr/local/libexec/bettervnc-agent/uninstall.sh`. |
 
 Portable builds sit next to them: `BetterVNC-<version>-win-x64.zip` (unzip, run `BetterVNC.exe`),
 `bettervnc-agent-<version>-win-x64.zip` (unzip, run `bettervnc-agent install`),
 `bettervnc-agent-<version>-linux-x64.tar.gz` (unpack, run `sh install.sh`) and
-`BetterVNC-Agent-<version>-macos.zip` (unzip, run `"BetterVNC Agent.app/Contents/MacOS/bettervnc-agent" install`).
+`BetterVNC-Agent-<version>-macos.zip` (unzip, run `"BetterVNC Agent.app/Contents/MacOS/bettervnc-agent" install`,
+which copies the app to Applications; then delete the unzipped copy).
+
+**Upgrading a Mac from 0.0.4.** Up to 0.0.4 the Mac agent was the .NET agent, which built its own
+`BetterVNC Agent.app` in `~/Library/Application Support/BetterVNC`. It is now a native app in
+`/Applications`. The package (or `install` from the zip) stops the old agent, deletes its app (and any
+other installed copy, so exactly one is left), points the LaunchAgent `com.bettervnc.agent` at
+`/Applications/BetterVNC Agent.app` and keeps `bettervnc-agent.json` next to where the old app was, so the
+pairings and the token carry over and viewers connect without pairing again. To macOS it is a new program:
+grant it Accessibility (smooth scrolling) and Screen Recording (the Stream picture modes) again; its menu
+bar item's **Permissions…** walks through both.
 
 `BetterVNC-<version>-preview-win-x64.zip` is a preview of the new cross-platform viewer, built with Avalonia
 (see [docs/CROSS-PLATFORM-VIEWER.md](docs/CROSS-PLATFORM-VIEWER.md)). Unzip it to a folder of its own and run
@@ -57,8 +67,8 @@ The installer still installs the WPF viewer.
 The builds are not code-signed, so Windows SmartScreen shows "Windows protected your PC" the first
 time (More info, Run anyway) and macOS asks you to right-click the package and choose Open, or to
 allow it under Privacy & Security. `SHA256SUMS.txt` on the release lists the checksums. Releases are
-produced by `.github/workflows/release.yml` whenever a `v*` tag is pushed, with the assembly versions
-taken from the tag; the installer sources are in `installers/`.
+produced by `.github/workflows/release.yml` whenever a `v*` tag is pushed, with every version (the
+assemblies', the Mac app's and the packages') taken from the tag; the installer sources are in `installers/`.
 
 ## Building
 
@@ -97,7 +107,7 @@ release workflow runs every test executable the same way, and the others are bui
 
 | Project | Covers | Target |
 |---|---|---|
-| `tests/BetterVnc.Agent.Tests` | agent protocol, pairing, scrolling, video channel, Mac helper reader | `net10.0` |
+| `tests/BetterVnc.Agent.Tests` | agent protocol, pairing, scrolling, input, video channel and repairs, single-instance lock | `net10.0` |
 | `tests/BetterVnc.Media.Tests` | pixel conversion, Annex B, dirty regions, pacing, video layout | `net10.0` |
 | `tests/BetterVnc.Media.Windows.Tests` | Media Foundation encode and decode, Desktop Duplication, DXVA and the swap chain | `net10.0-windows` |
 | `tests/BetterVnc.Viewer.Core.Tests` | the session controller and stream player, with fakes and no GUI | `net10.0` |
@@ -419,12 +429,15 @@ The Mac agent builds on a Mac with Xcode:
 
 ```bash
 sh tools/BetterVnc.Agent.Mac/build.sh [--version 1.2.3] [--sign "Apple Development"]
-sh installers/macos/build-pkg.sh 1.2.3 "tools/BetterVnc.Agent.Mac/build/BetterVNC Agent.app" dist
+sh installers/macos/build-pkg.sh "tools/BetterVnc.Agent.Mac/build/BetterVNC Agent.app" dist
 ```
 
 The first makes `tools/BetterVnc.Agent.Mac/build/BetterVNC Agent.app`, one universal binary for Apple
 silicon and Intel, signed (ad hoc without `--sign`; a certificate gets the hardened runtime, as
-notarization needs). The second wraps it in the `.pkg`. `swift test --package-path tools/BetterVnc.Agent.Mac`
+notarization needs). The release workflow passes the tag as `--version`; without it the app is a
+development build and its version says so, as `git describe` puts it (`0.0.4-12-g5e4e859`: twelve
+commits after v0.0.4), never a number that could pass for a release. The second wraps the app in the
+`.pkg`, which takes its version from the app. `swift test --package-path tools/BetterVnc.Agent.Mac`
 runs its tests. The release workflow does all of it on its macOS runner.
 
 ### Installing

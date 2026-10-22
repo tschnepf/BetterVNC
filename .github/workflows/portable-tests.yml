@@ -9,7 +9,7 @@ on:
     paths:
       - 'src/**'
       - 'tests/**'
-      # The agent tests compile some of the agent's own files (the Mac capture helper's reader, the app bundle).
+      # The agent tests compile one of the agent's own files (the single-instance lock).
       - 'tools/BetterVnc.Agent/**'
       - '.github/workflows/portable-tests.yml'
       - '.github/scripts/xunit-annotations.awk'
