@@ -4,5 +4,7 @@ The agent gives the BetterVNC viewer on your Windows PC a second channel next to
 
 It installs BetterVNC Agent in Applications and sets it up for the account that is signed in right now: a menu bar item that starts at login, listening on TCP port 5970. Viewers are let in by pairing (a dialog on this screen asks you to Allow each one) or with a token from the agent's settings.
 
+An agent from BetterVNC 0.0.4 or earlier is replaced: its app goes, its settings, pairings and token stay. macOS asks again for the agent's permissions (see the end of this installer).
+
 To uninstall later, open Terminal and run:
   sudo /usr/local/libexec/bettervnc-agent/uninstall.sh

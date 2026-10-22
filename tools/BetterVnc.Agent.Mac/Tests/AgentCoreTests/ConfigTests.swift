@@ -116,4 +116,22 @@ final class ConfigTests: XCTestCase {
         XCTAssertTrue(plist.contains("<key>AssociatedBundleIdentifiers</key><string>com.bettervnc.agent</string>"))
         XCTAssertNoThrow(try PropertyListSerialization.propertyList(from: Data(plist.utf8), format: nil))
     }
+
+    func testInstallLeavesOneCopyAndKeepsAnAppInApplicationsWhereItIs() {
+        let home = URL(fileURLWithPath: "/Users/tim", isDirectory: true)
+        // The package put it in /Applications; a user who cannot write there must not get a second copy in ~/Applications.
+        XCTAssertEqual(Installer.destination(source: "/Applications/BetterVNC Agent.app", home: home, applicationsDir: "/Users/tim/Applications"),
+                       "/Applications/BetterVNC Agent.app")
+        XCTAssertEqual(Installer.destination(source: "/Users/tim/Applications/BetterVNC Agent.app", home: home, applicationsDir: "/Applications"),
+                       "/Users/tim/Applications/BetterVNC Agent.app")
+        // From a build folder or a download it is copied.
+        XCTAssertEqual(Installer.destination(source: "/Users/tim/Downloads/BetterVNC Agent.app", home: home, applicationsDir: "/Applications"),
+                       "/Applications/BetterVNC Agent.app")
+        // Every other one of these goes on install, the C# agent's bundle (v0.0.4) included.
+        XCTAssertEqual(Installer.installLocations(home: home), [
+            "/Applications/BetterVNC Agent.app",
+            "/Users/tim/Applications/BetterVNC Agent.app",
+            "/Users/tim/Library/Application Support/BetterVNC/BetterVNC Agent.app",
+        ])
+    }
 }

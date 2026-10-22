@@ -17,5 +17,5 @@
   <choice id="com.bettervnc.agent" visible="false">
     <pkg-ref id="com.bettervnc.agent" />
   </choice>
-  <pkg-ref id="com.bettervnc.agent" version="@VERSION@" onConclusion="none">agent.pkg</pkg-ref>
+  <pkg-ref id="com.bettervnc.agent" version="@BUNDLE_VERSION@" onConclusion="none">agent.pkg</pkg-ref>
 </installer-gui-script>

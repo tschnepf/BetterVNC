@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<!-- Info.plist of BetterVNC Agent.app; build.sh fills in the version. -->
+<!-- Info.plist of BetterVNC Agent.app; build.sh fills in the versions (from the release tag, or git describe). -->
 <plist version="1.0">
 <dict>
   <key>CFBundleIdentifier</key><string>com.bettervnc.agent</string>
@@ -11,7 +11,7 @@
   <key>CFBundlePackageType</key><string>APPL</string>
   <key>CFBundleInfoDictionaryVersion</key><string>6.0</string>
   <key>CFBundleShortVersionString</key><string>@VERSION@</string>
-  <key>CFBundleVersion</key><string>@VERSION@</string>
+  <key>CFBundleVersion</key><string>@BUNDLE_VERSION@</string>
   <key>LSMinimumSystemVersion</key><string>12.3</string>
   <key>LSUIElement</key><true/>
   <key>NSHighResolutionCapable</key><true/>

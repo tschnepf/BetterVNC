@@ -7,7 +7,7 @@ app="/Applications/BetterVNC Agent.app"
 user="$(stat -f %Su /dev/console 2>/dev/null || true)"
 if [ -n "$user" ] && [ "$user" != "root" ] && [ -x "$app/Contents/MacOS/bettervnc-agent" ]; then
   uid="$(id -u "$user")"
-  launchctl asuser "$uid" sudo -u "$user" "$app/Contents/MacOS/bettervnc-agent" uninstall || true
+  launchctl asuser "$uid" sudo -H -u "$user" "$app/Contents/MacOS/bettervnc-agent" uninstall || true
 fi
 rm -rf "$app"
 rm -f /usr/local/bin/bettervnc-agent

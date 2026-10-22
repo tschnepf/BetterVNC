@@ -4,6 +4,10 @@
 #
 #   sh tools/BetterVnc.Agent.Mac/build.sh [--version 1.2.3] [--sign <identity>] [--out <folder>]
 #
+# Version: --version (release.yml passes the tag's), else BETTERVNC_VERSION. Without either it is a development build
+# and says so: the last release tag, the commits since and the commit, as git describe gives them (0.0.4-12-g5e4e859,
+# with -dirty for local changes), never a number of its own that could pass for a release.
+#
 # The app lands in tools/BetterVnc.Agent.Mac/build/ unless --out says otherwise. Signing: --sign, else the
 # BETTERVNC_CODESIGN_IDENTITY variable, else ad hoc. A certificate ("Apple Development", "Developer ID Application: …",
 # any name or hash from 'security find-identity -v -p codesigning') keeps the privacy permissions across rebuilds; with
@@ -14,7 +18,7 @@ set -eu
 
 here="$(cd "$(dirname "$0")" && pwd)"
 repo="$(cd "$here/../.." && pwd)"
-version="${BETTERVNC_VERSION:-0.0.5}"
+version="${BETTERVNC_VERSION:-}"
 identity="${BETTERVNC_CODESIGN_IDENTITY:--}"
 out="$here/build"
 while [ $# -gt 0 ]; do
@@ -26,6 +30,22 @@ while [ $# -gt 0 ]; do
   esac
 done
 
+if [ -z "$version" ]; then
+  described="$(git -C "$repo" describe --tags --match 'v[0-9]*' --long --dirty 2>/dev/null || true)"
+  if [ -n "$described" ]; then
+    version="${described#v}"
+  else
+    # No tags (a shallow clone): only the commit is known.
+    version="0.0.0-dev-g$(git -C "$repo" rev-parse --short HEAD 2>/dev/null || echo unknown)"
+  fi
+fi
+case "$version" in
+  [0-9]*) ;;
+  *) echo "--version must start with a number, such as 1.2.3 (got '$version')" >&2; exit 2 ;;
+esac
+# CFBundleShortVersionString is the version as given; CFBundleVersion, which macOS compares, takes up to three numbers.
+bundle_version="$(printf '%s\n' "$version" | sed -E 's/^([0-9]+(\.[0-9]+){0,2}).*/\1/')"
+
 swift build --package-path "$here" -c release --arch arm64 --arch x86_64
 bin="$(swift build --package-path "$here" -c release --arch arm64 --arch x86_64 --show-bin-path)/bettervnc-agent"
 
@@ -33,7 +53,7 @@ app="$out/BetterVNC Agent.app"
 rm -rf "$app"
 mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
 cp "$bin" "$app/Contents/MacOS/bettervnc-agent"
-sed "s/@VERSION@/$version/g" "$here/Info.plist" > "$app/Contents/Info.plist"
+sed -e "s/@VERSION@/$version/g" -e "s/@BUNDLE_VERSION@/$bundle_version/g" "$here/Info.plist" > "$app/Contents/Info.plist"
 
 # The icon, from the viewer's 256-pixel PNG.
 work="$(mktemp -d)"
@@ -61,4 +81,4 @@ fi
 codesign --verify --strict "$app"
 lipo -info "$app/Contents/MacOS/bettervnc-agent"
 codesign -d -r- "$app" 2>&1 | sed -n "s/^#* *designated => /designated requirement: /p"
-echo "$app ($version)"
+echo "$app (version $version, bundle version $bundle_version)"

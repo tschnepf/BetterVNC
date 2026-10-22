@@ -2,8 +2,9 @@
 #
 #   git tag v0.0.1 && git push origin v0.0.1
 #
-# The viewer and the Windows agent are built on Windows (the tests need it), the Linux and macOS agents on their own
-# runners so the executables keep their permission bits inside the tarballs. Assembly versions come from the tag.
+# The viewer and the Windows agent are built on Windows (the tests need it), the Linux agent on Linux so the executable keeps
+# its permission bits inside the tarball, and the macOS agent (BetterVNC Agent.app, Swift) on macOS. Every version comes
+# from the tag: the assemblies', the app's (CFBundleShortVersionString, CFBundleVersion) and the package's.
 name: Release
 
 on:
@@ -121,13 +122,16 @@ jobs:
         run: echo "VERSION=${GITHUB_REF_NAME#v}" >> "$GITHUB_ENV"
       - name: Build BetterVNC Agent.app (universal)
         # Signed ad hoc unless a signing identity is set up on the runner (BETTERVNC_CODESIGN_IDENTITY).
-        run: sh tools/BetterVnc.Agent.Mac/build.sh --version "$VERSION"
+        run: |
+          sh tools/BetterVnc.Agent.Mac/build.sh --version "$VERSION"
+          stamped="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "tools/BetterVnc.Agent.Mac/build/BetterVNC Agent.app/Contents/Info.plist")"
+          if [ "$stamped" != "$VERSION" ]; then echo "::error::The app says $stamped, the tag $VERSION"; exit 1; fi
       - name: Tests
         run: swift test --package-path tools/BetterVnc.Agent.Mac
       - name: Package (.pkg and .zip)
         run: |
           mkdir -p dist
-          sh installers/macos/build-pkg.sh "$VERSION" "tools/BetterVnc.Agent.Mac/build/BetterVNC Agent.app" dist
+          sh installers/macos/build-pkg.sh "tools/BetterVnc.Agent.Mac/build/BetterVNC Agent.app" dist
           ditto -c -k --keepParent "tools/BetterVnc.Agent.Mac/build/BetterVNC Agent.app" "dist/BetterVNC-Agent-$VERSION-macos.zip"
       - name: List
         run: ls -l dist
@@ -160,7 +164,7 @@ jobs:
           |---|---|---|
           | BetterVNC viewer (Windows x64) | \`BetterVNC-$v-setup.exe\` | Installs to Program Files (or just for you), Start menu entry, optional desktop shortcut and \`vnc://\` link handler, uninstaller in Settings. Run it again to upgrade. |
           | Guest agent, Windows VM | \`bettervnc-agent-$v-setup.exe\` | Run inside the VM as the user who will use it: installs the agent, registers it to start at sign-in, adds the firewall rule and starts it (tray icon). Existing pairings are kept on upgrade; uninstall from Settings. |
-          | Guest agent, Mac | \`bettervnc-agent-$v-macos.pkg\` | One package for Apple silicon and Intel: installs BetterVNC Agent in Applications, sets it up for the signed-in user (menu bar item, starts at login) and starts it. Remove with \`sudo /usr/local/libexec/bettervnc-agent/uninstall.sh\`. |
+          | Guest agent, Mac | \`bettervnc-agent-$v-macos.pkg\` | One package for Apple silicon and Intel (macOS 12.3 or later): installs BetterVNC Agent, a native app, in Applications, sets it up for the signed-in user (menu bar item, starts at login) and starts it. Over 0.0.4 it replaces the old agent and keeps its pairings and token. Remove with \`sudo /usr/local/libexec/bettervnc-agent/uninstall.sh\`. |
 
           ## Portable builds
 
@@ -170,9 +174,11 @@ jobs:
           | BetterVNC viewer preview (Windows x64) | \`BetterVNC-$v-preview-win-x64.zip\` | The new cross-platform (Avalonia) viewer, for trying side by side: unzip to its own folder and run \`BetterVNC.exe\`. It uses the same connections as the installed viewer. |
           | Guest agent, Windows VM | \`bettervnc-agent-$v-win-x64.zip\` | Unzip, then run \`bettervnc-agent install\` in that folder. |
           | Guest agent, Linux VM | \`bettervnc-agent-$v-linux-x64.tar.gz\` | \`tar xzf\`, then \`sh install.sh\` in the unpacked folder as the desktop user. |
-          | Guest agent, Mac | \`BetterVNC-Agent-$v-macos.zip\` (Apple silicon and Intel) | Unzip, then run \`"BetterVNC Agent.app/Contents/MacOS/bettervnc-agent" install\` in Terminal. |
+          | Guest agent, Mac | \`BetterVNC-Agent-$v-macos.zip\` (Apple silicon and Intel) | Unzip, then run \`"BetterVNC Agent.app/Contents/MacOS/bettervnc-agent" install\` in Terminal: it copies the app to Applications and sets it up as the package does. Delete the unzipped copy afterwards. |
 
           The builds are not code-signed. Windows SmartScreen shows "Windows protected your PC" the first time (More info, Run anyway); on macOS, right-click the .pkg and choose Open, or allow it under System Settings, Privacy & Security. \`SHA256SUMS.txt\` lists the checksums.
+
+          On a Mac that had 0.0.4: the agent is now a native app (it was .NET), so macOS asks again for Accessibility (smooth scrolling) and Screen Recording (the Stream picture modes) for BetterVNC Agent; its menu bar item's Permissions… walks through both.
 
           See the README for connecting to Unraid VMs and Macs, pairing the agent, and the picture modes.
           EOF

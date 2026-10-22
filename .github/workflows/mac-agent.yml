@@ -2,7 +2,8 @@
 # drives the built app with the C# agent's probe client: an independent implementation of the viewer's side of the
 # protocol, so a mismatch between the two shows up here. Compiler errors and the results show up as annotations. The
 # stream needs the Screen Recording permission, which a hosted runner may not give, so that step reports and does not
-# fail the job.
+# fail the job. A second job upgrades a runner from the v0.0.4 agent (the .NET one, from its release) with the package
+# built here and checks the migration (.github/scripts/mac-agent-upgrade.sh).
 name: macOS agent
 
 on:
@@ -13,6 +14,7 @@ on:
       - 'src/BetterVnc.Agent.Protocol/**'
       - 'installers/macos/**'
       - '.github/workflows/mac-agent.yml'
+      - '.github/scripts/mac-agent-upgrade.sh'
   workflow_dispatch:
 
 env:
@@ -25,11 +27,14 @@ jobs:
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # the tags, for the development version (git describe)
       - name: Build the app (universal)
+        # Without --version: a development build, stamped from git describe (v0.0.4-12-g5e4e859 and the like).
         run: |
           set -o pipefail
           swift --version
-          sh tools/BetterVnc.Agent.Mac/build.sh --version 0.0.0 2>&1 | tee build.log
+          sh tools/BetterVnc.Agent.Mac/build.sh 2>&1 | tee build.log
       - name: Report compiler messages
         if: always()
         run: |
@@ -45,7 +50,7 @@ jobs:
       - name: Package
         run: |
           ditto -c -k --keepParent "tools/BetterVnc.Agent.Mac/build/BetterVNC Agent.app" BetterVNC-Agent-macos.zip
-          sh installers/macos/build-pkg.sh 0.0.0 "tools/BetterVnc.Agent.Mac/build/BetterVNC Agent.app" dist
+          sh installers/macos/build-pkg.sh "tools/BetterVnc.Agent.Mac/build/BetterVNC Agent.app" dist
       - uses: actions/setup-dotnet@v4
         with:
           dotnet-version: 10.0.x
@@ -89,3 +94,22 @@ jobs:
             dist/*.pkg
             out/first-frame.h264
           if-no-files-found: ignore
+
+  upgrade:
+    name: Upgrade from v0.0.4 on macOS
+    needs: agent
+    runs-on: macos-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: mac-agent
+          path: new
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+      - name: Build the probe client (C#)
+        run: dotnet build tools/BetterVnc.Agent -c Release -f net10.0 -p:TargetFrameworks=net10.0 -o out/probe
+      - name: Install v0.0.4, then this build's package, and check
+        run: sh .github/scripts/mac-agent-upgrade.sh new/dist/*.pkg dotnet out/probe/bettervnc-agent.dll probe
